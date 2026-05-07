@@ -1,92 +1,175 @@
 # MTS Galaxy Lab
 
-A zero-install browser workbench for exploring galaxy rotation curves, model overlays, route diagnostics, and custom support-law experiments.
+A zero-install browser workbench for exploring galaxy rotation curves, transport-response models, framework comparisons, and reproducible support-law experiments.
 
-This repo is designed to be opened, inspected, modified, and tested without any build system. Open `index.html` in a browser and the lab is ready to use.
+MTS Galaxy Lab is designed as a local-first scientific sandbox:
 
-![MTS Galaxy Lab preview](qa-framework-observed-v2.png)
+* open a single HTML file,
+* load real SPARC/ATLAS3D galaxies,
+* test your own equations,
+* compare frameworks visually,
+* export reproducible experiment capsules,
+* and run benchmark suites without needing Python, Node, servers, or cloud infrastructure.
 
-## What the tool does
+This is not just a static plot viewer.
+It is an interactive galaxy-analysis environment built for experimentation.
 
-MTS Galaxy Lab is not only an MTS demo. It is a small static research lab for comparing rotation-curve behaviour across synthetic galaxies, bundled LTG samples, bundled ETG samples, and user-supplied ROTMOD text.
+---
 
-You can use it to:
+# Why This Exists
 
-- build a toy galaxy with live sliders for disk, gas, bulge, radius, gas fraction, and transport exponent;
-- browse 175 bundled LTG/SPARC-style rotation-curve samples;
-- browse 16 bundled ETG/ATLAS3D-style samples with high-resolution disk and bulge components;
-- import or paste your own ROTMOD-style `.dat` text;
-- compare baryonic, baseline, and custom support-law curves on the same plot;
-- batch-score a custom formula across all bundled LTG samples;
-- export CSV, JSON, SVG, and standalone diagnostic HTML sheets for audit/review.
+Most galaxy-framework experimentation is locked behind:
 
-The locked MTS calculation is included as the baseline model and as one preset in the framework test rig. Other formulae can be entered and tested against it without changing the source code.
+* custom pipelines,
+* notebooks,
+* plotting scripts,
+* hidden preprocessing,
+* or large codebases.
 
-## Quick start
+MTS Galaxy Lab tries to lower that barrier.
 
-Download or clone the repo, then open:
+The goal is simple:
+
+> Bring your own maths.
+
+You do not need to build a plotting engine or a SPARC processing pipeline just to test an idea.
+
+The lab lets users:
+
+* load real galaxies,
+* compare support laws,
+* inspect residual structure,
+* classify route behaviour,
+* stress-test frameworks,
+* and export reproducible evidence packs.
+
+Everything runs locally in the browser.
+
+---
+
+# Quick Start
+
+Open:
 
 ```text
 index.html
 ```
 
-That is all. The app is plain HTML, CSS, and JavaScript.
+That is it.
 
-No Node. No npm. No Python. No local server required.
+The app is static HTML/CSS/JavaScript and does not require:
 
-For GitHub Pages, publish the repository root and set `index.html` as the entry page.
+```text
+Node
+Python
+npm
+local servers
+internet access
+```
 
-## Main modes
+---
 
-### 1. Synthetic
+# Main Modes
 
-Interactive toy-galaxy mode. Use this when you want to see how the model responds as galaxy structure changes.
+## Synthetic Mode
 
-Controls include:
+Build controlled toy galaxies using live sliders:
 
-- disk scale length `h`;
-- outer radius `r_out`;
-- disk, gas, and bulge velocity-load sliders;
-- outer gas fraction;
-- transport exponent `q`;
-- particle animation speed;
-- optional transport-support-only view.
+* disk scale length
+* outer radius
+* gas load
+* bulge load
+* gas fraction
+* transport exponent q
+* particle speed
+* support-only mode
 
-### 2. LTG
+Synthetic mode supports:
 
-Observed late-type-galaxy browser mode.
+* deterministic galaxy forging
+* time evolution tracks
+* morphology presets
+* route-flip testing
+* residual visualisation
+* parameter sweeps
 
-The app loads 175 bundled ROTMOD-style samples from `data/samples.js`. You can search, filter, sort, and hunt for specific route classes or diagnostic behaviour.
+Useful for:
 
-LTG tools include:
+* stress testing frameworks
+* intuition building
+* controlled experiments
+* visual demonstrations
 
-- sample selector;
-- ROTMOD `.dat` import;
-- pasted ROTMOD text loader;
-- route summary chips;
-- searchable galaxy browser;
-- sort by RMSE, `u_out`, Priority-L MAE, `x_cross`, or name;
-- quick filters for Late-load, CDC, Single, Infeasible, Worst, and Best cases.
+---
 
-### 3. ETG
+## LTG Mode
 
-Early-type-galaxy diagnostic mode.
+Loads all 175 bundled SPARC late-type galaxies.
 
-The app loads 16 bundled ETG samples from `data/etg-samples.js`, including high-resolution disk and bulge component tables. ETG mode shows Stage-4 style outer-chain diagnostics and residual markers.
+Supports:
+
+* live ROTMOD overlays
+* pasted/imported `.dat` files
+* SPARC browser
+* route diagnostics
+* framework comparisons
+* benchmark scoring
+* residual analysis
+* evidence export
+
+The SPARC Browser supports:
+
+```text
+search by galaxy name
+filter by route class
+sort by RMSE, u_out, Priority L MAE, x_cross, or name
+quick hunts:
+  - Late-load
+  - CDC
+  - Single-crossing
+  - Infeasible
+  - Worst-fit
+  - Best-fit
+```
+
+---
+
+## ETG Mode
+
+Loads all 16 bundled ATLAS3D ETGs from `Rotmod_ETG.zip`.
+
+Includes:
+
+* high-resolution disk profiles
+* Stage-4 diagnostics
+* R80 / R90 analysis
+* curvature laws
+* residual tracking
+* outer-chain diagnostics
+
+---
+
+# Core Features
 
 ## Framework Test Rig
 
-The Framework Test Rig lets you test alternate support laws without overwriting the locked baseline.
+Test alternate support laws without modifying the locked MTS baseline.
 
-You can select a preset or type a restricted math expression for the support contribution `v2`, measured in `(km/s)^2`. The app then computes:
+Enter a custom support-law expression in `(km/s)^2` and run it against:
 
-```text
-V_custom = sqrt(V_bar^2 + v2)
-```
+* the active galaxy,
+* or all 175 LTGs.
 
-and compares it against the active observed or synthetic curve.
+The app computes:
 
-Bundled presets:
+* RMSE
+* outer RMSE
+* residual structure
+* route preservation
+* invalid point counts
+* benchmark deltas
+
+Bundled presets include:
 
 ```text
 MTS baseline
@@ -96,154 +179,467 @@ Outer gate support
 Observed residual check
 ```
 
-You can also batch-score the current formula across all 175 LTG samples and export the result as CSV.
+---
 
-### Formula variables
+## Comparative Mode
 
-The formula editor accepts these variables:
+Run two competing support laws side-by-side.
+
+The interface reports:
 
 ```text
-r, x, h, rOut, fGas, fGasOut, leff, memory, q
- gamma0, rMax, mlDisk, mlBulge
-vGas, vDisk, vBulge, vBar, vObs, uObs
+A RMSE
+B RMSE
+winner
+A minus B outer RMSE
+route preservation state
+```
+
+Plots can overlay:
+
+* baseline
+* framework A
+* framework B
+* residual differences
+
+Useful for:
+
+* MOND comparisons
+* custom support laws
+* transport-law tuning
+* framework tournaments
+
+---
+
+## Framework Tournament
+
+Queue many frameworks at once:
+
+```text
+Name = support_law_v2
+```
+
+The tournament system ranks frameworks by:
+
+```text
+mean RMSE
+median delta vs MTS
+wins vs MTS
+route preservation rate
+mean outer RMSE
+invalid point count
+```
+
+Exportable as CSV.
+
+---
+
+## Benchmark Suite
+
+Run reproducible benchmark packs:
+
+```text
+All 175 LTGs
+Late-load systems
+CDC-low systems
+Single-crossing systems
+Outer-infeasible systems
+Worst baseline RMSE
+Best baseline RMSE
+```
+
+The suite reports:
+
+* A/B wins
+* mean RMSE
+* strongest deltas
+* route preservation rate
+
+---
+
+## Parameter Landscape
+
+Scan framework performance across:
+
+```text
+Gamma0 scale
+q exponent
+```
+
+Grid options:
+
+```text
+9 x 7
+13 x 9
+17 x 11
+```
+
+The heatmap computes:
+
+* best parameter cell
+* robust regions
+* wins versus baseline
+* outer RMSE behaviour
+
+Clicking a heatmap cell loads that framework directly into the test rig.
+
+---
+
+## Route-Space Map
+
+Visualise the LTG dataset in diagnostic coordinates:
+
+```text
+x_cross
+u_out
+memory
+h/r_out
+RMSE
+Priority L
+L_eff/h
+```
+
+Points are:
+
+* colour-coded by route class
+* scaled by RMSE
+* clickable for direct galaxy loading
+
+---
+
+## Failure Anatomy
+
+Framework scores are not reduced to a single number.
+
+Failure Anatomy reports:
+
+```text
+worst residual
+worst residual radius
+dominant failing radial band
+outer RMSE
+outer bias
+route preservation/break
+x_cross error
+invalid point count
+```
+
+---
+
+# Residual Field Overlay
+
+The galaxy canvas can render residual structure as radial haze:
+
+```text
+red   = overprediction
+cyan  = underprediction
+```
+
+Field modes:
+
+```text
+Off
+MTS residual
+Test rig residual
+Comparator residual
+Test minus comparator
+```
+
+The field is visual only.
+
+Numeric truth remains:
+
+* plotted residuals
+* CSV exports
+* benchmark scores
+* diagnostic panels
+
+---
+
+# Galaxy Forge
+
+Synthetic mode includes deterministic morphology generation.
+
+Forge presets:
+
+```text
+LSB disk
+Dwarf irregular
+Gas-rich spiral
+Bulge-dominated LTG
+Compact ETG-like
+CDC-low analogue
+Outer-infeasible stress
+Late-load pathological
+```
+
+Morphologies control:
+
+```text
+spiral arm count
+gas fraction
+disk thickness
+outer rings
+central concentration
+lopsided scatter
+```
+
+Useful for controlled framework stress-testing.
+
+---
+
+# Time Evolution Mode
+
+Synthetic galaxies can evolve through controlled tracks:
+
+```text
+Late-load build
+Gas depletion
+Bulge compaction
+Gas rebuild
+```
+
+The app updates:
+
+* transport curves
+* route diagnostics
+* particle cloud structure
+* evolution timelines
+
+in real time.
+
+---
+
+# Experiment Capsules
+
+The lab supports portable experiment-state export.
+
+Capsules store:
+
+```text
+mode
+selected galaxy
+synthetic controls
+framework equations
+comparative mode state
+benchmark results
+tournament queues
+parameter sweeps
+route-space axes
+evolution state
+view settings
+diagnostics
+```
+
+Capsules restore directly in-browser.
+
+---
+
+# Trust Fingerprints
+
+Capsules include stable reproducibility hashes:
+
+```text
+mts-xxxxxxxx
+```
+
+The hash excludes volatile timestamps while preserving:
+
+* equations
+* framework states
+* diagnostics
+* benchmark configs
+* experiment structure
+
+---
+
+# Evidence Pack Exports
+
+The left rail includes export tools for reproducibility and sharing.
+
+Exports include:
+
+```text
+Current CSV
+LTG Index CSV
+Summary JSON
+Plot SVG
+Export Capsule
+Diagnostic Sheet
+Trust Report
+Figure Pack
+```
+
+---
+
+# Formula Registry
+
+Support laws can be:
+
+```text
+saved
+reloaded
+imported
+exported
+shared
+```
+
+No backend required.
+
+Everything is stored locally in browser storage.
+
+---
+
+# Physics / Formulae
+
+## Locked Constants
+
+```text
+Gamma0   = 809.956
+Rmax     = 1.758948
+ML_disk  = 0.5
+ML_bulge = 0.7
+q        = 0.77
+```
+
+## Core Relations
+
+```text
+V_bar^2 =
+  V_gas^2
+  + 0.5 V_disk^2
+  + 0.7 V_bulge^2
+
+S_mem =
+  (0.9 / pi) * (r_out / h)
+
+memory_load =
+  (1 - f_gas_out) * (r_out / h)
+
+L_eff =
+  1.8 h * (
+    1 + S_mem * (
+      1 - exp(-memory_load / S_mem)
+    )
+  )
+
+V_model^2(r) =
+  V_bar^2(r)
+  + Gamma0 * L_eff * (
+      1 - exp(-(r / L_eff)^q)
+    )
+
+u(r) =
+  (
+    V_obs^2
+    - 0.5 V_disk^2
+    - 0.7 V_bulge^2
+  )
+  / (
+    Gamma0 * r * Rmax
+  )
+```
+
+---
+
+# Allowed Formula Variables
+
+```text
+r, x, h, rOut, fGas, fGasOut
+leff, memory, q
+gamma0, rMax
+mlDisk, mlBulge
+vGas, vDisk, vBulge
+vBar, vObs, uObs
 pi, e
 ```
 
 Allowed functions:
 
 ```text
-abs, sqrt, pow, exp, log, log10, min, max
-sin, cos, tan, tanh, atan, atan2, floor, ceil, round
+abs
+sqrt
+pow
+exp
+log
+log10
+min
+max
+sin
+cos
+tan
+tanh
+atan
+atan2
+floor
+ceil
+round
 ```
 
-The editor is intentionally limited to math expressions, not general JavaScript.
+The parser accepts restricted mathematical expressions only.
 
-## Baseline calculations
+No arbitrary JavaScript execution.
 
-The app includes a locked baseline calculation so that custom formulae have a stable reference curve.
+---
 
-Constants:
-
-```text
-Gamma0 = 809.956
-Rmax   = 1.758948
-ML_disk = 0.5
-ML_bulge = 0.7
-q = 0.77 for ROTMOD mode
-```
-
-Baryonic contribution:
-
-```text
-V_bar^2 = V_gas^2 + 0.5 V_disk^2 + 0.7 V_bulge^2
-```
-
-Memory/transport quantities:
-
-```text
-S_mem = (0.9 / pi) * (r_out / h)
-memory_load = (1 - f_gas_out) * (r_out / h)
-L_eff = 1.8 h * (1 + S_mem * (1 - exp(-memory_load / S_mem)))
-```
-
-Baseline velocity model:
-
-```text
-V_model^2(r) = V_bar^2(r) + Gamma0 * L_eff * (1 - exp(-(r / L_eff)^q))
-```
-
-Diagnostic `u(r)`:
-
-```text
-u(r) = (V_obs^2 - 0.5 V_disk^2 - 0.7 V_bulge^2) / (Gamma0 * r * Rmax)
-```
-
-In Synthetic mode, `V_obs` is the generated synthetic model. In LTG/ROTMOD mode, `V_obs` is the observed input velocity.
-
-## Diagnostics shown in the app
-
-The right-hand rail displays live values for the active galaxy, including:
-
-- `L_eff`;
-- memory load;
-- `u_out`;
-- RMSE;
-- route diagnostics;
-- framework score;
-- residual plot.
-
-For LTG samples, the browser also exposes route labels and ranking metrics so that outliers and special cases can be found quickly.
-
-For ETG samples, the app uses locked table values for `h`, `R90`, `Sigma80-100`, and `logy`; `R80` is computed live from the bundled high-resolution disk profile.
-
-## Evidence exports
-
-The Evidence Pack buttons export the active state of the lab:
-
-| Export | Output |
-|---|---|
-| Current CSV | Point-by-point active curve table with radii, velocities, `u(r)`, residuals, and framework values when active |
-| LTG Index CSV | Current filtered/sorted LTG browser diagnostics |
-| Summary JSON | Active galaxy constants, curve state, route state, framework state, and browser filters |
-| Plot SVG | Standalone rotation-curve SVG |
-| Diagnostic Sheet | Standalone HTML sheet with metrics, plots, route diagnostics, and residuals |
-| Framework Scores CSV | Batch results for the current custom formula across all bundled LTGs |
-
-These exports are meant to make screenshots and one-off checks easier to audit later.
-
-## Data and regeneration scripts
-
-Bundled browser data lives in:
-
-```text
-data/samples.js       # 175 LTG samples
-data/etg-samples.js   # 16 ETG samples
-```
-
-The repo also includes PowerShell scripts for regenerating those bundled JavaScript files from local source archives:
+# Regenerate LTG Samples
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-samples.ps1 -ZipPath "C:\path\to\Rotmod_LTG (4).zip"
-
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-etg-samples.ps1 -ZipPath "C:\path\to\Rotmod_ETG.zip"
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\export-samples.ps1 `
+  -ZipPath "C:\path\to\Rotmod_LTG (4).zip"
 ```
 
-The app itself only needs the generated JavaScript sample files. The original archive paths are not required at runtime.
+---
 
-## Project structure
+# Regenerate ETG Samples
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\export-etg-samples.ps1 `
+  -ZipPath "C:\path\to\Rotmod_ETG.zip"
+```
+
+---
+
+# Verification
+
+The app has been locally rendered and tested using Microsoft Edge headless rendering and CDP automation.
+
+Verified systems include:
+
+* LTG rendering
+* ETG rendering
+* Framework Test Rig
+* Tournament mode
+* Benchmark Suite
+* Parameter Landscape
+* Comparative Mode
+* Residual overlays
+* Trust Fingerprints
+* Evolution tracks
+* Galaxy Forge
+* Formula Registry
+* Mobile rendering
+
+Representative QA renders:
 
 ```text
-index.html                    # App shell and controls
-styles.css                    # Layout, panels, plots, responsive styling
-app.js                        # Simulation, parsing, diagnostics, plotting, exports, framework rig
-data/samples.js               # Bundled LTG sample data
-data/etg-samples.js           # Bundled ETG sample data
-scripts/export-samples.ps1    # LTG bundle regeneration script
-scripts/export-etg-samples.ps1# ETG bundle regeneration script
-qa-*.png                      # Local QA screenshots
-README.md                     # This file
+qa-desktop.png
+qa-mobile.png
+qa-framework-observed-v2.png
+qa-sweep-heatmap.png
+qa-comparison-desktop.png
+qa-forge-desktop.png
+qa-serious-bundle-desktop.png
 ```
 
-## Local verification notes
+Mobile emulation verified:
 
-The included `qa-*.png` files are browser QA screenshots from local runs. They cover desktop, mobile, LTG, ETG, evidence-export, and framework-test views.
+```text
+innerWidth = 390
+bodyScrollWidth = 390
+documentElement.scrollWidth = 390
+```
 
-A local browser click test also ran the Framework Test Rig across all 175 LTGs with the baryon-only preset and confirmed that the batch table updated.
-
-## Contributing / modifying
-
-This project is intentionally small and hackable.
-
-Good first modifications:
-
-- add a new framework preset in `FRAMEWORK_PRESETS` inside `app.js`;
-- adjust visual styling in `styles.css`;
-- add more export fields in the evidence-pack functions;
-- regenerate the bundled sample files from updated ROTMOD archives;
-- add more QA screenshots after browser changes.
-
-When changing the baseline calculation, keep the constants and formula section in this README in sync with `app.js` so exported results remain understandable.
-
-## License / data note
-
-Add the repository license here before publishing publicly. If the bundled galaxy samples are derived from external survey/source archives, include the appropriate dataset citation and redistribution terms for those sources in the repo as well.
+The app loaded, plotted data, restored capsules, ran framework batches, generated tournament boards, computed parameter sweeps, restored evolution tracks, and exported evidence packs successfully.
