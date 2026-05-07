@@ -298,7 +298,8 @@ cyan  = underprediction
 
 Galaxy View
 
-<img width="1416" height="908" alt="qa-v18-observed" src="https://github.com/user-attachments/assets/c87698d2-c79e-4671-9c59-07e24edfe45d" />
+<img width="1440" height="1200" alt="qa-layers-etg" src="https://github.com/user-attachments/assets/f551e72f-1f48-487e-9ae9-0c1c99de0820" />
+
 
 Interactive visual controls:
 
