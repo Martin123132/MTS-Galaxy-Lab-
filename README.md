@@ -1,6 +1,6 @@
-MTS Galaxy Lab
+<img width="1290" height="1950" alt="011cfd35-2a6a-4e69-a86b-de92547dc2ee" src="https://github.com/user-attachments/assets/221e0a9e-be0b-42f2-9ff2-2d7a27158eda" />
 
-<img width="1460" height="950" alt="qa-forge-desktop" src="https://github.com/user-attachments/assets/8d968a90-d445-45fa-a90b-2ee7324a1dfd" />
+
 
 
 Zero-install browser workbench for exploring galaxy rotation curves, transport-response models, framework comparisons, and reproducible support-law experiments.
@@ -92,6 +92,7 @@ mts-xxxxxxxx
 Modes
 
 Synthetic
+<img width="1460" height="950" alt="qa-forge-desktop" src="https://github.com/user-attachments/assets/8d968a90-d445-45fa-a90b-2ee7324a1dfd" />
 
 Generate controlled toy systems using sliders for:
 
