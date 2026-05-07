@@ -1,5 +1,8 @@
 MTS Galaxy Lab
 
+<img width="1460" height="950" alt="qa-forge-desktop" src="https://github.com/user-attachments/assets/8d968a90-d445-45fa-a90b-2ee7324a1dfd" />
+
+
 Zero-install browser workbench for exploring galaxy rotation curves, transport-response models, framework comparisons, and reproducible support-law experiments.
 
 MTS Galaxy Lab is a local-first scientific sandbox designed for rapid experimentation with real galaxy datasets.
@@ -48,6 +51,7 @@ Features include:
 ⸻
 
 Test Your Own Frameworks
+<img width="1440" height="1200" alt="qa-claims-desktop" src="https://github.com/user-attachments/assets/0607d177-a347-4d5a-990a-3a8253bebd28" />
 
 Enter your own support-law equation directly in the browser.
 
@@ -293,6 +297,8 @@ cyan  = underprediction
 ⸻
 
 Galaxy View
+
+<img width="1416" height="908" alt="qa-v18-observed" src="https://github.com/user-attachments/assets/c87698d2-c79e-4671-9c59-07e24edfe45d" />
 
 Interactive visual controls:
 
