@@ -1,5 +1,3 @@
-Here’s the merged README with the image text left unchanged.
-
 # MTS Galaxy Lab
 <img width="1290" height="1950" alt="011cfd35-2a6a-4e69-a86b-de92547dc2ee" src="https://github.com/user-attachments/assets/221e0a9e-be0b-42f2-9ff2-2d7a27158eda" />
 Zero-install browser workbench for exploring galaxy rotation curves, transport-response models, framework comparisons, and reproducible support-law experiments.
