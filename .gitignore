@@ -2,5 +2,7 @@
 *.tar
 *.tar.gz
 node_modules/
+research-output/
+__pycache__/
 .DS_Store
 Thumbs.db

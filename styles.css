@@ -652,6 +652,7 @@ svg {
 .forge-metrics,
 .comparison-metrics,
 .benchmark-metrics,
+.research-metrics,
 .population-metrics,
 .capsule-metrics,
 .fit-metrics,
@@ -673,6 +674,7 @@ svg {
 .forge-metrics div,
 .comparison-metrics div,
 .benchmark-metrics div,
+.research-metrics div,
 .population-metrics div,
 .capsule-metrics div,
 .fit-metrics div,
@@ -695,6 +697,7 @@ svg {
 .forge-metrics span,
 .comparison-metrics span,
 .benchmark-metrics span,
+.research-metrics span,
 .population-metrics span,
 .capsule-metrics span,
 .fit-metrics span,
@@ -721,6 +724,7 @@ svg {
 .forge-metrics strong,
 .comparison-metrics strong,
 .benchmark-metrics strong,
+.research-metrics strong,
 .population-metrics strong,
 .capsule-metrics strong,
 .fit-metrics strong,
@@ -828,6 +832,7 @@ svg {
 .framework-table,
 .comparison-table,
 .benchmark-table,
+.research-table,
 .population-table,
 .capsule-table,
 .claim-table,
@@ -843,6 +848,7 @@ svg {
 .tournament-row,
 .comparison-row,
 .benchmark-row,
+.research-row,
 .population-row,
 .capsule-row,
 .claim-row,
@@ -874,6 +880,10 @@ svg {
   grid-template-columns: minmax(74px, 1fr) 52px 52px 58px 58px;
 }
 
+.research-row {
+  grid-template-columns: minmax(92px, 1fr) 56px 74px 62px;
+}
+
 .population-row {
   grid-template-columns: minmax(88px, 1fr) 58px 58px 68px;
 }
@@ -898,6 +908,7 @@ svg {
 .tournament-row strong,
 .comparison-row strong,
 .benchmark-row strong,
+.research-row strong,
 .population-row strong,
 .capsule-row strong,
 .claim-row strong,
@@ -914,6 +925,7 @@ svg {
 .tournament-row span,
 .comparison-row span,
 .benchmark-row span,
+.research-row span,
 .population-row span,
 .capsule-row span,
 .claim-row span,
@@ -932,6 +944,18 @@ svg {
 
 .claim-row.fail strong {
   color: var(--danger);
+}
+
+.research-row.pass strong {
+  color: var(--accent-2);
+}
+
+.research-row.fail strong {
+  color: var(--danger);
+}
+
+.research-row.warn strong {
+  color: var(--accent);
 }
 
 .capsule-row.same strong {

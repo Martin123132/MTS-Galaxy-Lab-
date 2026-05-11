@@ -247,6 +247,10 @@
     registry: {
       entries: []
     },
+    researchCandidate: {
+      current: null,
+      loadedAt: null
+    },
     benchmark: {
       pack: "all",
       rows: [],
@@ -367,6 +371,21 @@
     "vBar",
     "vObs",
     "uObs",
+    "u0",
+    "uOut",
+    "uMax",
+    "u075",
+    "xCross",
+    "hOverRout",
+    "leffOverH",
+    "routeLow",
+    "routeCdc",
+    "routeUpward",
+    "routeSingle",
+    "routeOuterInfeasible",
+    "routeHard",
+    "routeNonLow",
+    "outerViable",
     "pi",
     "e"
   ];
@@ -1751,6 +1770,12 @@
     var h = Number.isFinite(curve.h) ? curve.h : Math.max(0.1, curve.rOut / 3.9);
     var memory = Number.isFinite(curve.memoryLoad) ? curve.memoryLoad : curve.rOut / h;
     var vObs = Number.isFinite(point.vObs) ? point.vObs : point.vTotal;
+    var route = curve._frameworkRouteState;
+    if (!route) {
+      route = classifyRoute(curve.points, curve);
+      curve._frameworkRouteState = route;
+    }
+    var routeId = route.id || "";
     return {
       r: point.r,
       x: point.r / curve.rOut,
@@ -1771,6 +1796,21 @@
       vBar: point.vBar || 0,
       vObs: vObs,
       uObs: point.u,
+      u0: Number.isFinite(route.u0) ? route.u0 : 0,
+      uOut: Number.isFinite(route.uOut) ? route.uOut : 0,
+      uMax: Number.isFinite(route.uMax) ? route.uMax : 0,
+      u075: Number.isFinite(route.u075) ? route.u075 : 0,
+      xCross: Number.isFinite(route.xCrossNorm) ? route.xCrossNorm : 0,
+      hOverRout: Number.isFinite(route.hOverRout) ? route.hOverRout : 0,
+      leffOverH: h ? leff / h : 0,
+      routeLow: routeId === "low-load" ? 1 : 0,
+      routeCdc: routeId === "CDC-low-load" ? 1 : 0,
+      routeUpward: routeId === "buffered upward-crossing" ? 1 : 0,
+      routeSingle: routeId === "buffered single-crossing" ? 1 : 0,
+      routeOuterInfeasible: routeId === "outer-infeasible" ? 1 : 0,
+      routeHard: routeId === "buffered single-crossing" || routeId === "outer-infeasible" ? 1 : 0,
+      routeNonLow: routeId === "low-load" || routeId === "CDC-low-load" ? 0 : 1,
+      outerViable: route.outerViable ? 1 : 0,
       pi: Math.PI,
       e: Math.E
     };
@@ -2413,6 +2453,142 @@
       }
     };
     reader.readAsText(file);
+  }
+
+  function normalizeResearchCandidatePayload(payload) {
+    if (!payload || payload.type !== "mts-high-rmse-candidate") {
+      throw new Error("This is not an MTS high-RMSE candidate capsule.");
+    }
+    var candidate = payload.candidate || {};
+    var validation = payload.validation || {};
+    var expression = String(candidate.appExpression || "").trim();
+    if (!expression) throw new Error("Candidate capsule is missing a browser app expression.");
+    compileFrameworkExpression(expression);
+    var status = String(candidate.claimStatus || candidate.status || validation.claimStatus || "diagnostic");
+    return {
+      type: payload.type,
+      version: payload.version || 1,
+      id: String(candidate.id || "research-candidate"),
+      name: String(candidate.name || candidate.id || "Research candidate").slice(0, 96),
+      kind: String(candidate.kind || "state-conditioned diagnostic"),
+      status: status,
+      expression: expression,
+      scienceExpression: String(candidate.expression || ""),
+      generatedAt: payload.generatedAt || "",
+      split: payload.split || null,
+      train: validation.train || null,
+      holdout: validation.holdout || null,
+      all: validation.all || null,
+      guardrails: Array.isArray(validation.guardrails) ? validation.guardrails : [],
+      raw: payload
+    };
+  }
+
+  function importResearchCandidateFile(file) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      try {
+        var candidate = normalizeResearchCandidatePayload(JSON.parse(String(reader.result)));
+        state.researchCandidate.current = candidate;
+        state.researchCandidate.loadedAt = new Date().toISOString();
+        updateResearchCandidatePanel();
+        if ($("researchCandidateNote")) {
+          $("researchCandidateNote").textContent = "Loaded " + candidate.id + " as " + candidate.status + ". Use Load to A to test it without changing locked MTS.";
+        }
+      } catch (error) {
+        window.alert("Research candidate import failed: " + error.message);
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function researchPct(value) {
+    return Number.isFinite(Number(value)) ? fmt(Number(value), 1) + "%" : "--";
+  }
+
+  function researchRate(value) {
+    return Number.isFinite(Number(value)) ? fmt(Number(value) * 100, 0) + "%" : "--";
+  }
+
+  function researchGuardrailActual(row) {
+    var value = Number(row.actual);
+    if (!Number.isFinite(value)) return "--";
+    if (/rate|preservation/i.test(row.label || "")) return researchRate(value);
+    if (/improvement/i.test(row.label || "")) return researchPct(value);
+    return fmt(value, 2);
+  }
+
+  function updateResearchCandidatePanel() {
+    var candidate = state.researchCandidate.current;
+    var table = $("researchCandidateTable");
+    if (!table) return;
+    if (!candidate) {
+      $("researchCandidateStatus").textContent = "not loaded";
+      $("researchCandidateName").textContent = "--";
+      $("researchCandidateClaim").textContent = "--";
+      $("researchCandidateGain").textContent = "--";
+      $("researchCandidateRoute").textContent = "--";
+      table.innerHTML = '<div class="research-row warn"><strong>No candidate</strong><span>--</span><span>import</span><span>json</span></div>';
+      return;
+    }
+
+    var holdout = candidate.holdout || {};
+    $("researchCandidateStatus").textContent = candidate.status;
+    $("researchCandidateName").textContent = compactText(candidate.id, "--", 18);
+    $("researchCandidateClaim").textContent = candidate.status;
+    $("researchCandidateClaim").className = candidate.status === "promoted for review" ? "delta-good" : (candidate.status === "rejected" ? "delta-bad" : "");
+    $("researchCandidateGain").textContent = researchPct(Number(holdout.meanImprovementPct));
+    $("researchCandidateRoute").textContent = researchRate(Number(holdout.routePreservationRate));
+
+    table.innerHTML = "";
+    var rows = candidate.guardrails.length ? candidate.guardrails : [
+      { label: "Guardrails", passed: false, actual: NaN, threshold: "missing" }
+    ];
+    rows.slice(0, 10).forEach(function (row) {
+      var item = document.createElement("div");
+      item.className = "research-row " + (row.passed ? "pass" : "fail");
+      item.innerHTML =
+        "<strong>" + htmlEscape(row.label || "check") + "</strong>" +
+        "<span>" + (row.passed ? "pass" : "fail") + "</span>" +
+        "<span>" + htmlEscape(researchGuardrailActual(row)) + "</span>" +
+        "<span>" + htmlEscape(row.threshold || "--") + "</span>";
+      table.appendChild(item);
+    });
+  }
+
+  function loadResearchCandidateToA() {
+    var candidate = state.researchCandidate.current;
+    if (!candidate) {
+      if ($("researchCandidateNote")) $("researchCandidateNote").textContent = "Import a candidate JSON before loading it into formula A.";
+      return;
+    }
+    $("frameworkFormula").value = candidate.expression;
+    $("frameworkPreset").value = "mts";
+    if ($("formulaRegistryName")) $("formulaRegistryName").value = candidate.name;
+    applyFrameworkExpression();
+    runFrameworkBatch();
+    if ($("researchCandidateNote")) {
+      $("researchCandidateNote").textContent = "Loaded " + candidate.id + " into A and ran the 175-LTG batch. Claim status remains " + candidate.status + ".";
+    }
+    updateResearchCandidatePanel();
+  }
+
+  function queueResearchCandidate() {
+    var candidate = state.researchCandidate.current;
+    if (!candidate) {
+      if ($("researchCandidateNote")) $("researchCandidateNote").textContent = "Import a candidate JSON before adding it to the tournament queue.";
+      return;
+    }
+    var queue = $("tournamentQueue");
+    var line = "Research " + candidate.id + " = " + candidate.expression;
+    if (queue.value.indexOf(candidate.expression) === -1) {
+      queue.value = queue.value.trim() ? queue.value.trim() + "\n" + line : line;
+    }
+    runTournament();
+    if ($("researchCandidateNote")) {
+      $("researchCandidateNote").textContent = "Queued " + candidate.id + " in the tournament. It remains " + candidate.status + " until guardrails pass.";
+    }
+    updateResearchCandidatePanel();
   }
 
   function updateFrameworkPanel() {
@@ -5642,6 +5818,17 @@
         } : null,
         batchSummary: state.framework.batchSummary
       },
+      researchCandidate: state.researchCandidate.current ? {
+        id: state.researchCandidate.current.id,
+        name: state.researchCandidate.current.name,
+        kind: state.researchCandidate.current.kind,
+        status: state.researchCandidate.current.status,
+        expression: state.researchCandidate.current.expression,
+        loadedAt: state.researchCandidate.loadedAt,
+        split: state.researchCandidate.current.split,
+        holdout: state.researchCandidate.current.holdout,
+        guardrails: state.researchCandidate.current.guardrails
+      } : null,
       comparison: {
         expression: state.comparison.expression,
         preset: state.comparison.preset,
@@ -6396,6 +6583,10 @@
         expression: $("frameworkFormula") ? $("frameworkFormula").value : state.framework.expression,
         batchSummary: state.framework.batchSummary
       },
+      researchCandidate: state.researchCandidate.current ? {
+        loadedAt: state.researchCandidate.loadedAt,
+        current: state.researchCandidate.current.raw || state.researchCandidate.current
+      } : null,
       comparison: {
         preset: $("comparisonPreset") ? $("comparisonPreset").value : state.comparison.preset,
         expression: $("comparisonFormula") ? $("comparisonFormula").value : state.comparison.expression,
@@ -6912,6 +7103,15 @@
       $("frameworkFormula").value = capsule.framework.expression || FRAMEWORK_PRESETS.mts;
       $("frameworkPreset").value = capsule.framework.preset || "mts";
     }
+    if (capsule.researchCandidate && capsule.researchCandidate.current) {
+      try {
+        state.researchCandidate.current = normalizeResearchCandidatePayload(capsule.researchCandidate.current);
+        state.researchCandidate.loadedAt = capsule.researchCandidate.loadedAt || new Date().toISOString();
+      } catch (error) {
+        state.researchCandidate.current = null;
+        state.researchCandidate.loadedAt = null;
+      }
+    }
     if (capsule.comparison) {
       state.comparison.preset = capsule.comparison.preset || "baryon";
       state.comparison.fieldMode = capsule.comparison.fieldMode || "custom";
@@ -7026,6 +7226,7 @@
     updateSweepPanel();
     updateUncertaintyPanel();
     updateCapsuleLibraryPanel();
+    updateResearchCandidatePanel();
     $("exportNote").textContent = "Loaded capsule from " + (capsule.generatedAt || "unknown time");
   }
 
@@ -7298,6 +7499,12 @@
       var file = event.target.files && event.target.files[0];
       if (file) importFormulaRegistryFile(file);
     });
+    $("researchCandidateInput").addEventListener("change", function (event) {
+      var file = event.target.files && event.target.files[0];
+      if (file) importResearchCandidateFile(file);
+    });
+    $("loadResearchCandidateA").addEventListener("click", loadResearchCandidateToA);
+    $("queueResearchCandidate").addEventListener("click", queueResearchCandidate);
     $("routeMapX").addEventListener("change", function (event) {
       state.routeMap.x = event.target.value;
       drawRouteMap();
@@ -7352,6 +7559,7 @@
     $("uncertaintyTrials").value = String(state.uncertainty.trials);
     updateUncertaintyOutputs();
     updateFormulaRegistryPanel();
+    updateResearchCandidatePanel();
     state.framework.compiled = compileFrameworkExpression(state.framework.expression);
     state.comparison.compiled = compileFrameworkExpression(state.comparison.expression);
     bindEvents();

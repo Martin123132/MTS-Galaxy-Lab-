@@ -224,6 +224,9 @@ Allowed formula variables:
 r, x, h, rOut, fGas, fGasOut, leff, memory, q
 gamma0, rMax, mlDisk, mlBulge
 vGas, vDisk, vBulge, vBar, vObs, uObs
+u0, uOut, uMax, u075, xCross, hOverRout, leffOverH
+routeLow, routeCdc, routeUpward, routeSingle, routeOuterInfeasible
+routeHard, routeNonLow, outerViable
 pi, e
 ```
 
@@ -265,6 +268,31 @@ Import registry: loads shared formula JSON packs
 ```
 
 This makes support laws shareable without turning the app into a server-backed system.
+
+## High-RMSE Research Harness
+
+The Python harness in `scripts/mts-failure-lab.py` runs a locked-baseline research cycle for the difficult SPARC LTGs. It keeps canonical MTS unchanged, searches only invariant-gated state candidates, and writes review artifacts under `research-output/high-rmse`.
+
+```powershell
+python .\scripts\mts-failure-lab.py --mode baseline
+python .\scripts\mts-failure-lab.py --mode discover
+python .\scripts\mts-failure-lab.py --mode validate
+python .\scripts\mts-failure-lab.py --mode report
+```
+
+The split is route-stratified with seed `20260511`. Candidate formulas may use MTS state gates such as memory, `u_0.75`, `u_out`, and route class, but not galaxy names, raw RMSE, residual signs, or lookup rules.
+
+Report mode writes:
+
+```text
+mts-high-rmse-discovery.csv
+mts-high-rmse-scores.csv
+mts-high-rmse-report.md
+mts-high-rmse-report.html
+mts-high-rmse-candidate.json
+```
+
+The browser app can import `mts-high-rmse-candidate.json` in the Research Candidate panel. Imported candidates can be loaded into formula A or queued into the tournament, but their status remains `diagnostic`, `rejected`, or `promoted for review`; they never replace locked MTS silently.
 
 ## Benchmark Suite
 

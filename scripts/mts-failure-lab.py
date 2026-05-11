@@ -1,28 +1,42 @@
 #!/usr/bin/env python3
 """
-MTS failure-mode analysis.
+MTS high-RMSE research harness.
 
-This script does not change the MTS Galaxy Lab framework. It reproduces the
-current LTG scoring path, ranks high-RMSE galaxies, and tests a small
-diagnostic candidate family for lawful, route-state-gated transport changes.
+The canonical MTS baseline is locked. This script searches only a constrained
+family of invariant-gated diagnostic candidates, validates them on a
+route-stratified holdout split, and writes review artifacts that the browser
+app can import without silently replacing MTS.
 """
 
 from __future__ import annotations
 
+import argparse
+import csv
+import datetime as dt
+import html
 import json
 import math
+import random
 import re
 import statistics
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLES_JS = ROOT / "data" / "samples.js"
+DEFAULT_OUT = ROOT / "research-output" / "high-rmse"
 
 GAMMA0 = 809.956
 R_MAX = 1.758948
 ML_DISK = 0.5
 ML_BULGE = 0.7
 Q_DEFAULT = 0.77
+SPLIT_SEED = 20260511
+HOLDOUT_FRACTION = 0.33
+
+HARD_ROUTES = {"buffered single-crossing", "outer-infeasible"}
+GATED_ROUTES = {"buffered single-crossing", "buffered upward-crossing", "outer-infeasible"}
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -143,6 +157,8 @@ def route_state(points: list[dict], r_out: float) -> dict:
         "uMax": u_max,
         "u075": value_at(points, 0.75 * r_out, "u"),
         "xCross": x_cross,
+        "downCrossings": down,
+        "upCrossings": up,
     }
 
 
@@ -172,6 +188,7 @@ def build_curve(sample: dict) -> dict:
         "rOut": r_out,
         "fGasOut": f_gas_out,
         "leff": leff,
+        "leffOverH": leff / h if h else math.nan,
         "memoryLoad": memory,
         **state,
     }
@@ -182,19 +199,210 @@ def smooth_gate(value: float, threshold: float) -> float:
     return excess / (1 + excess)
 
 
-def route_gate(curve: dict) -> float:
-    return 1.0 if curve["route"] in {"buffered single-crossing", "buffered upward-crossing", "outer-infeasible"} else 0.0
+def gate_expr(name: str, threshold: float) -> str:
+    value = f"{threshold:.4g}"
+    return f"(max(0, {name} - {value}) / (1 + max(0, {name} - {value})))"
 
 
-def candidate_amp(curve: dict) -> float:
-    """Diagnostic candidate, not accepted framework law."""
-    memory_gate = smooth_gate(curve["memoryLoad"], 0.0)
-    late_load_gate = smooth_gate(curve["u075"], 0.25)
-    return 1 + 4 * memory_gate * late_load_gate * route_gate(curve)
+def fmt_num(value: float) -> str:
+    if abs(value - round(value)) < 1e-9:
+        return str(int(round(value)))
+    return f"{value:.4g}"
 
 
-def score_curve(curve: dict, candidate: bool = False) -> dict:
-    amp = candidate_amp(curve) if candidate else 1.0
+def route_gate_value(curve: dict, upward_weight: float) -> float:
+    if curve["route"] in {"buffered single-crossing", "outer-infeasible"}:
+        return 1.0
+    if curve["route"] == "buffered upward-crossing":
+        return upward_weight
+    return 0.0
+
+
+def route_gate_expr(upward_weight: float) -> str:
+    return f"max(routeSingle, routeOuterInfeasible, {fmt_num(upward_weight)} * routeUpward)"
+
+
+@dataclass(frozen=True)
+class Candidate:
+    id: str
+    name: str
+    alpha: float
+    memory_threshold: float
+    u075_threshold: float
+    uout_threshold: float
+    load_mode: str
+    upward_weight: float
+    source: str = "registry"
+
+    @property
+    def kind(self) -> str:
+        return "state-conditioned diagnostic"
+
+    @property
+    def description(self) -> str:
+        return (
+            "MTS support multiplied by a smooth route-state gate using memory, "
+            "u_0.75, u_out, and crossing class only."
+        )
+
+    @property
+    def allowed_variables(self) -> list[str]:
+        return [
+            "memory",
+            "u075",
+            "uOut",
+            "routeSingle",
+            "routeUpward",
+            "routeOuterInfeasible",
+            "leff",
+            "r",
+            "q",
+            "gamma0",
+        ]
+
+    def load_gate(self, curve: dict) -> float:
+        g075 = smooth_gate(curve["u075"], self.u075_threshold)
+        gout = smooth_gate(curve["uOut"], self.uout_threshold)
+        if self.load_mode == "u075":
+            return g075
+        if self.load_mode == "min-u075-uout":
+            return min(g075, gout)
+        if self.load_mode == "mean-u075-uout":
+            return 0.65 * g075 + 0.35 * gout
+        raise ValueError(f"Unknown load mode: {self.load_mode}")
+
+    def amp(self, curve: dict) -> float:
+        memory = smooth_gate(curve["memoryLoad"], self.memory_threshold)
+        route = route_gate_value(curve, self.upward_weight)
+        return 1 + self.alpha * memory * self.load_gate(curve) * route
+
+    def app_expression(self) -> str:
+        base = "gamma0 * leff * (1 - exp(-pow(r / leff, q)))"
+        memory = gate_expr("memory", self.memory_threshold)
+        g075 = gate_expr("u075", self.u075_threshold)
+        gout = gate_expr("uOut", self.uout_threshold)
+        if self.load_mode == "u075":
+            load = g075
+        elif self.load_mode == "min-u075-uout":
+            load = f"min({g075}, {gout})"
+        else:
+            load = f"(0.65 * {g075} + 0.35 * {gout})"
+        route = route_gate_expr(self.upward_weight)
+        return f"{base} * (1 + {fmt_num(self.alpha)} * {memory} * {load} * {route})"
+
+    def science_expression(self) -> str:
+        return (
+            "S_base * (1 + "
+            f"{fmt_num(self.alpha)} * gate(memory>{fmt_num(self.memory_threshold)})"
+            f" * gate_load({self.load_mode}, u075>{fmt_num(self.u075_threshold)}, uOut>{fmt_num(self.uout_threshold)})"
+            f" * route_gate(single/outer=1, upward={fmt_num(self.upward_weight)}))"
+        )
+
+    def to_json(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "kind": self.kind,
+            "source": self.source,
+            "description": self.description,
+            "expression": self.science_expression(),
+            "appExpression": self.app_expression(),
+            "alpha": self.alpha,
+            "memoryThreshold": self.memory_threshold,
+            "u075Threshold": self.u075_threshold,
+            "uOutThreshold": self.uout_threshold,
+            "loadMode": self.load_mode,
+            "upwardWeight": self.upward_weight,
+            "allowedVariables": self.allowed_variables,
+            "forbiddenShortcuts": ["galaxy name", "raw RMSE", "residual sign", "per-galaxy lookup"],
+        }
+
+
+def candidate_id(alpha: float, mem: float, u075: float, uout: float, mode: str, up: float) -> str:
+    token = f"a{fmt_num(alpha)}-m{fmt_num(mem)}-u75{fmt_num(u075)}-uo{fmt_num(uout)}-{mode}-up{fmt_num(up)}"
+    return "mts-state-" + re.sub(r"[^a-zA-Z0-9]+", "-", token).strip("-").lower()
+
+
+def candidate_registry() -> list[Candidate]:
+    candidates: dict[str, Candidate] = {}
+
+    def add(candidate: Candidate) -> None:
+        candidates[candidate.id] = candidate
+
+    add(
+        Candidate(
+            id="route-u075-v1",
+            name="Route-gated u075 v1",
+            alpha=4.0,
+            memory_threshold=0.0,
+            u075_threshold=0.25,
+            uout_threshold=0.0,
+            load_mode="u075",
+            upward_weight=1.0,
+            source="seed",
+        )
+    )
+
+    for mode in ["u075", "min-u075-uout", "mean-u075-uout"]:
+        uout_values = [0.0] if mode == "u075" else [0.25, 0.35, 0.45, 0.55]
+        for alpha in [1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]:
+            for mem in [0.0, 1.5, 3.0]:
+                for u075 in [0.15, 0.25, 0.35, 0.45]:
+                    for uout in uout_values:
+                        for up in [0.0, 0.35, 0.55, 0.75, 1.0]:
+                            ident = candidate_id(alpha, mem, u075, uout, mode, up)
+                            add(
+                                Candidate(
+                                    id=ident,
+                                    name=ident.replace("mts-state-", "").replace("-", " "),
+                                    alpha=alpha,
+                                    memory_threshold=mem,
+                                    u075_threshold=u075,
+                                    uout_threshold=uout,
+                                    load_mode=mode,
+                                    upward_weight=up,
+                                )
+                            )
+    return list(candidates.values())
+
+
+def stratified_split(curves: list[dict], seed: int, holdout_fraction: float) -> dict:
+    rng = random.Random(seed)
+    by_route: dict[str, list[dict]] = {}
+    for curve in curves:
+        by_route.setdefault(curve["route"], []).append(curve)
+
+    train: list[dict] = []
+    holdout: list[dict] = []
+    for route, rows in sorted(by_route.items()):
+        shuffled = rows[:]
+        rng.shuffle(shuffled)
+        holdout_count = max(1, int(round(len(shuffled) * holdout_fraction))) if len(shuffled) > 2 else 1
+        holdout.extend(shuffled[:holdout_count])
+        train.extend(shuffled[holdout_count:])
+
+    train_names = {curve["name"] for curve in train}
+    holdout_names = {curve["name"] for curve in holdout}
+    return {
+        "seed": seed,
+        "holdoutFraction": holdout_fraction,
+        "train": train,
+        "holdout": holdout,
+        "trainNames": train_names,
+        "holdoutNames": holdout_names,
+        "routeCounts": {
+            route: {
+                "total": len(rows),
+                "train": sum(1 for curve in rows if curve["name"] in train_names),
+                "holdout": sum(1 for curve in rows if curve["name"] in holdout_names),
+            }
+            for route, rows in sorted(by_route.items())
+        },
+    }
+
+
+def score_curve(curve: dict, candidate: Candidate | None = None) -> dict:
+    amp = candidate.amp(curve) if candidate else 1.0
     sse = 0.0
     band = {
         "inner": {"sse": 0.0, "n": 0, "bias": 0.0},
@@ -202,10 +410,16 @@ def score_curve(curve: dict, candidate: bool = False) -> dict:
         "outer": {"sse": 0.0, "n": 0, "bias": 0.0},
     }
     worst = {"r": math.nan, "x": math.nan, "residual": 0.0}
+    custom_points = []
     for point in curve["points"]:
-        support2 = GAMMA0 * amp * curve["leff"] * (1 - math.exp(-((point["r"] / curve["leff"]) ** Q_DEFAULT)))
-        model = math.sqrt(max(0.0, point["bar2"] + support2))
+        support2 = GAMMA0 * curve["leff"] * (1 - math.exp(-((point["r"] / curve["leff"]) ** Q_DEFAULT))) * amp
+        model2 = point["bar2"] + support2
+        model = math.sqrt(max(0.0, model2))
         residual = model - point["vObs"]
+        u = (model2 - ML_DISK * point["vDisk"] ** 2 - ML_BULGE * point["vBulge"] ** 2) / (
+            GAMMA0 * point["r"] * R_MAX
+        )
+        custom_points.append({**point, "u": u})
         sse += residual * residual
         key = "inner" if point["x"] < 0.33 else ("mid" if point["x"] < 0.66 else "outer")
         band[key]["sse"] += residual * residual
@@ -220,123 +434,558 @@ def score_curve(curve: dict, candidate: bool = False) -> dict:
     def bias(key: str) -> float:
         return band[key]["bias"] / band[key]["n"] if band[key]["n"] else math.nan
 
+    candidate_route = route_state(custom_points, curve["rOut"])
     return {
         "rmse": math.sqrt(sse / len(curve["points"])),
         "innerRmse": rmse("inner"),
         "midRmse": rmse("mid"),
         "outerRmse": rmse("outer"),
+        "innerBias": bias("inner"),
+        "midBias": bias("mid"),
         "outerBias": bias("outer"),
         "worstR": worst["r"],
         "worstX": worst["x"],
         "worstResidual": worst["residual"],
         "amp": amp,
+        "candidateRoute": candidate_route["route"],
+        "routePreserved": candidate_route["route"] == curve["route"],
     }
 
 
-def mean(values: list[float]) -> float:
-    return sum(values) / len(values)
+def score_rows(curves: list[dict], candidate: Candidate) -> list[dict]:
+    rows = []
+    for curve in curves:
+        base = score_curve(curve)
+        cand = score_curve(curve, candidate)
+        locked_route_preserved = cand["candidateRoute"] == base["candidateRoute"]
+        rows.append(
+            {
+                "name": curve["name"],
+                "route": curve["route"],
+                "baselineModelRoute": base["candidateRoute"],
+                "candidateRoute": cand["candidateRoute"],
+                "routePreserved": locked_route_preserved,
+                "baselineRmse": base["rmse"],
+                "candidateRmse": cand["rmse"],
+                "delta": cand["rmse"] - base["rmse"],
+                "improvement": base["rmse"] - cand["rmse"],
+                "baselineInnerRmse": base["innerRmse"],
+                "candidateInnerRmse": cand["innerRmse"],
+                "baselineMidRmse": base["midRmse"],
+                "candidateMidRmse": cand["midRmse"],
+                "baselineOuterRmse": base["outerRmse"],
+                "candidateOuterRmse": cand["outerRmse"],
+                "outerBias": cand["outerBias"],
+                "worstResidual": cand["worstResidual"],
+                "worstR": cand["worstR"],
+                "amp": cand["amp"],
+                "h": curve["h"],
+                "rOut": curve["rOut"],
+                "leff": curve["leff"],
+                "leffOverH": curve["leffOverH"],
+                "memoryLoad": curve["memoryLoad"],
+                "fGasOut": curve["fGasOut"],
+                "u0": curve["u0"],
+                "uOut": curve["uOut"],
+                "uMax": curve["uMax"],
+                "u075": curve["u075"],
+                "xCross": curve["xCross"],
+                "downCrossings": curve["downCrossings"],
+                "upCrossings": curve["upCrossings"],
+            }
+        )
+    return rows
 
 
-def summarize(curves: list[dict], candidate: bool = False) -> dict:
-    scores = [score_curve(curve, candidate) for curve in curves]
-    hard_routes = {"buffered single-crossing", "outer-infeasible"}
-    hard = [score_curve(curve, candidate)["rmse"] for curve in curves if curve["route"] in hard_routes]
-    upward = [score_curve(curve, candidate)["rmse"] for curve in curves if curve["route"] == "buffered upward-crossing"]
-    cdc = [score_curve(curve, candidate)["rmse"] for curve in curves if curve["route"] == "CDC-low-load"]
-    low = [score_curve(curve, candidate)["rmse"] for curve in curves if curve["route"] == "low-load"]
+def safe_mean(values: Iterable[float]) -> float:
+    clean = [value for value in values if isinstance(value, (int, float)) and math.isfinite(value)]
+    return sum(clean) / len(clean) if clean else math.nan
+
+
+def pct_improvement(base: float, candidate: float) -> float:
+    return ((base - candidate) / base) * 100 if math.isfinite(base) and base > 0 and math.isfinite(candidate) else math.nan
+
+
+def summarize_rows(rows: list[dict]) -> dict:
+    routes = {route for route in [row["route"] for row in rows]}
+
+    def route_mean(route_filter: Callable[[dict], bool], key: str) -> float:
+        return safe_mean(row[key] for row in rows if route_filter(row))
+
+    base_mean = safe_mean(row["baselineRmse"] for row in rows)
+    cand_mean = safe_mean(row["candidateRmse"] for row in rows)
+    hard_base = route_mean(lambda row: row["route"] in HARD_ROUTES, "baselineRmse")
+    hard_cand = route_mean(lambda row: row["route"] in HARD_ROUTES, "candidateRmse")
+    low_base = route_mean(lambda row: row["route"] == "low-load", "baselineRmse")
+    low_cand = route_mean(lambda row: row["route"] == "low-load", "candidateRmse")
+    cdc_base = route_mean(lambda row: row["route"] == "CDC-low-load", "baselineRmse")
+    cdc_cand = route_mean(lambda row: row["route"] == "CDC-low-load", "candidateRmse")
+    regressions = [row for row in rows if row["candidateRmse"] - row["baselineRmse"] > 2]
+    max_regression = max([row["candidateRmse"] - row["baselineRmse"] for row in rows] or [math.nan])
     return {
-        "mean": mean([score["rmse"] for score in scores]),
-        "median": statistics.median(score["rmse"] for score in scores),
-        "outerMean": mean([score["outerRmse"] for score in scores if math.isfinite(score["outerRmse"])]),
-        "hardMean": mean(hard),
-        "upwardMean": mean(upward),
-        "cdcMean": mean(cdc),
-        "lowMean": mean(low),
+        "count": len(rows),
+        "routes": sorted(routes),
+        "baselineMean": base_mean,
+        "candidateMean": cand_mean,
+        "meanImprovementPct": pct_improvement(base_mean, cand_mean),
+        "baselineMedian": statistics.median(row["baselineRmse"] for row in rows) if rows else math.nan,
+        "candidateMedian": statistics.median(row["candidateRmse"] for row in rows) if rows else math.nan,
+        "baselineOuterMean": safe_mean(row["baselineOuterRmse"] for row in rows),
+        "candidateOuterMean": safe_mean(row["candidateOuterRmse"] for row in rows),
+        "outerImprovementPct": pct_improvement(
+            safe_mean(row["baselineOuterRmse"] for row in rows),
+            safe_mean(row["candidateOuterRmse"] for row in rows),
+        ),
+        "midImprovementPct": pct_improvement(
+            safe_mean(row["baselineMidRmse"] for row in rows),
+            safe_mean(row["candidateMidRmse"] for row in rows),
+        ),
+        "innerImprovementPct": pct_improvement(
+            safe_mean(row["baselineInnerRmse"] for row in rows),
+            safe_mean(row["candidateInnerRmse"] for row in rows),
+        ),
+        "hardBaselineMean": hard_base,
+        "hardCandidateMean": hard_cand,
+        "hardImprovementPct": pct_improvement(hard_base, hard_cand),
+        "lowBaselineMean": low_base,
+        "lowCandidateMean": low_cand,
+        "lowWorsening": low_cand - low_base if math.isfinite(low_base) and math.isfinite(low_cand) else math.nan,
+        "cdcBaselineMean": cdc_base,
+        "cdcCandidateMean": cdc_cand,
+        "cdcWorsening": cdc_cand - cdc_base if math.isfinite(cdc_base) and math.isfinite(cdc_cand) else math.nan,
+        "routePreservationRate": safe_mean(1.0 if row["routePreserved"] else 0.0 for row in rows),
+        "regressionOver2Count": len(regressions),
+        "regressionOver2Rate": len(regressions) / len(rows) if rows else math.nan,
+        "maxRegression": max_regression,
+        "wins": sum(1 for row in rows if row["delta"] < -0.001),
     }
 
 
-def fmt(value: float) -> str:
-    return f"{value:.2f}" if isinstance(value, float) and math.isfinite(value) else str(value)
+def guardrail(label: str, actual: float, threshold: str, passed: bool) -> dict:
+    return {"label": label, "actual": actual, "threshold": threshold, "passed": bool(passed)}
 
 
-def print_summary_table(curves: list[dict]) -> None:
-    baseline = summarize(curves, candidate=False)
-    candidate = summarize(curves, candidate=True)
-    print("SUMMARY")
-    print("metric\tbaseline\tcandidate")
-    for key in ["mean", "median", "outerMean", "hardMean", "upwardMean", "cdcMean", "lowMean"]:
-        print(f"{key}\t{fmt(baseline[key])}\t{fmt(candidate[key])}")
+def evaluate_guardrails(summary: dict) -> list[dict]:
+    return [
+        guardrail("Holdout mean RMSE improvement", summary["meanImprovementPct"], ">= 15%", summary["meanImprovementPct"] >= 15),
+        guardrail("Hard-route RMSE improvement", summary["hardImprovementPct"], ">= 25%", summary["hardImprovementPct"] >= 25),
+        guardrail("Low-load worsening", summary["lowWorsening"], "<= 1 km/s", summary["lowWorsening"] <= 1),
+        guardrail("CDC worsening", summary["cdcWorsening"], "<= 1 km/s", summary["cdcWorsening"] <= 1),
+        guardrail("Route preservation", summary["routePreservationRate"], ">= 95%", summary["routePreservationRate"] >= 0.95),
+        guardrail("Regression rate > 2 km/s", summary["regressionOver2Rate"], "< 5%", summary["regressionOver2Rate"] < 0.05),
+        guardrail("Maximum single regression", summary["maxRegression"], "<= 8 km/s", summary["maxRegression"] <= 8),
+        guardrail(
+            "Residual bands not central-only",
+            max(summary["outerImprovementPct"], summary["midImprovementPct"]),
+            "outer or mid >= 10%",
+            max(summary["outerImprovementPct"], summary["midImprovementPct"]) >= 10,
+        ),
+    ]
 
 
-def print_high_rmse_table(curves: list[dict]) -> None:
+def claim_status(guardrails: list[dict]) -> str:
+    return "promoted for review" if all(row["passed"] for row in guardrails) else "rejected"
+
+
+def discovery_score(summary: dict) -> float:
+    regression_penalty = 80 * max(0.0, summary["regressionOver2Rate"] - 0.02)
+    max_penalty = max(0.0, summary["maxRegression"] - 6)
+    route_penalty = 40 * max(0.0, 0.98 - summary["routePreservationRate"])
+    low_penalty = 5 * max(0.0, summary["lowWorsening"])
+    cdc_penalty = 5 * max(0.0, summary["cdcWorsening"])
+    return (
+        summary["meanImprovementPct"]
+        + 0.7 * summary["hardImprovementPct"]
+        + 0.25 * summary["outerImprovementPct"]
+        - regression_penalty
+        - max_penalty
+        - route_penalty
+        - low_penalty
+        - cdc_penalty
+    )
+
+
+def discover_candidates(train_curves: list[dict]) -> list[dict]:
+    ranked = []
+    for candidate in candidate_registry():
+        rows = score_rows(train_curves, candidate)
+        summary = summarize_rows(rows)
+        ranked.append(
+            {
+                "candidate": candidate,
+                "summary": summary,
+                "score": discovery_score(summary),
+            }
+        )
+    ranked.sort(
+        key=lambda item: (
+            item["score"],
+            item["summary"]["meanImprovementPct"],
+            item["summary"]["hardImprovementPct"],
+            -item["summary"]["maxRegression"],
+        ),
+        reverse=True,
+    )
+    return ranked
+
+
+def baseline_summary(curves: list[dict]) -> dict:
     rows = []
     for curve in curves:
-        base = score_curve(curve, False)
-        cand = score_curve(curve, True)
-        rows.append((base["rmse"], curve, base, cand))
-    print("\nTOP HIGH-RMSE CASES")
-    print("name\troute\tamp\tbase\tcandidate\timprove\touter_base\touter_candidate\tu075\tuOut\tmemory\tfGas")
-    for _, curve, base, cand in sorted(rows, reverse=True, key=lambda item: item[0])[:25]:
+        base = score_curve(curve)
+        rows.append(
+            {
+                "route": curve["route"],
+                "baselineRmse": base["rmse"],
+                "candidateRmse": base["rmse"],
+                "baselineOuterRmse": base["outerRmse"],
+                "candidateOuterRmse": base["outerRmse"],
+                "baselineMidRmse": base["midRmse"],
+                "candidateMidRmse": base["midRmse"],
+                "baselineInnerRmse": base["innerRmse"],
+                "candidateInnerRmse": base["innerRmse"],
+                "routePreserved": True,
+                "delta": 0.0,
+            }
+        )
+    return summarize_rows(rows)
+
+
+def fmt(value: float, digits: int = 2) -> str:
+    return f"{value:.{digits}f}" if isinstance(value, (int, float)) and math.isfinite(value) else "--"
+
+
+def print_summary_table(label: str, summary: dict) -> None:
+    print(label)
+    for key in [
+        "count",
+        "baselineMean",
+        "candidateMean",
+        "meanImprovementPct",
+        "hardImprovementPct",
+        "outerImprovementPct",
+        "routePreservationRate",
+        "regressionOver2Rate",
+        "maxRegression",
+    ]:
+        value = summary.get(key)
+        digits = 3 if "Rate" in key else 2
+        print(f"{key}\t{fmt(value, digits) if isinstance(value, float) else value}")
+
+
+def top_rows(rows: list[dict], key: str, reverse: bool = True, limit: int = 12) -> list[dict]:
+    return sorted(rows, key=lambda row: row[key], reverse=reverse)[:limit]
+
+
+def split_label(curve: dict, split: dict) -> str:
+    return "holdout" if curve["name"] in split["holdoutNames"] else "train"
+
+
+def all_scored_rows(curves: list[dict], candidate: Candidate, split: dict) -> list[dict]:
+    rows = score_rows(curves, candidate)
+    for row in rows:
+        row["split"] = "holdout" if row["name"] in split["holdoutNames"] else "train"
+        row["candidateId"] = candidate.id
+    return rows
+
+
+def json_clean(value):
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: json_clean(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [json_clean(item) for item in value]
+    if isinstance(value, tuple):
+        return [json_clean(item) for item in value]
+    return value
+
+
+def write_csv(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    headers = list(rows[0].keys())
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key) for key in headers})
+
+
+def candidate_capsule(candidate: Candidate, split: dict, train_summary: dict, holdout_summary: dict, all_summary: dict, guardrails: list[dict]) -> dict:
+    status = claim_status(guardrails)
+    return {
+        "type": "mts-high-rmse-candidate",
+        "version": 1,
+        "generatedAt": dt.datetime.now(dt.UTC).isoformat(),
+        "sourceScript": "scripts/mts-failure-lab.py",
+        "constants": {
+            "gamma0": GAMMA0,
+            "rMax": R_MAX,
+            "mlDisk": ML_DISK,
+            "mlBulge": ML_BULGE,
+            "qDefault": Q_DEFAULT,
+        },
+        "split": {
+            "seed": split["seed"],
+            "holdoutFraction": split["holdoutFraction"],
+            "trainCount": len(split["train"]),
+            "holdoutCount": len(split["holdout"]),
+            "routeCounts": split["routeCounts"],
+        },
+        "candidate": {
+            **candidate.to_json(),
+            "status": status,
+            "claimStatus": status,
+        },
+        "validation": {
+            "train": train_summary,
+            "holdout": holdout_summary,
+            "all": all_summary,
+            "guardrails": guardrails,
+            "claimStatus": status,
+        },
+    }
+
+
+def markdown_report(capsule: dict, rows: list[dict]) -> str:
+    candidate = capsule["candidate"]
+    validation = capsule["validation"]
+    guardrails = validation["guardrails"]
+    holdout = validation["holdout"]
+    all_summary = validation["all"]
+    improvements = top_rows(rows, "improvement", True, 12)
+    regressions = [row for row in top_rows(rows, "delta", True, 12) if row["delta"] > 0]
+    lines = [
+        "# MTS High-RMSE Candidate Report",
+        "",
+        f"Candidate: `{candidate['id']}`",
+        f"Status: `{candidate['claimStatus']}`",
+        f"Kind: `{candidate['kind']}`",
+        "",
+        "## Formula",
+        "",
+        "Canonical baseline remains locked:",
+        "",
+        "`S_base = Gamma0 * L_eff * (1 - exp(-(r / L_eff)^q))`",
+        "",
+        "Diagnostic candidate:",
+        "",
+        f"`{candidate['expression']}`",
+        "",
+        "Browser expression:",
+        "",
+        f"`{candidate['appExpression']}`",
+        "",
+        "## Summary",
+        "",
+        "| Metric | Holdout | All 175 |",
+        "| --- | ---: | ---: |",
+        f"| Mean improvement | {fmt(holdout['meanImprovementPct'])}% | {fmt(all_summary['meanImprovementPct'])}% |",
+        f"| Hard-route improvement | {fmt(holdout['hardImprovementPct'])}% | {fmt(all_summary['hardImprovementPct'])}% |",
+        f"| Outer-band improvement | {fmt(holdout['outerImprovementPct'])}% | {fmt(all_summary['outerImprovementPct'])}% |",
+        f"| Route preservation | {fmt(holdout['routePreservationRate'] * 100)}% | {fmt(all_summary['routePreservationRate'] * 100)}% |",
+        f"| Regression rate >2 km/s | {fmt(holdout['regressionOver2Rate'] * 100)}% | {fmt(all_summary['regressionOver2Rate'] * 100)}% |",
+        "",
+        "## Guardrails",
+        "",
+        "| Check | Actual | Threshold | Status |",
+        "| --- | ---: | --- | --- |",
+    ]
+    for row in guardrails:
+        actual = row["actual"]
+        if row["label"] in {"Route preservation", "Regression rate > 2 km/s"} and isinstance(actual, (int, float)):
+            actual_text = f"{fmt(actual * 100)}%"
+        elif "improvement" in row["label"].lower() and isinstance(actual, (int, float)):
+            actual_text = f"{fmt(actual)}%"
+        else:
+            actual_text = fmt(actual)
+        lines.append(f"| {row['label']} | {actual_text} | {row['threshold']} | {'pass' if row['passed'] else 'fail'} |")
+
+    lines.extend(["", "## Top Improvements", "", "| Galaxy | Split | Route | Baseline | Candidate | Improvement |", "| --- | --- | --- | ---: | ---: | ---: |"])
+    for row in improvements:
+        lines.append(
+            f"| {row['name']} | {row['split']} | {row['route']} | {fmt(row['baselineRmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['improvement'])} |"
+        )
+
+    lines.extend(["", "## Worst Regressions", "", "| Galaxy | Split | Route | Baseline | Candidate | Regression |", "| --- | --- | --- | ---: | ---: | ---: |"])
+    if regressions:
+        for row in regressions:
+            lines.append(
+                f"| {row['name']} | {row['split']} | {row['route']} | {fmt(row['baselineRmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['delta'])} |"
+            )
+    else:
+        lines.append("| none | -- | -- | -- | -- | -- |")
+
+    lines.extend(
+        [
+            "",
+            "## Failure Anatomy Policy",
+            "",
+            "This report rejects per-galaxy lookup rules, raw-RMSE terms, residual-sign terms, and galaxy-name shortcuts. "
+            "The candidate is a state-conditioned diagnostic until promoted by holdout guardrails.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def html_report(markdown: str, capsule: dict) -> str:
+    escaped = html.escape(markdown)
+    status = html.escape(capsule["candidate"]["claimStatus"])
+    return (
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<title>MTS High-RMSE Candidate Report</title>"
+        "<style>body{font:15px/1.5 system-ui;background:#11130f;color:#eef1e8;margin:0;padding:28px}"
+        "main{max-width:980px;margin:auto}pre{white-space:pre-wrap;background:#191c16;border:1px solid #343b31;"
+        "border-radius:8px;padding:18px}strong{color:#d6ff63}.status{display:inline-block;padding:6px 10px;"
+        "border-radius:6px;background:#20241d;border:1px solid #343b31}</style></head><body><main>"
+        f"<p class=\"status\"><strong>Status:</strong> {status}</p><pre>{escaped}</pre>"
+        "</main></body></html>"
+    )
+
+
+def write_validation_artifacts(out_dir: Path, candidate: Candidate, split: dict, curves: list[dict], include_html: bool) -> dict:
+    rows = all_scored_rows(curves, candidate, split)
+    train_rows = [row for row in rows if row["split"] == "train"]
+    holdout_rows = [row for row in rows if row["split"] == "holdout"]
+    train_summary = summarize_rows(train_rows)
+    holdout_summary = summarize_rows(holdout_rows)
+    all_summary = summarize_rows(rows)
+    guardrails = evaluate_guardrails(holdout_summary)
+    capsule = candidate_capsule(candidate, split, train_summary, holdout_summary, all_summary, guardrails)
+    report = markdown_report(capsule, rows)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    write_csv(out_dir / "mts-high-rmse-scores.csv", rows)
+    (out_dir / "mts-high-rmse-report.md").write_text(report, encoding="utf-8")
+    (out_dir / "mts-high-rmse-candidate.json").write_text(json.dumps(json_clean(capsule), indent=2), encoding="utf-8")
+    if include_html:
+        (out_dir / "mts-high-rmse-report.html").write_text(html_report(report, capsule), encoding="utf-8")
+    return capsule
+
+
+def write_discovery(out_dir: Path, ranked: list[dict]) -> None:
+    rows = []
+    for rank, item in enumerate(ranked, start=1):
+        candidate = item["candidate"]
+        summary = item["summary"]
+        rows.append(
+            {
+                "rank": rank,
+                "candidate_id": candidate.id,
+                "name": candidate.name,
+                "score": item["score"],
+                "mean_improvement_pct": summary["meanImprovementPct"],
+                "hard_improvement_pct": summary["hardImprovementPct"],
+                "outer_improvement_pct": summary["outerImprovementPct"],
+                "route_preservation_rate": summary["routePreservationRate"],
+                "regression_over_2_rate": summary["regressionOver2Rate"],
+                "max_regression": summary["maxRegression"],
+                "app_expression": candidate.app_expression(),
+            }
+        )
+    write_csv(out_dir / "mts-high-rmse-discovery.csv", rows)
+
+
+def select_candidate(ranked: list[dict], candidate_id: str | None) -> Candidate:
+    if candidate_id:
+        for item in ranked:
+            if item["candidate"].id == candidate_id:
+                return item["candidate"]
+        raise SystemExit(f"Candidate id not found: {candidate_id}")
+    return ranked[0]["candidate"]
+
+
+def build_curves() -> list[dict]:
+    return [build_curve(sample) for sample in load_samples()]
+
+
+def cmd_baseline(args: argparse.Namespace) -> None:
+    curves = build_curves()
+    summary = baseline_summary(curves)
+    print(f"Loaded {len(curves)} LTG curves from {SAMPLES_JS}")
+    print("Locked baseline: S_base = Gamma0 * L_eff * (1 - exp(-(r / L_eff)^q))")
+    print_summary_table("BASELINE", summary)
+
+
+def cmd_discover(args: argparse.Namespace) -> None:
+    curves = build_curves()
+    split = stratified_split(curves, args.seed, args.holdout_fraction)
+    ranked = discover_candidates(split["train"])
+    if args.out:
+        write_discovery(Path(args.out), ranked)
+    print(f"Loaded {len(curves)} LTG curves; train={len(split['train'])}, holdout={len(split['holdout'])}, seed={args.seed}")
+    print("DISCOVERY RANKING (train split only)")
+    print("rank\tcandidate\tscore\tmean%\thard%\touter%\tregress>2%\tmax_reg")
+    for rank, item in enumerate(ranked[:15], start=1):
+        s = item["summary"]
         print(
             "\t".join(
                 [
-                    curve["name"],
-                    curve["route"],
-                    fmt(cand["amp"]),
-                    fmt(base["rmse"]),
-                    fmt(cand["rmse"]),
-                    fmt(base["rmse"] - cand["rmse"]),
-                    fmt(base["outerRmse"]),
-                    fmt(cand["outerRmse"]),
-                    fmt(curve["u075"]),
-                    fmt(curve["uOut"]),
-                    fmt(curve["memoryLoad"]),
-                    fmt(curve["fGasOut"]),
+                    str(rank),
+                    item["candidate"].id,
+                    fmt(item["score"]),
+                    fmt(s["meanImprovementPct"]),
+                    fmt(s["hardImprovementPct"]),
+                    fmt(s["outerImprovementPct"]),
+                    fmt(s["regressionOver2Rate"] * 100),
+                    fmt(s["maxRegression"]),
                 ]
             )
         )
 
 
-def print_regressions(curves: list[dict]) -> None:
-    rows = []
-    for curve in curves:
-        base = score_curve(curve, False)
-        cand = score_curve(curve, True)
-        rows.append((base["rmse"] - cand["rmse"], curve, base, cand))
-    print("\nREGRESSIONS OVER 2 KM/S")
-    print("name\troute\tamp\tbase\tcandidate\tregression\touter_base\touter_candidate\tu075\tuOut\tmemory")
-    for improvement, curve, base, cand in sorted(rows, key=lambda item: item[0]):
-        if -improvement <= 2:
-            continue
-        print(
-            "\t".join(
-                [
-                    curve["name"],
-                    curve["route"],
-                    fmt(cand["amp"]),
-                    fmt(base["rmse"]),
-                    fmt(cand["rmse"]),
-                    fmt(-improvement),
-                    fmt(base["outerRmse"]),
-                    fmt(cand["outerRmse"]),
-                    fmt(curve["u075"]),
-                    fmt(curve["uOut"]),
-                    fmt(curve["memoryLoad"]),
-                ]
-            )
-        )
+def cmd_validate(args: argparse.Namespace, include_html: bool) -> None:
+    curves = build_curves()
+    split = stratified_split(curves, args.seed, args.holdout_fraction)
+    ranked = discover_candidates(split["train"])
+    candidate = select_candidate(ranked, args.candidate_id)
+    capsule = write_validation_artifacts(Path(args.out), candidate, split, curves, include_html)
+    print(f"Loaded {len(curves)} LTG curves; train={len(split['train'])}, holdout={len(split['holdout'])}, seed={args.seed}")
+    print(f"Candidate: {candidate.id}")
+    print(f"Claim status: {capsule['validation']['claimStatus']}")
+    print_summary_table("TRAIN", capsule["validation"]["train"])
+    print_summary_table("HOLDOUT", capsule["validation"]["holdout"])
+    print(f"Wrote reports to {Path(args.out).resolve()}")
+
+
+def cmd_list_candidates() -> None:
+    print("candidate_id\tname\tkind")
+    for candidate in candidate_registry():
+        print(f"{candidate.id}\t{candidate.name}\t{candidate.kind}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="MTS high-RMSE research harness")
+    parser.add_argument("--mode", choices=["baseline", "discover", "validate", "report"], default="baseline")
+    parser.add_argument("--seed", type=int, default=SPLIT_SEED)
+    parser.add_argument("--holdout-fraction", type=float, default=HOLDOUT_FRACTION)
+    parser.add_argument("--candidate-id", default="")
+    parser.add_argument("--out", default=str(DEFAULT_OUT))
+    parser.add_argument("--list-candidates", action="store_true")
+    return parser
 
 
 def main() -> None:
-    curves = [build_curve(sample) for sample in load_samples()]
-    print(f"Loaded {len(curves)} LTG curves from {SAMPLES_JS}")
-    print(
-        "Candidate: S2' = S2_MTS * (1 + 4 * M/(1+M) * max(0,u075-0.25)/(1+max(0,u075-0.25)) * routeGate)"
-    )
-    print("routeGate = 1 only for buffered single-crossing, buffered upward-crossing, and outer-infeasible routes")
-    print_summary_table(curves)
-    print_high_rmse_table(curves)
-    print_regressions(curves)
+    parser = build_parser()
+    args = parser.parse_args()
+    args.holdout_fraction = clamp(args.holdout_fraction, 0.1, 0.5)
+    args.candidate_id = args.candidate_id or None
+    if args.list_candidates:
+        cmd_list_candidates()
+        return
+    if args.mode == "baseline":
+        cmd_baseline(args)
+    elif args.mode == "discover":
+        cmd_discover(args)
+    elif args.mode == "validate":
+        cmd_validate(args, include_html=False)
+    elif args.mode == "report":
+        cmd_validate(args, include_html=True)
 
 
 if __name__ == "__main__":

@@ -306,6 +306,19 @@
           <div class="mini-note" id="formulaRegistryNote">Built-ins are always available; saved laws stay in this browser.</div>
         </section>
 
+        <section class="control-section research-section">
+          <div class="section-title">Research Candidate</div>
+          <label class="file-field">
+            <span>Import candidate JSON</span>
+            <input id="researchCandidateInput" type="file" accept=".json,application/json">
+          </label>
+          <div class="mini-note" id="researchCandidateNote">Import `mts-high-rmse-candidate.json` from the research harness. Candidates stay diagnostic until guardrails promote them.</div>
+          <div class="export-grid">
+            <button id="loadResearchCandidateA" class="primary-action" type="button">Load to A</button>
+            <button id="queueResearchCandidate" class="secondary-action" type="button">Queue Tournament</button>
+          </div>
+        </section>
+
         <section class="control-section benchmark-section">
           <div class="section-title">Benchmark Suite</div>
           <label class="select-field">
@@ -689,6 +702,20 @@
               <div><span>Batch Wins</span><strong id="frameworkWins">--</strong></div>
             </div>
             <div class="framework-table" id="frameworkTable"></div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Research Candidate</h3>
+              <span id="researchCandidateStatus">not loaded</span>
+            </div>
+            <div class="research-metrics">
+              <div><span>Candidate</span><strong id="researchCandidateName">--</strong></div>
+              <div><span>Claim</span><strong id="researchCandidateClaim">--</strong></div>
+              <div><span>Holdout gain</span><strong id="researchCandidateGain">--</strong></div>
+              <div><span>Route keep</span><strong id="researchCandidateRoute">--</strong></div>
+            </div>
+            <div class="research-table" id="researchCandidateTable"></div>
           </section>
 
           <section class="diagnostic-block">
