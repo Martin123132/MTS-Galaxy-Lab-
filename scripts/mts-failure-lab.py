@@ -38,6 +38,7 @@ HOLDOUT_FRACTION = 0.33
 HARD_ROUTES = {"buffered single-crossing", "outer-infeasible"}
 GATED_ROUTES = {"buffered single-crossing", "buffered upward-crossing", "outer-infeasible"}
 STRICT_ROUTE_PRESERVATION = 0.95
+Q_DIAGNOSTIC_GRID = [0.35 + 0.05 * index for index in range(31)]
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -552,7 +553,7 @@ def stratified_split(curves: list[dict], seed: int, holdout_fraction: float) -> 
     }
 
 
-def score_curve_with_amp(curve: dict, amp: float) -> dict:
+def score_curve_with_params(curve: dict, amp: float, q_value: float = Q_DEFAULT) -> dict:
     sse = 0.0
     band = {
         "inner": {"sse": 0.0, "n": 0, "bias": 0.0},
@@ -562,7 +563,7 @@ def score_curve_with_amp(curve: dict, amp: float) -> dict:
     worst = {"r": math.nan, "x": math.nan, "residual": 0.0}
     custom_points = []
     for point in curve["points"]:
-        support2 = GAMMA0 * curve["leff"] * (1 - math.exp(-((point["r"] / curve["leff"]) ** Q_DEFAULT))) * amp
+        support2 = GAMMA0 * curve["leff"] * (1 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
         model2 = point["bar2"] + support2
         model = math.sqrt(max(0.0, model2))
         residual = model - point["vObs"]
@@ -597,6 +598,7 @@ def score_curve_with_amp(curve: dict, amp: float) -> dict:
         "worstX": worst["x"],
         "worstResidual": worst["residual"],
         "amp": amp,
+        "q": q_value,
         "candidateRoute": candidate_route["route"],
         "candidateU0": candidate_route["u0"],
         "candidateUOut": candidate_route["uOut"],
@@ -607,6 +609,10 @@ def score_curve_with_amp(curve: dict, amp: float) -> dict:
         "candidateUpCrossings": candidate_route["upCrossings"],
         "routePreserved": candidate_route["route"] == curve["route"],
     }
+
+
+def score_curve_with_amp(curve: dict, amp: float) -> dict:
+    return score_curve_with_params(curve, amp, Q_DEFAULT)
 
 
 def score_curve(curve: dict, candidate: Candidate | None = None) -> dict:
@@ -951,6 +957,40 @@ def optimal_scalar_amp(curve: dict) -> tuple[float, dict]:
     return amp, score_curve_with_amp(curve, amp)
 
 
+def optimal_amp_for_q(curve: dict, q_value: float, iterations: int = 52) -> tuple[float, dict]:
+    def objective(amp: float) -> float:
+        return score_curve_with_params(curve, amp, q_value)["rmse"]
+
+    high = 30.0
+    while high < 300 and objective(high) < objective(high * 0.75):
+        high *= 2
+
+    low = 0.0
+    for _ in range(iterations):
+        m1 = low + (high - low) / 3
+        m2 = high - (high - low) / 3
+        if objective(m1) < objective(m2):
+            high = m2
+        else:
+            low = m1
+
+    amp = (low + high) / 2
+    return amp, score_curve_with_params(curve, amp, q_value)
+
+
+def optimal_q_shape(curve: dict) -> tuple[float, float, dict]:
+    q_values = sorted(set([Q_DEFAULT] + Q_DIAGNOSTIC_GRID))
+    best_q = Q_DEFAULT
+    best_amp, best_score = optimal_amp_for_q(curve, Q_DEFAULT)
+    for q_value in q_values:
+        amp, score = optimal_amp_for_q(curve, q_value)
+        if score["rmse"] < best_score["rmse"]:
+            best_q = q_value
+            best_amp = amp
+            best_score = score
+    return best_q, best_amp, best_score
+
+
 def route_safe_amp_interval(curve: dict, base_score: dict | None = None) -> dict:
     base = base_score or score_curve_with_amp(curve, 1.0)
     base_route = base["candidateRoute"]
@@ -1076,6 +1116,26 @@ def closure_shape_reason(row: dict) -> str:
     return "; ".join(pieces) if pieces else "scalar support mostly explains residual"
 
 
+def should_run_q_shape_probe(row: dict) -> bool:
+    return row["baselineRmse"] >= 20 or row["optimalRmse"] >= 15 or row["closureShapeBranch"] in {
+        "closure + radial-shape failure",
+        "radial-shape residual",
+        "route-closure bottleneck",
+    }
+
+
+def classify_q_shape_result(row: dict) -> str:
+    if not row["qShapeTested"]:
+        return "not tested"
+    if row["qShapeGainOverScalar"] >= 5 and row["qShapeRmse"] < 20:
+        return "q-shape repairable"
+    if row["qShapeGainOverScalar"] >= 5:
+        return "q-shape helps but residual remains"
+    if row["optimalRmse"] >= 20:
+        return "not q-shape repairable"
+    return "scalar shape sufficient"
+
+
 def support_deficit_rows(curves: list[dict]) -> list[dict]:
     rows = []
     for curve in curves:
@@ -1144,6 +1204,31 @@ def support_deficit_rows(curves: list[dict]) -> list[dict]:
         row["failureMode"] = classify_support_failure(row)
         row["closureShapeBranch"] = classify_closure_shape_branch(row)
         row["closureShapeReason"] = closure_shape_reason(row)
+        q_shape_tested = should_run_q_shape_probe(row)
+        if q_shape_tested:
+            q_shape, q_amp, q_score = optimal_q_shape(curve)
+        else:
+            q_shape = Q_DEFAULT
+            q_amp = amp
+            q_score = opt
+        row.update(
+            {
+                "qShapeTested": q_shape_tested,
+                "qShape": q_shape,
+                "qShapeAmp": q_amp,
+                "qShapeRoute": q_score["candidateRoute"],
+                "qShapeRmse": q_score["rmse"],
+                "qShapeGain": base["rmse"] - q_score["rmse"],
+                "qShapeImprovementPct": pct_improvement(base["rmse"], q_score["rmse"]),
+                "qShapeGainOverScalar": opt["rmse"] - q_score["rmse"],
+                "qShapeRouteRecovered": q_score["candidateRoute"] == curve["route"],
+                "qShapeResidualSignature": residual_signature(q_score),
+                "qShapeInnerBias": q_score["innerBias"],
+                "qShapeMidBias": q_score["midBias"],
+                "qShapeOuterBias": q_score["outerBias"],
+            }
+        )
+        row["qShapeClass"] = classify_q_shape_result(row)
         rows.append(row)
     return rows
 
@@ -1193,6 +1278,11 @@ def grouped_deficit_summary(rows: list[dict], key: str) -> list[dict]:
                 "ampConflictRate": safe_mean(0.0 if row["ampRouteCompatible"] else 1.0 for row in group),
                 "meanRouteClosurePenalty": safe_mean(row["routeClosurePenalty"] for row in group),
                 "observedRouteRecoveryRate": safe_mean(1.0 if row["observedRouteRecoveredAtOptimalAmp"] else 0.0 for row in group),
+                "qShapeTestRate": safe_mean(1.0 if row["qShapeTested"] else 0.0 for row in group),
+                "qShapeMean": safe_mean(row["qShapeRmse"] for row in group),
+                "medianQShape": statistics.median(row["qShape"] for row in group),
+                "meanQShapeGainOverScalar": safe_mean(row["qShapeGainOverScalar"] for row in group),
+                "qShapeRouteRecoveryRate": safe_mean(1.0 if row["qShapeRouteRecovered"] else 0.0 for row in group),
             }
         )
     return summary
@@ -1350,6 +1440,9 @@ def proxy_score_rows(curves: list[dict], deficit_rows: list[dict], split: dict, 
                 "routeSafeAmpCeiling": deficit["routeSafeAmpCeiling"],
                 "failureMode": deficit["failureMode"],
                 "closureShapeBranch": deficit["closureShapeBranch"],
+                "qShapeClass": deficit["qShapeClass"],
+                "qShape": deficit["qShape"],
+                "qShapeRmse": deficit["qShapeRmse"],
             }
         )
     return rows
@@ -1391,6 +1484,7 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
     route_summary = capsule["routeSummary"]
     mode_summary = capsule["failureModeSummary"]
     branch_summary = capsule["closureShapeSummary"]
+    q_shape_summary = capsule["qShapeSummary"]
     correlations = capsule["correlations"]
     proxy = capsule["proxy"]
     top = sorted(deficit_rows, key=lambda row: row["baselineRmse"], reverse=True)[:20]
@@ -1451,8 +1545,8 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
 
     lines.extend(
         [
-            "",
-            "## Closure Vs Shape Split",
+        "",
+        "## Closure Vs Shape Split",
             "",
             "| Branch | Count | High RMSE | Baseline mean | Optimal scalar mean | Route-safe mean | Closure penalty | Observed route recovered |",
             "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -1465,6 +1559,39 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             f"{fmt(row['observedRouteRecoveryRate'] * 100)}% |"
         )
 
+    lines.extend(
+        [
+            "",
+            "## Q-Shape Probe",
+            "",
+            "This probe keeps the MTS support form but lets the radial exponent `q` vary per galaxy after optimizing scalar support. It is diagnostic only: if a branch improves here, the radial transport kernel is implicated.",
+            "",
+            "| Q-shape class | Count | High RMSE | Baseline mean | Scalar mean | Q-shape mean | Median q | Gain over scalar | Q-route recovered |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in q_shape_summary:
+        lines.append(
+            f"| {row['qShapeClass']} | {row['count']} | {row['highRmseCount']} | {fmt(row['baselineMean'])} | "
+            f"{fmt(row['optimalMean'])} | {fmt(row['qShapeMean'])} | {fmt(row['medianQShape'])} | "
+            f"{fmt(row['meanQShapeGainOverScalar'])} | {fmt(row['qShapeRouteRecoveryRate'] * 100)}% |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "### Q-Shape By Closure Branch",
+            "",
+            "| Branch | Count | High RMSE | Scalar mean | Q-shape mean | Median q | Gain over scalar |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in branch_summary:
+        lines.append(
+            f"| {row['closureShapeBranch']} | {row['count']} | {row['highRmseCount']} | {fmt(row['optimalMean'])} | "
+            f"{fmt(row['qShapeMean'])} | {fmt(row['medianQShape'])} | {fmt(row['meanQShapeGainOverScalar'])} |"
+        )
+
     branch_examples = sorted(
         [row for row in deficit_rows if row["baselineRmse"] >= 30],
         key=lambda row: (row["closureShapeBranch"], -row["baselineRmse"]),
@@ -1474,8 +1601,8 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             "",
             "### High-RMSE Branch Examples",
             "",
-            "| Galaxy | Branch | Route | MTS route | RMSE | Optimal | Route-safe | Required amp | Reason |",
-            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+            "| Galaxy | Branch | Q-class | Route | MTS route | RMSE | Scalar | Q-shape | q | Required amp | Reason |",
+            "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     seen_branches: dict[str, int] = {}
@@ -1485,8 +1612,8 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             continue
         seen_branches[row["closureShapeBranch"]] = count + 1
         lines.append(
-            f"| {row['name']} | {row['closureShapeBranch']} | {row['route']} | {row['baselineModelRoute']} | "
-            f"{fmt(row['baselineRmse'])} | {fmt(row['optimalRmse'])} | {fmt(row['routeSafeRmse'])} | "
+            f"| {row['name']} | {row['closureShapeBranch']} | {row['qShapeClass']} | {row['route']} | {row['baselineModelRoute']} | "
+            f"{fmt(row['baselineRmse'])} | {fmt(row['optimalRmse'])} | {fmt(row['qShapeRmse'])} | {fmt(row['qShape'])} | "
             f"{fmt(row['optimalAmp'])} | {row['closureShapeReason']} |"
         )
 
@@ -1563,6 +1690,8 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             "",
             "The closure-vs-shape split makes the next work separable: closure branches need a state-transition or admissible-route revision; radial-shape branches need a radial kernel/transport-shape revision; scalar-support branches can be used as the cleanest laboratory for a route-stable efficiency term.",
             "",
+            "The q-shape probe tests the simplest radial-kernel degree of freedom. Cases that remain bad after scalar and q optimization are stronger evidence for missing radial structure beyond the current one-parameter support shape.",
+            "",
         ]
     )
     return "\n".join(lines)
@@ -1629,6 +1758,7 @@ def write_support_deficit_artifacts(out_dir: Path, curves: list[dict], split: di
         "routeSummary": grouped_deficit_summary(deficit_rows, "route"),
         "failureModeSummary": grouped_deficit_summary(deficit_rows, "failureMode"),
         "closureShapeSummary": grouped_deficit_summary(deficit_rows, "closureShapeBranch"),
+        "qShapeSummary": grouped_deficit_summary(deficit_rows, "qShapeClass"),
         "conflictSummary": conflict_summary,
         "correlations": correlations,
         "proxyModel": {
@@ -2188,6 +2318,24 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
                     fmt(row["routeSafeMean"]),
                     fmt(row["meanRouteClosurePenalty"]),
                     fmt(row["observedRouteRecoveryRate"] * 100),
+                ]
+            )
+        )
+    print("Q-SHAPE PROBE")
+    print("q_class\tcount\thigh_rmse\tbaseline\tscalar\tq_shape\tmedian_q\tgain_over_scalar\trecovered_route%")
+    for row in capsule["qShapeSummary"]:
+        print(
+            "\t".join(
+                [
+                    row["qShapeClass"],
+                    str(row["count"]),
+                    str(row["highRmseCount"]),
+                    fmt(row["baselineMean"]),
+                    fmt(row["optimalMean"]),
+                    fmt(row["qShapeMean"]),
+                    fmt(row["medianQShape"]),
+                    fmt(row["meanQShapeGainOverScalar"]),
+                    fmt(row["qShapeRouteRecoveryRate"] * 100),
                 ]
             )
         )
