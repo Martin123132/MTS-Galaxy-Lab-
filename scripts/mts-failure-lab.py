@@ -951,6 +951,76 @@ def optimal_scalar_amp(curve: dict) -> tuple[float, dict]:
     return amp, score_curve_with_amp(curve, amp)
 
 
+def route_safe_amp_interval(curve: dict, base_score: dict | None = None) -> dict:
+    base = base_score or score_curve_with_amp(curve, 1.0)
+    base_route = base["candidateRoute"]
+
+    def route_at(amp: float) -> str:
+        return score_curve_with_amp(curve, amp)["candidateRoute"]
+
+    lower_break_route = ""
+    if route_at(0.0) == base_route:
+        floor = 0.0
+    else:
+        low = 0.0
+        high = 1.0
+        lower_break_route = route_at(low)
+        for _ in range(64):
+            mid = (low + high) / 2
+            if route_at(mid) == base_route:
+                high = mid
+            else:
+                low = mid
+                lower_break_route = route_at(mid)
+        floor = high
+
+    upper_break_route = ""
+    high = 1.0
+    while high < 512 and route_at(high) == base_route:
+        high *= 2
+    if high >= 512 and route_at(high) == base_route:
+        ceiling = math.inf
+    else:
+        low = 1.0
+        upper_break_route = route_at(high)
+        for _ in range(64):
+            mid = (low + high) / 2
+            if route_at(mid) == base_route:
+                low = mid
+            else:
+                high = mid
+                upper_break_route = route_at(mid)
+        ceiling = low
+
+    return {
+        "floor": floor,
+        "ceiling": ceiling,
+        "lowerBreakRoute": lower_break_route,
+        "upperBreakRoute": upper_break_route,
+    }
+
+
+def amp_within_interval(amp: float, interval: dict, tolerance: float = 1e-4) -> bool:
+    above_floor = amp + tolerance >= interval["floor"]
+    below_ceiling = True if math.isinf(interval["ceiling"]) else amp <= interval["ceiling"] + tolerance
+    return above_floor and below_ceiling
+
+
+def clamp_amp_to_interval(amp: float, interval: dict) -> float:
+    value = max(amp, interval["floor"])
+    if math.isfinite(interval["ceiling"]):
+        value = min(value, interval["ceiling"])
+    return value
+
+
+def amp_conflict_type(amp: float, interval: dict) -> str:
+    if amp < interval["floor"] - 1e-4:
+        return "requires support below route-safe floor"
+    if math.isfinite(interval["ceiling"]) and amp > interval["ceiling"] + 1e-4:
+        return "requires support above route-safe ceiling"
+    return "compatible"
+
+
 def classify_support_failure(row: dict) -> str:
     if row["baselineRmse"] < 20 and row["optimalImprovementPct"] < 25:
         return "baseline-acceptable"
@@ -976,6 +1046,9 @@ def support_deficit_rows(curves: list[dict]) -> list[dict]:
     for curve in curves:
         base = score_curve(curve)
         amp, opt = optimal_scalar_amp(curve)
+        interval = route_safe_amp_interval(curve, base)
+        safe_amp = clamp_amp_to_interval(amp, interval)
+        safe_score = score_curve_with_amp(curve, safe_amp)
         gain = base["rmse"] - opt["rmse"]
         row = {
             "name": curve["name"],
@@ -990,6 +1063,17 @@ def support_deficit_rows(curves: list[dict]) -> list[dict]:
             "optimalImprovementPct": pct_improvement(base["rmse"], opt["rmse"]),
             "optimalAmp": amp,
             "supportDeficit": amp - 1,
+            "routeSafeAmpFloor": interval["floor"],
+            "routeSafeAmpCeiling": interval["ceiling"],
+            "routeSafeLowerBreakRoute": interval["lowerBreakRoute"],
+            "routeSafeUpperBreakRoute": interval["upperBreakRoute"],
+            "routeSafeAmp": safe_amp,
+            "routeSafeRoute": safe_score["candidateRoute"],
+            "routeSafeRmse": safe_score["rmse"],
+            "routeSafeGain": base["rmse"] - safe_score["rmse"],
+            "routeSafeImprovementPct": pct_improvement(base["rmse"], safe_score["rmse"]),
+            "ampRouteCompatible": amp_within_interval(amp, interval),
+            "ampConflictType": amp_conflict_type(amp, interval),
             "innerBias": base["innerBias"],
             "midBias": base["midBias"],
             "outerBias": base["outerBias"],
@@ -1049,10 +1133,13 @@ def grouped_deficit_summary(rows: list[dict], key: str) -> list[dict]:
                 "highRmseCount": len(high),
                 "baselineMean": safe_mean(row["baselineRmse"] for row in group),
                 "optimalMean": safe_mean(row["optimalRmse"] for row in group),
+                "routeSafeMean": safe_mean(row["routeSafeRmse"] for row in group),
                 "medianOptimalAmp": statistics.median(row["optimalAmp"] for row in group),
                 "meanOptimalAmp": safe_mean(row["optimalAmp"] for row in group),
                 "meanImprovementPct": safe_mean(row["optimalImprovementPct"] for row in group),
+                "meanRouteSafeImprovementPct": safe_mean(row["routeSafeImprovementPct"] for row in group),
                 "routeMismatchRate": safe_mean(1.0 if row["routeMismatch"] else 0.0 for row in group),
+                "ampConflictRate": safe_mean(0.0 if row["ampRouteCompatible"] else 1.0 for row in group),
             }
         )
     return summary
@@ -1174,7 +1261,14 @@ def proxy_score_rows(curves: list[dict], deficit_rows: list[dict], split: dict, 
         deficit = by_name[curve["name"]]
         amp = predict_deficit_amp(model, deficit)
         proxy = score_curve_with_amp(curve, amp)
+        interval = {
+            "floor": deficit["routeSafeAmpFloor"],
+            "ceiling": deficit["routeSafeAmpCeiling"],
+        }
+        safe_amp = clamp_amp_to_interval(amp, interval)
+        safe_proxy = score_curve_with_amp(curve, safe_amp)
         deficit["proxyAmp"] = amp
+        deficit["safeProxyAmp"] = safe_amp
         deficit["proxyLogAmp"] = math.log(amp)
         deficit["targetLogAmp"] = math.log(clamp(deficit["optimalAmp"], 0.02, 80.0))
         rows.append(
@@ -1184,14 +1278,23 @@ def proxy_score_rows(curves: list[dict], deficit_rows: list[dict], split: dict, 
                 "route": curve["route"],
                 "baselineModelRoute": deficit["baselineModelRoute"],
                 "proxyRoute": proxy["candidateRoute"],
+                "safeProxyRoute": safe_proxy["candidateRoute"],
                 "routePreservedVsBaseline": proxy["candidateRoute"] == deficit["baselineModelRoute"],
+                "safeProxyRoutePreservedVsBaseline": safe_proxy["candidateRoute"] == deficit["baselineModelRoute"],
                 "baselineRmse": deficit["baselineRmse"],
                 "proxyRmse": proxy["rmse"],
+                "safeProxyRmse": safe_proxy["rmse"],
                 "optimalRmse": deficit["optimalRmse"],
+                "routeSafeRmse": deficit["routeSafeRmse"],
                 "deltaProxy": proxy["rmse"] - deficit["baselineRmse"],
+                "deltaSafeProxy": safe_proxy["rmse"] - deficit["baselineRmse"],
                 "proxyImprovementPct": pct_improvement(deficit["baselineRmse"], proxy["rmse"]),
+                "safeProxyImprovementPct": pct_improvement(deficit["baselineRmse"], safe_proxy["rmse"]),
                 "optimalAmp": deficit["optimalAmp"],
                 "proxyAmp": amp,
+                "safeProxyAmp": safe_amp,
+                "routeSafeAmpFloor": deficit["routeSafeAmpFloor"],
+                "routeSafeAmpCeiling": deficit["routeSafeAmpCeiling"],
                 "failureMode": deficit["failureMode"],
             }
         )
@@ -1201,21 +1304,32 @@ def proxy_score_rows(curves: list[dict], deficit_rows: list[dict], split: dict, 
 def proxy_summary(rows: list[dict]) -> dict:
     base = safe_mean(row["baselineRmse"] for row in rows)
     proxy = safe_mean(row["proxyRmse"] for row in rows)
+    safe_proxy = safe_mean(row["safeProxyRmse"] for row in rows)
     optimal = safe_mean(row["optimalRmse"] for row in rows)
+    route_safe = safe_mean(row["routeSafeRmse"] for row in rows)
     hard_base = safe_mean(row["baselineRmse"] for row in rows if row["route"] in HARD_ROUTES)
     hard_proxy = safe_mean(row["proxyRmse"] for row in rows if row["route"] in HARD_ROUTES)
+    hard_safe_proxy = safe_mean(row["safeProxyRmse"] for row in rows if row["route"] in HARD_ROUTES)
     return {
         "count": len(rows),
         "baselineMean": base,
         "proxyMean": proxy,
+        "safeProxyMean": safe_proxy,
         "optimalMean": optimal,
+        "routeSafeMean": route_safe,
         "proxyImprovementPct": pct_improvement(base, proxy),
+        "safeProxyImprovementPct": pct_improvement(base, safe_proxy),
         "optimalImprovementPct": pct_improvement(base, optimal),
+        "routeSafeImprovementPct": pct_improvement(base, route_safe),
         "hardBaselineMean": hard_base,
         "hardProxyMean": hard_proxy,
+        "hardSafeProxyMean": hard_safe_proxy,
         "hardProxyImprovementPct": pct_improvement(hard_base, hard_proxy),
+        "hardSafeProxyImprovementPct": pct_improvement(hard_base, hard_safe_proxy),
         "routePreservationRate": safe_mean(1.0 if row["routePreservedVsBaseline"] else 0.0 for row in rows),
+        "safeProxyRoutePreservationRate": safe_mean(1.0 if row["safeProxyRoutePreservedVsBaseline"] else 0.0 for row in rows),
         "wins": sum(1 for row in rows if row["proxyRmse"] < row["baselineRmse"]),
+        "safeProxyWins": sum(1 for row in rows if row["safeProxyRmse"] < row["baselineRmse"]),
     }
 
 
@@ -1226,6 +1340,8 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
     proxy = capsule["proxy"]
     top = sorted(deficit_rows, key=lambda row: row["baselineRmse"], reverse=True)[:20]
     high = [row for row in deficit_rows if row["baselineRmse"] >= 30]
+    conflicts = [row for row in deficit_rows if not row["ampRouteCompatible"]]
+    high_conflicts = [row for row in high if not row["ampRouteCompatible"]]
     signature_counts: dict[str, int] = {}
     for row in high:
         signature_counts[row["residualSignature"]] = signature_counts.get(row["residualSignature"], 0) + 1
@@ -1240,16 +1356,38 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
         f"High-RMSE systems (`RMSE >= 30 km/s`): {len(high)} / {len(deficit_rows)}.",
         f"Dominant high-RMSE residual signature: `{max(signature_counts, key=signature_counts.get) if signature_counts else '--'}`.",
         f"Route mismatch between observed state and locked MTS model state: {sum(1 for row in deficit_rows if row['routeMismatch'])} / {len(deficit_rows)}.",
+        f"Required scalar support outside the locked-route-safe interval: {len(conflicts)} / {len(deficit_rows)} overall, {len(high_conflicts)} / {len(high)} for high-RMSE systems.",
         "",
         "## Route-Level Deficit",
         "",
-        "| Route | Count | High RMSE | Baseline mean | Optimal scalar mean | Median amp | Mean amp | Gain | Route mismatch |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Route | Count | High RMSE | Baseline mean | Optimal scalar mean | Route-safe mean | Median amp | Optimal gain | Route-safe gain | Amp conflict |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in route_summary:
         lines.append(
             f"| {row['route']} | {row['count']} | {row['highRmseCount']} | {fmt(row['baselineMean'])} | {fmt(row['optimalMean'])} | "
-            f"{fmt(row['medianOptimalAmp'])} | {fmt(row['meanOptimalAmp'])} | {fmt(row['meanImprovementPct'])}% | {fmt(row['routeMismatchRate'] * 100)}% |"
+            f"{fmt(row['routeSafeMean'])} | {fmt(row['medianOptimalAmp'])} | {fmt(row['meanImprovementPct'])}% | "
+            f"{fmt(row['meanRouteSafeImprovementPct'])}% | {fmt(row['ampConflictRate'] * 100)}% |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Route-Safe Conflict",
+            "",
+            "The route-safe interval is the support-multiplier range that preserves the locked MTS model route. If the required scalar multiplier lies outside this interval, scalar support alone cannot both fix the curve and preserve that locked route.",
+            "",
+            "| Conflict type | Count | High RMSE | Median required amp | Median route-safe amp |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    conflict_groups: dict[str, list[dict]] = {}
+    for row in deficit_rows:
+        conflict_groups.setdefault(row["ampConflictType"], []).append(row)
+    for label, group in sorted(conflict_groups.items()):
+        lines.append(
+            f"| {label} | {len(group)} | {sum(1 for row in group if row['baselineRmse'] >= 30)} | "
+            f"{fmt(statistics.median(row['optimalAmp'] for row in group))} | {fmt(statistics.median(row['routeSafeAmp'] for row in group))} |"
         )
 
     lines.extend(
@@ -1284,17 +1422,18 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             "",
             "## Diagnostic Proxy",
             "",
-            "A ridge regression was fit on the train split to predict `log(required_amp)` from MTS state variables only. This is a post-fit diagnostic probe, not a blind MTS replacement.",
+            "A ridge regression was fit on the train split to predict `log(required_amp)` from MTS state variables only. The route-safe proxy clips that prediction to the locked-route-safe interval. This is a post-fit diagnostic probe, not a blind MTS replacement.",
             "",
-            "| Split | Baseline mean | Proxy mean | Optimal scalar mean | Proxy gain | Hard-route proxy gain | Route keep | R2 log amp |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Split | Baseline mean | Proxy mean | Safe proxy mean | Optimal scalar mean | Proxy gain | Safe proxy gain | Safe hard gain | Proxy route keep | Safe route keep | R2 log amp |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for split_name in ["train", "holdout", "all"]:
         item = proxy[split_name]
         lines.append(
-            f"| {split_name} | {fmt(item['baselineMean'])} | {fmt(item['proxyMean'])} | {fmt(item['optimalMean'])} | "
-            f"{fmt(item['proxyImprovementPct'])}% | {fmt(item['hardProxyImprovementPct'])}% | {fmt(item['routePreservationRate'] * 100)}% | {fmt(item['r2LogAmp'], 3)} |"
+            f"| {split_name} | {fmt(item['baselineMean'])} | {fmt(item['proxyMean'])} | {fmt(item['safeProxyMean'])} | {fmt(item['optimalMean'])} | "
+            f"{fmt(item['proxyImprovementPct'])}% | {fmt(item['safeProxyImprovementPct'])}% | {fmt(item['hardSafeProxyImprovementPct'])}% | "
+            f"{fmt(item['routePreservationRate'] * 100)}% | {fmt(item['safeProxyRoutePreservationRate'] * 100)}% | {fmt(item['r2LogAmp'], 3)} |"
         )
 
     lines.extend(
@@ -1302,14 +1441,15 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             "",
             "## Worst Baseline Failures",
             "",
-            "| Galaxy | Route | MTS route | RMSE | Optimal RMSE | Required amp | Signature | Failure mode |",
-            "| --- | --- | --- | ---: | ---: | ---: | --- | --- |",
+            "| Galaxy | Route | MTS route | RMSE | Optimal RMSE | Route-safe RMSE | Required amp | Safe amp | Conflict | Failure mode |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
         ]
     )
     for row in top:
         lines.append(
             f"| {row['name']} | {row['route']} | {row['baselineModelRoute']} | {fmt(row['baselineRmse'])} | "
-            f"{fmt(row['optimalRmse'])} | {fmt(row['optimalAmp'])} | `{row['residualSignature']}` | {row['failureMode']} |"
+            f"{fmt(row['optimalRmse'])} | {fmt(row['routeSafeRmse'])} | {fmt(row['optimalAmp'])} | {fmt(row['routeSafeAmp'])} | "
+            f"{row['ampConflictType']} | {row['failureMode']} |"
         )
 
     lines.extend(
@@ -1319,7 +1459,7 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             "",
             "The main failure is not a random residual cloud. Locked MTS is close to neutral for low-load systems, but hard-route systems want substantially larger support amplitude. The route mismatch count says the baseline often does not move itself into the observed high-load state.",
             "",
-            "The next framework-level question is therefore narrow: derive a route-stable transport-efficiency term from invariant MTS state variables, then test whether it fixes hard-route under-support without changing low-load and CDC systems.",
+            "The route-safe interval test sharpens the issue: where the required amplitude lies outside the locked-route-safe interval, a scalar support-efficiency term is not enough. Those cases require either a route-state closure change, a radial-shape change, or a refined definition of what route preservation should mean for MTS.",
             "",
         ]
     )
@@ -1344,6 +1484,21 @@ def write_support_deficit_artifacts(out_dir: Path, curves: list[dict], split: di
         }
         for feature in ["memoryLoad", "u075", "uOut", "uMax", "leffOverH", "fGasOut", "hOverRout", "routeBreakRisk"]
     ]
+    conflict_summary = []
+    for label in sorted({row["ampConflictType"] for row in deficit_rows}):
+        group = [row for row in deficit_rows if row["ampConflictType"] == label]
+        conflict_summary.append(
+            {
+                "conflictType": label,
+                "count": len(group),
+                "highRmseCount": sum(1 for row in group if row["baselineRmse"] >= 30),
+                "medianOptimalAmp": statistics.median(row["optimalAmp"] for row in group),
+                "medianRouteSafeAmp": statistics.median(row["routeSafeAmp"] for row in group),
+                "baselineMean": safe_mean(row["baselineRmse"] for row in group),
+                "routeSafeMean": safe_mean(row["routeSafeRmse"] for row in group),
+                "optimalMean": safe_mean(row["optimalRmse"] for row in group),
+            }
+        )
 
     def with_r2(rows: list[dict], summary: dict) -> dict:
         names = {row["name"] for row in rows}
@@ -1353,7 +1508,7 @@ def write_support_deficit_artifacts(out_dir: Path, curves: list[dict], split: di
 
     capsule = {
         "type": "mts-support-deficit-diagnosis",
-        "version": 1,
+        "version": 2,
         "generatedAt": dt.datetime.now(dt.UTC).isoformat(),
         "sourceScript": "scripts/mts-failure-lab.py",
         "constants": {
@@ -1371,6 +1526,7 @@ def write_support_deficit_artifacts(out_dir: Path, curves: list[dict], split: di
         },
         "routeSummary": grouped_deficit_summary(deficit_rows, "route"),
         "failureModeSummary": grouped_deficit_summary(deficit_rows, "failureMode"),
+        "conflictSummary": conflict_summary,
         "correlations": correlations,
         "proxyModel": {
             **model,
@@ -1884,7 +2040,7 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
     print(f"Loaded {len(curves)} LTG curves; train={len(split['train'])}, holdout={len(split['holdout'])}, seed={args.seed}")
     print("Support-deficit diagnosis: fixed MTS radial shape, per-galaxy scalar support multiplier")
     print("ROUTE DEFICIT")
-    print("route\tcount\thigh_rmse\tbaseline\toptimal\tmedian_amp\tgain%\tmismatch%")
+    print("route\tcount\thigh_rmse\tbaseline\toptimal\troute_safe\tmedian_amp\tgain%\tsafe_gain%\tamp_conflict%")
     for row in capsule["routeSummary"]:
         print(
             "\t".join(
@@ -1894,9 +2050,24 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
                     str(row["highRmseCount"]),
                     fmt(row["baselineMean"]),
                     fmt(row["optimalMean"]),
+                    fmt(row["routeSafeMean"]),
                     fmt(row["medianOptimalAmp"]),
                     fmt(row["meanImprovementPct"]),
-                    fmt(row["routeMismatchRate"] * 100),
+                    fmt(row["meanRouteSafeImprovementPct"]),
+                    fmt(row["ampConflictRate"] * 100),
+                ]
+            )
+        )
+    print("AMP CONFLICT")
+    for row in capsule["conflictSummary"]:
+        print(
+            "\t".join(
+                [
+                    row["conflictType"],
+                    f"count={row['count']}",
+                    f"high={row['highRmseCount']}",
+                    f"median_amp={fmt(row['medianOptimalAmp'])}",
+                    f"median_safe_amp={fmt(row['medianRouteSafeAmp'])}",
                 ]
             )
         )
@@ -1909,9 +2080,13 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
                     split_name,
                     f"baseline={fmt(item['baselineMean'])}",
                     f"proxy={fmt(item['proxyMean'])}",
+                    f"safe_proxy={fmt(item['safeProxyMean'])}",
                     f"gain={fmt(item['proxyImprovementPct'])}%",
+                    f"safe_gain={fmt(item['safeProxyImprovementPct'])}%",
                     f"hard_gain={fmt(item['hardProxyImprovementPct'])}%",
+                    f"safe_hard_gain={fmt(item['hardSafeProxyImprovementPct'])}%",
                     f"route_keep={fmt(item['routePreservationRate'] * 100)}%",
+                    f"safe_route_keep={fmt(item['safeProxyRoutePreservationRate'] * 100)}%",
                     f"r2={fmt(item['r2LogAmp'], 3)}",
                 ]
             )
