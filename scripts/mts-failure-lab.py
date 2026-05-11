@@ -1640,6 +1640,99 @@ def systematics_verdict(row: dict) -> str:
     return "framework/closure-facing"
 
 
+def route_oracle_amp_grid() -> list[float]:
+    values = {0.0}
+    values.update(index * 0.05 for index in range(1, 41))
+    values.update(2.0 + index * 0.1 for index in range(1, 101))
+    values.update(12.0 + index * 0.5 for index in range(1, 57))
+    values.update(40.0 + index * 2.0 for index in range(1, 21))
+    return sorted(values)
+
+
+def observed_route_oracle(curve: dict) -> tuple[float, float, dict | None]:
+    target_route = curve["route"]
+    q_values = sorted(set([Q_DEFAULT] + Q_DIAGNOSTIC_GRID))
+    amp_values = route_oracle_amp_grid()
+    best_q = math.nan
+    best_amp = math.nan
+    best_score: dict | None = None
+
+    for q_value in q_values:
+        local_amp = math.nan
+        local_score: dict | None = None
+        for amp in amp_values:
+            score = score_curve_with_params(curve, amp, q_value)
+            if score["candidateRoute"] != target_route:
+                continue
+            if local_score is None or score["rmse"] < local_score["rmse"]:
+                local_amp = amp
+                local_score = score
+        if local_score is None:
+            continue
+
+        for step in [1.0, 0.5, 0.25, 0.1, 0.05, 0.02]:
+            improved = True
+            passes = 0
+            while improved and passes < 16:
+                improved = False
+                passes += 1
+                for next_amp in [clamp(local_amp - step, 0.0, 80.0), clamp(local_amp + step, 0.0, 80.0)]:
+                    score = score_curve_with_params(curve, next_amp, q_value)
+                    if score["candidateRoute"] == target_route and score["rmse"] + 1e-9 < local_score["rmse"]:
+                        local_amp = next_amp
+                        local_score = score
+                        improved = True
+
+        if best_score is None or local_score["rmse"] < best_score["rmse"]:
+            best_q = q_value
+            best_amp = local_amp
+            best_score = local_score
+
+    return best_q, best_amp, best_score
+
+
+def route_state_failure_cause(row: dict) -> str:
+    if not row["routeMismatch"]:
+        return "locked route matches observed route"
+    observed = row["route"]
+    locked = row["baselineModelRoute"]
+    if observed == "CDC-low-load" and row["baselineModelU0"] >= 0:
+        return "locked central state loses CDC sign"
+    if observed == "outer-infeasible" and row["baselineModelUOut"] < 1:
+        return "locked u_out remains below outer-infeasible threshold"
+    if locked == "outer-infeasible" and observed != "outer-infeasible":
+        return "locked u_out crosses outer-infeasible threshold"
+    if observed in {"buffered single-crossing", "buffered upward-crossing"} and locked == "low-load":
+        return "locked profile misses observed route crossing"
+    if observed == "buffered upward-crossing" and row["baselineModelUpCrossings"] < row["observedUpCrossings"]:
+        return "locked upward crossing count is too low"
+    if observed == "buffered single-crossing" and row["baselineModelDownCrossings"] < row["observedDownCrossings"]:
+        return "locked downward crossing count is too low"
+    if row["baselineModelDownCrossings"] != row["observedDownCrossings"] or row["baselineModelUpCrossings"] != row["observedUpCrossings"]:
+        return "locked crossing count differs from observed route"
+    return f"locked route {locked} differs from observed {observed}"
+
+
+def should_run_closure_oracle(row: dict) -> bool:
+    return bool(row["routeMismatch"]) or row["postShapeRmse"] >= RESIDUAL_REPAIR_RMSE
+
+
+def classify_closure_oracle(row: dict) -> str:
+    if not row["closureTested"]:
+        return "not tested"
+    if row["systematicsClass"] in {"M/L-sensitive", "velocity-scale-sensitive", "baryon-scale-sensitive", "error-bar dominated"}:
+        return "route mismatch but systematics dominated"
+    if row["positiveSupportImpossible"] and not row["baryonFloorClearedBySystematics"]:
+        return "route mismatch and baryonic-floor limited"
+    if not math.isfinite(row["observedRouteOracleRmse"]):
+        return "not closure repairable"
+    if row["closureGainOverPostShape"] >= RESIDUAL_MEANINGFUL_GAIN and row["observedRouteOracleRmse"] < RESIDUAL_REPAIR_RMSE:
+        return "observed-route repairable"
+    if row["closureGainOverPostShape"] >= RESIDUAL_MEANINGFUL_GAIN:
+        return "observed-route helps but residual remains"
+    return "not closure repairable"
+
+
 def support_deficit_rows(curves: list[dict]) -> list[dict]:
     rows = []
     for curve in curves:
@@ -1662,6 +1755,14 @@ def support_deficit_rows(curves: list[dict]) -> list[dict]:
             "routeMismatch": curve["route"] != base["candidateRoute"],
             "routeChangeAtOptimalAmp": base["candidateRoute"] != opt["candidateRoute"],
             "baselineRmse": base["rmse"],
+            "baselineModelU0": base["candidateU0"],
+            "baselineModelU075": base["candidateU075"],
+            "baselineModelUOut": base["candidateUOut"],
+            "baselineModelUMax": base["candidateUMax"],
+            "baselineModelDownCrossings": base["candidateDownCrossings"],
+            "baselineModelUpCrossings": base["candidateUpCrossings"],
+            "observedDownCrossings": curve["downCrossings"],
+            "observedUpCrossings": curve["upCrossings"],
             "optimalRmse": opt["rmse"],
             "optimalGain": gain,
             "optimalImprovementPct": pct_improvement(base["rmse"], opt["rmse"]),
@@ -1851,6 +1952,35 @@ def support_deficit_rows(curves: list[dict]) -> list[dict]:
             }
         )
         row["systematicsClass"] = classify_systematics(row)
+        closure_tested = should_run_closure_oracle(row)
+        if closure_tested:
+            closure_q, closure_amp, closure_score = observed_route_oracle(curve)
+            if closure_score is None:
+                closure_rmse = math.nan
+                closure_route = "unavailable"
+            else:
+                closure_rmse = closure_score["rmse"]
+                closure_route = closure_score["candidateRoute"]
+        else:
+            closure_q = math.nan
+            closure_amp = math.nan
+            closure_rmse = post_shape_score["rmse"]
+            closure_route = post_shape_score["candidateRoute"]
+        row.update(
+            {
+                "closureTested": closure_tested,
+                "observedRouteOracleRmse": closure_rmse,
+                "observedRouteOracleAmp": closure_amp,
+                "observedRouteOracleQ": closure_q,
+                "observedRouteOracleRoute": closure_route,
+                "closureGainOverPostShape": post_shape_score["rmse"] - closure_rmse if math.isfinite(closure_rmse) else math.nan,
+                "lockedToObservedRouteTransition": (
+                    f"{row['baselineModelRoute']} -> {row['route']}" if row["routeMismatch"] else "matched"
+                ),
+                "routeStateFailureCause": route_state_failure_cause(row),
+            }
+        )
+        row["closureClass"] = classify_closure_oracle(row)
         rows.append(row)
     return rows
 
@@ -1937,6 +2067,14 @@ def grouped_deficit_summary(rows: list[dict], key: str) -> list[dict]:
                 "velocityScaleStressMean": safe_mean(row["velocityScaleStressRmse"] for row in group),
                 "baryonScaleStressMean": safe_mean(row["baryonScaleStressRmse"] for row in group),
                 "baryonFloorClearedRate": safe_mean(1.0 if row["baryonFloorClearedBySystematics"] else 0.0 for row in group),
+                "closureTestRate": safe_mean(1.0 if row["closureTested"] else 0.0 for row in group),
+                "observedRouteOracleMean": safe_mean(row["observedRouteOracleRmse"] for row in group),
+                "meanClosureGainOverPostShape": safe_mean(row["closureGainOverPostShape"] for row in group),
+                "observedRouteOracleHitRate": safe_mean(
+                    1.0 if row["observedRouteOracleRoute"] == row["route"] else 0.0 for row in group
+                ),
+                "medianObservedRouteOracleAmp": safe_median(row["observedRouteOracleAmp"] for row in group),
+                "medianObservedRouteOracleQ": safe_median(row["observedRouteOracleQ"] for row in group),
             }
         )
     return summary
@@ -2144,6 +2282,8 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
     residual_probe_summary = capsule["residualProbeSummary"]
     baryon_floor_summary = capsule["baryonFloorSummary"]
     systematics_summary = capsule["systematicsSummary"]
+    route_closure_summary = capsule["routeClosureSummary"]
+    route_transition_summary = capsule["routeTransitionSummary"]
     correlations = capsule["correlations"]
     proxy = capsule["proxy"]
     top = sorted(deficit_rows, key=lambda row: row["baselineRmse"], reverse=True)[:20]
@@ -2455,6 +2595,98 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
     lines.extend(
         [
             "",
+            "## Route-Closure Audit",
+            "",
+            "This diagnostic forces the scalar/q MTS support family to land in the observed route state when possible. It tests route-state closure only; it does not promote a new support law.",
+            "",
+            "| Closure class | Count | High RMSE | Post-shape mean | Oracle mean | Closure gain | Tested | Oracle route hit |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in route_closure_summary:
+        lines.append(
+            f"| {row['closureClass']} | {row['count']} | {row['highRmseCount']} | {fmt(row['postShapeMean'])} | "
+            f"{fmt(row['observedRouteOracleMean'])} | {fmt(row['meanClosureGainOverPostShape'])} | "
+            f"{fmt(row['closureTestRate'] * 100)}% | {fmt(row['observedRouteOracleHitRate'] * 100)}% |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Locked vs Observed Route Transitions",
+            "",
+            "| Transition | Count | High RMSE | Post-shape mean | Oracle mean | Median amp | Median q | Tested |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in route_transition_summary:
+        lines.append(
+            f"| {row['lockedToObservedRouteTransition']} | {row['count']} | {row['highRmseCount']} | "
+            f"{fmt(row['postShapeMean'])} | {fmt(row['observedRouteOracleMean'])} | "
+            f"{fmt(row['medianObservedRouteOracleAmp'])} | {fmt(row['medianObservedRouteOracleQ'])} | "
+            f"{fmt(row['closureTestRate'] * 100)}% |"
+        )
+
+    observed_route_rows = sorted(
+        [row for row in deficit_rows if row["closureTested"]],
+        key=lambda row: row["closureGainOverPostShape"] if math.isfinite(row["closureGainOverPostShape"]) else -999,
+        reverse=True,
+    )[:20]
+    lines.extend(
+        [
+            "",
+            "## Observed-Route Oracle",
+            "",
+            "| Galaxy | Transition | Post-shape | Oracle | Gain | Amp | q | Oracle route | Class | Cause |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |",
+        ]
+    )
+    for row in observed_route_rows:
+        lines.append(
+            f"| {row['name']} | {row['lockedToObservedRouteTransition']} | {fmt(row['postShapeRmse'])} | "
+            f"{fmt(row['observedRouteOracleRmse'])} | {fmt(row['closureGainOverPostShape'])} | "
+            f"{fmt(row['observedRouteOracleAmp'])} | {fmt(row['observedRouteOracleQ'])} | "
+            f"{row['observedRouteOracleRoute']} | {row['closureClass']} | {row['routeStateFailureCause']} |"
+        )
+
+    named_framework_targets = {"ESO563-G021", "IC4202", "NGC4217"}
+    framework_ledger = sorted(
+        [
+            row
+            for row in deficit_rows
+            if row["name"] in named_framework_targets
+            or (
+                row["baselineRmse"] >= 30
+                and row["routeMismatch"]
+                and row["systematicsClass"] not in {
+                    "M/L-sensitive",
+                    "velocity-scale-sensitive",
+                    "baryon-scale-sensitive",
+                    "error-bar dominated",
+                }
+            )
+        ],
+        key=lambda row: (row["name"] not in named_framework_targets, -row["baselineRmse"]),
+    )
+    lines.extend(
+        [
+            "",
+            "## Framework-Facing Case Ledger",
+            "",
+            "| Galaxy | Route | Locked route | Post-shape | Best systematics | Oracle | Closure class | Verdict | Cause |",
+            "| --- | --- | --- | ---: | ---: | ---: | --- | --- | --- |",
+        ]
+    )
+    for row in framework_ledger:
+        lines.append(
+            f"| {row['name']} | {row['route']} | {row['baselineModelRoute']} | {fmt(row['postShapeRmse'])} | "
+            f"{fmt(row['bestSystematicsRmse'])} | {fmt(row['observedRouteOracleRmse'])} | "
+            f"{row['closureClass']} | {systematics_verdict(row)} | {row['routeStateFailureCause']} |"
+        )
+
+    lines.extend(
+        [
+            "",
             "## Baryonic Floor Check",
             "",
             "This check uses zero added support. If baryons alone already sit above the observed curve, any non-negative support law is structurally blocked at those radii.",
@@ -2713,6 +2945,8 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             "",
             "The systematics stress probe then tests whether those leftovers are sensitive to M/L, a velocity-scale proxy, baryonic normalization, or error weighting before treating them as framework-level failures.",
             "",
+            "The route-closure audit tests whether forcing the diagnostic scalar/q family into the observed route state repairs the residual. Cases that remain bad here are the cleanest candidates for a genuine route-state closure problem.",
+            "",
         ]
     )
     return "\n".join(lines)
@@ -2760,7 +2994,7 @@ def write_support_deficit_artifacts(out_dir: Path, curves: list[dict], split: di
 
     capsule = {
         "type": "mts-support-deficit-diagnosis",
-        "version": 5,
+        "version": 6,
         "generatedAt": dt.datetime.now(dt.UTC).isoformat(),
         "sourceScript": "scripts/mts-failure-lab.py",
         "constants": {
@@ -2785,6 +3019,8 @@ def write_support_deficit_artifacts(out_dir: Path, curves: list[dict], split: di
         "residualProbeSummary": grouped_deficit_summary(deficit_rows, "residualProbeClass"),
         "baryonFloorSummary": grouped_deficit_summary(deficit_rows, "positiveSupportImpossible"),
         "systematicsSummary": grouped_deficit_summary(deficit_rows, "systematicsClass"),
+        "routeClosureSummary": grouped_deficit_summary(deficit_rows, "closureClass"),
+        "routeTransitionSummary": grouped_deficit_summary(deficit_rows, "lockedToObservedRouteTransition"),
         "conflictSummary": conflict_summary,
         "correlations": correlations,
         "proxyModel": {
@@ -3414,6 +3650,23 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
                     fmt(row["meanSystematicsGainOverPostShape"]),
                     fmt(row["weightedPostShapeMean"]),
                     fmt(row["baryonFloorClearedRate"] * 100),
+                ]
+            )
+        )
+    print("ROUTE-CLOSURE AUDIT")
+    print("closure_class\tcount\thigh_rmse\tpost_shape\toracle\tgain\ttested%\toracle_hit%")
+    for row in capsule["routeClosureSummary"]:
+        print(
+            "\t".join(
+                [
+                    row["closureClass"],
+                    str(row["count"]),
+                    str(row["highRmseCount"]),
+                    fmt(row["postShapeMean"]),
+                    fmt(row["observedRouteOracleMean"]),
+                    fmt(row["meanClosureGainOverPostShape"]),
+                    fmt(row["closureTestRate"] * 100),
+                    fmt(row["observedRouteOracleHitRate"] * 100),
                 ]
             )
         )
