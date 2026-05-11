@@ -1,0 +1,909 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MTS Galaxy Lab</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="control-rail" aria-label="Simulation controls">
+        <header class="brand-block">
+          <div class="brand-mark" aria-hidden="true"></div>
+          <div>
+            <h1>MTS Galaxy Lab</h1>
+            <p>Transport response simulator</p>
+          </div>
+        </header>
+
+        <section class="mode-switch" aria-label="Mode">
+          <button class="mode-button active" data-mode="synthetic" type="button">Synthetic</button>
+          <button class="mode-button" data-mode="observed" type="button">LTG</button>
+          <button class="mode-button" data-mode="etg" type="button">ETG</button>
+        </section>
+
+        <section class="control-section synthetic-only">
+          <div class="section-title">Galaxy Structure</div>
+          <label class="field">
+            <span>Disk scale h <output id="hOut">3.2</output> kpc</span>
+            <input id="h" type="range" min="0.8" max="8" step="0.1" value="3.2">
+          </label>
+          <label class="field">
+            <span>Outer radius <output id="rOutOut">24</output> kpc</span>
+            <input id="rOut" type="range" min="8" max="60" step="1" value="24">
+          </label>
+          <label class="field">
+            <span>Disk load <output id="diskAmpOut">155</output> km/s</span>
+            <input id="diskAmp" type="range" min="40" max="260" step="1" value="155">
+          </label>
+          <label class="field">
+            <span>Gas load <output id="gasAmpOut">62</output> km/s</span>
+            <input id="gasAmp" type="range" min="0" max="140" step="1" value="62">
+          </label>
+          <label class="field">
+            <span>Bulge load <output id="bulgeAmpOut">44</output> km/s</span>
+            <input id="bulgeAmp" type="range" min="0" max="240" step="1" value="44">
+          </label>
+          <label class="field">
+            <span>Gas fraction out <output id="fGasOut">0.24</output></span>
+            <input id="fGas" type="range" min="0" max="0.85" step="0.01" value="0.24">
+          </label>
+        </section>
+
+        <section class="control-section synthetic-only">
+          <div class="section-title">Transport</div>
+          <label class="field">
+            <span>q exponent <output id="qOut">0.77</output></span>
+            <input id="q" type="range" min="0.45" max="1.2" step="0.01" value="0.77">
+          </label>
+          <label class="field">
+            <span>Particle speed <output id="speedOut">1.0</output>x</span>
+            <input id="speed" type="range" min="0.1" max="4" step="0.1" value="1">
+          </label>
+          <label class="check-row">
+            <input id="showMtsOnly" type="checkbox">
+            <span>Transport support only</span>
+          </label>
+          <button id="randomize" class="primary-action" type="button">Re-seed Galaxy</button>
+        </section>
+
+        <section class="control-section view-section">
+          <div class="section-title">Galaxy View</div>
+          <label class="field">
+            <span>Camera tilt <output id="viewTiltOut">51</output> deg</span>
+            <input id="viewTilt" type="range" min="18" max="78" step="1" value="51">
+          </label>
+          <label class="field">
+            <span>Depth lift <output id="viewDepthOut">1.00</output>x</span>
+            <input id="viewDepth" type="range" min="0" max="1.8" step="0.05" value="1">
+          </label>
+          <label class="select-field">
+            <span>Particle colour</span>
+            <select id="viewColorMode">
+              <option value="component">Component</option>
+              <option value="velocity">Velocity</option>
+              <option value="residual">Residual</option>
+            </select>
+          </label>
+          <div class="layer-grid" aria-label="Galaxy render layers">
+            <label class="check-row">
+              <input id="layerStars" type="checkbox" checked>
+              <span>Stars</span>
+            </label>
+            <label class="check-row">
+              <input id="layerGas" type="checkbox" checked>
+              <span>Gas</span>
+            </label>
+            <label class="check-row">
+              <input id="layerBulge" type="checkbox" checked>
+              <span>Bulge</span>
+            </label>
+            <label class="check-row">
+              <input id="layerGuides" type="checkbox" checked>
+              <span>Guides</span>
+            </label>
+            <label class="check-row">
+              <input id="layerCore" type="checkbox" checked>
+              <span>Core</span>
+            </label>
+            <label class="check-row" title="Residual field">
+              <input id="layerResidual" type="checkbox" checked>
+              <span>Residual</span>
+            </label>
+          </div>
+        </section>
+
+        <section class="control-section synthetic-only forge-section">
+          <div class="section-title">Galaxy Forge</div>
+          <label class="select-field">
+            <span>Morphology</span>
+            <select id="forgePreset">
+              <option value="lsb">LSB disk</option>
+              <option value="dwarf">Dwarf irregular</option>
+              <option value="gas-spiral">Gas-rich spiral</option>
+              <option value="bulge-ltg">Bulge-dominated LTG</option>
+              <option value="compact-etg">Compact ETG-like</option>
+              <option value="cdc-low">CDC-low analogue</option>
+              <option value="outer-infeasible">Outer-infeasible stress</option>
+              <option value="late-load">Late-load pathological</option>
+            </select>
+          </label>
+          <label class="number-field">
+            <span>Seed</span>
+            <input id="forgeSeed" type="number" min="1" max="999999" step="1" value="1007">
+          </label>
+          <div class="export-grid">
+            <button id="forgeGalaxy" class="primary-action" type="button">Forge Galaxy</button>
+            <button id="nextForgeSeed" class="secondary-action" type="button">Next Seed</button>
+          </div>
+          <div class="mini-note" id="forgeNote">Create reproducible synthetic morphology stress tests.</div>
+        </section>
+
+        <section class="control-section synthetic-only evolution-section">
+          <div class="section-title">Time Evolution</div>
+          <label class="select-field">
+            <span>Track</span>
+            <select id="evolutionTrack">
+              <option value="late-load">Late-load build</option>
+              <option value="gas-depletion">Gas depletion</option>
+              <option value="compaction">Bulge compaction</option>
+              <option value="rebuild">Gas rebuild</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Epoch <output id="evolutionTimeOut">0.00</output></span>
+            <input id="evolutionTime" type="range" min="0" max="1" step="0.005" value="0">
+          </label>
+          <div class="export-grid">
+            <button id="playEvolution" class="primary-action" type="button">Play</button>
+            <button id="resetEvolution" class="secondary-action" type="button">Reset</button>
+          </div>
+          <div class="mini-note" id="evolutionNote">Runs controlled synthetic tracks so route states can flip live.</div>
+        </section>
+
+        <section class="control-section observed-only hidden">
+          <div class="section-title">Observed Curve</div>
+          <label class="select-field">
+            <span>Sample</span>
+            <select id="sampleSelect"></select>
+          </label>
+          <label class="file-field">
+            <span>Import ROTMOD .dat</span>
+            <input id="fileInput" type="file" accept=".dat,.txt">
+          </label>
+          <textarea id="pasteInput" spellcheck="false" aria-label="Paste ROTMOD text"></textarea>
+          <button id="loadPasted" class="primary-action" type="button">Load Text</button>
+          <div class="section-title">Custom Normalizer</div>
+          <label class="text-field">
+            <span>Galaxy name</span>
+            <input id="customGalaxyName" type="text" value="Custom galaxy">
+          </label>
+          <label class="file-field">
+            <span>Import CSV / JSON / text</span>
+            <input id="customFileInput" type="file" accept=".csv,.json,.txt,.dat,application/json,text/csv,text/plain">
+          </label>
+          <div class="map-tools">
+            <select id="customRadiusUnit" aria-label="Custom radius unit">
+              <option value="kpc">radius in kpc</option>
+              <option value="pc">radius in pc</option>
+              <option value="arcsec">radius in arcsec</option>
+            </select>
+            <select id="customVelocityConvention" aria-label="Custom velocity convention">
+              <option value="deprojected">velocities deprojected</option>
+              <option value="los-observed">Vobs line-of-sight</option>
+              <option value="los-all">all velocities line-of-sight</option>
+            </select>
+          </div>
+          <div class="numeric-grid">
+            <label class="number-field">
+              <span>Distance scale</span>
+              <input id="customDistanceScale" type="number" min="0.01" max="100" step="0.01" value="1">
+            </label>
+            <label class="number-field">
+              <span>Distance Mpc</span>
+              <input id="customDistanceMpc" type="number" min="0.001" max="20000" step="0.001" value="10">
+            </label>
+            <label class="number-field">
+              <span>Inclination deg</span>
+              <input id="customInclinationDeg" type="number" min="1" max="90" step="0.1" value="90">
+            </label>
+            <label class="number-field">
+              <span>h override kpc</span>
+              <input id="customHOverride" type="number" min="0" max="200" step="0.01" value="0">
+            </label>
+          </div>
+          <div class="mini-note" id="customImportNote">CSV/JSON columns can use r, radius, Vobs, errV, Vgas, Vdisk, Vbulge, SBdisk, and SBbul.</div>
+          <div class="export-grid">
+            <button id="loadCustomGalaxy" class="primary-action" type="button">Normalize Custom</button>
+            <button id="exportNormalizedCsv" class="secondary-action" type="button">Export Normalized</button>
+          </div>
+        </section>
+
+        <section class="control-section etg-only hidden">
+          <div class="section-title">ETG Stage-4</div>
+          <label class="select-field">
+            <span>Sample</span>
+            <select id="etgSelect"></select>
+          </label>
+          <div class="mini-note" id="etgNote">High-res disk and bulge components bundled from Rotmod_ETG.</div>
+        </section>
+
+        <section class="control-section framework-section">
+          <div class="section-title">Framework Test Rig</div>
+          <label class="select-field">
+            <span>Preset</span>
+            <select id="frameworkPreset">
+              <option value="mts">MTS baseline</option>
+              <option value="baryon">Baryon only</option>
+              <option value="soft">Soft radial support</option>
+              <option value="outer">Outer gate support</option>
+              <option value="residual">Observed residual check</option>
+            </select>
+          </label>
+          <label class="formula-field">
+            <span>Support law v2</span>
+            <textarea id="frameworkFormula" spellcheck="false" aria-label="Custom framework support law"></textarea>
+          </label>
+          <div class="mini-note" id="frameworkNote">Use variables like r, h, rOut, leff, memory, vGas, vDisk, vBulge, vBar, vObs, and uObs.</div>
+          <div class="export-grid">
+            <button id="applyFramework" class="primary-action" type="button">Run Current</button>
+            <button id="runFrameworkBatch" class="secondary-action" type="button">Run 175 LTGs</button>
+            <button id="exportFrameworkCsv" class="secondary-action wide-action" type="button">Export Framework Scores</button>
+          </div>
+        </section>
+
+        <section class="control-section comparison-section">
+          <div class="section-title">Comparative Mode</div>
+          <label class="select-field">
+            <span>Comparator preset</span>
+            <select id="comparisonPreset">
+              <option value="mts">MTS baseline</option>
+              <option value="baryon" selected>Baryon only</option>
+              <option value="soft">Soft radial support</option>
+              <option value="outer">Outer gate support</option>
+              <option value="residual">Observed residual check</option>
+            </select>
+          </label>
+          <label class="formula-field">
+            <span>Comparator law v2</span>
+            <textarea id="comparisonFormula" spellcheck="false" aria-label="Comparator framework support law"></textarea>
+          </label>
+          <label class="select-field">
+            <span>Residual field</span>
+            <select id="residualFieldMode">
+              <option value="off">Off</option>
+              <option value="baseline">MTS residual</option>
+              <option value="custom" selected>Test rig residual</option>
+              <option value="comparison">Comparator residual</option>
+              <option value="difference">Test minus comparator</option>
+            </select>
+          </label>
+          <div class="mini-note" id="comparisonNote">Comparator B is drawn against the active Test Rig formula A.</div>
+          <button id="applyComparison" class="primary-action" type="button">Run Comparator</button>
+        </section>
+
+        <section class="control-section registry-section">
+          <div class="section-title">Formula Registry</div>
+          <label class="select-field">
+            <span>Saved law</span>
+            <select id="formulaRegistrySelect"></select>
+          </label>
+          <label class="text-field">
+            <span>Registry name</span>
+            <input id="formulaRegistryName" type="text" value="My support law">
+          </label>
+          <div class="export-grid">
+            <button id="saveFormulaA" class="primary-action" type="button">Save A</button>
+            <button id="loadFormulaA" class="secondary-action" type="button">Load to A</button>
+            <button id="loadFormulaB" class="secondary-action" type="button">Load to B</button>
+            <button id="exportFormulaRegistry" class="secondary-action" type="button">Export Registry</button>
+          </div>
+          <label class="file-field">
+            <span>Import registry</span>
+            <input id="formulaRegistryInput" type="file" accept=".json,application/json">
+          </label>
+          <div class="mini-note" id="formulaRegistryNote">Built-ins are always available; saved laws stay in this browser.</div>
+        </section>
+
+        <section class="control-section benchmark-section">
+          <div class="section-title">Benchmark Suite</div>
+          <label class="select-field">
+            <span>Pack</span>
+            <select id="benchmarkPack">
+              <option value="all">All 175 LTGs</option>
+              <option value="late">Late-load hunt</option>
+              <option value="cdc">CDC-low systems</option>
+              <option value="single">Single-crossing systems</option>
+              <option value="infeasible">Outer-infeasible systems</option>
+              <option value="worst">Worst baseline RMSE</option>
+              <option value="best">Best baseline RMSE</option>
+            </select>
+          </label>
+          <div class="mini-note" id="benchmarkNote">Runs formula A versus comparator B on a reproducible SPARC pack.</div>
+          <div class="export-grid">
+            <button id="runBenchmarkSuite" class="primary-action" type="button">Run Suite</button>
+            <button id="exportBenchmarkCsv" class="secondary-action" type="button">Export Suite</button>
+          </div>
+        </section>
+
+        <section class="control-section population-section ltg-browser-only hidden">
+          <div class="section-title">Population Explorer</div>
+          <div class="map-tools">
+            <select id="populationX" aria-label="Population x axis">
+              <option value="memoryLoad">memory</option>
+              <option value="rmse">RMSE</option>
+              <option value="u075">u_0.75</option>
+              <option value="ltgCurvatureA">LTG A</option>
+              <option value="sLawS">S-law S</option>
+              <option value="uMax">u_max</option>
+              <option value="xCross">x_cross</option>
+              <option value="leffOverH">L_eff/h</option>
+            </select>
+            <select id="populationY" aria-label="Population y axis">
+              <option value="rmse">RMSE</option>
+              <option value="memoryLoad">memory</option>
+              <option value="u075">u_0.75</option>
+              <option value="ltgCurvatureA">LTG A</option>
+              <option value="sLawS">S-law S</option>
+              <option value="uMax">u_max</option>
+              <option value="xCross">x_cross</option>
+              <option value="leffOverH">L_eff/h</option>
+            </select>
+          </div>
+          <label class="select-field">
+            <span>Subset</span>
+            <select id="populationSubset">
+              <option value="browser">Current browser filter</option>
+              <option value="all">All LTGs</option>
+              <option value="low-load">Low-load</option>
+              <option value="CDC-low-load">CDC-low</option>
+              <option value="buffered upward-crossing">Upward</option>
+              <option value="buffered single-crossing">Single</option>
+              <option value="outer-infeasible">Infeasible</option>
+            </select>
+          </label>
+          <label class="select-field">
+            <span>Resamples</span>
+            <select id="populationResamples">
+              <option value="100">100 quick</option>
+              <option value="200" selected>200 balanced</option>
+              <option value="500">500 deeper</option>
+            </select>
+          </label>
+          <div class="mini-note" id="populationNote">Run correlations, route counts, bootstrap confidence, and jackknife stability on LTG subsets.</div>
+          <div class="export-grid">
+            <button id="runPopulationStats" class="primary-action" type="button">Run Population</button>
+            <button id="exportPopulationCsv" class="secondary-action" type="button">Export Population</button>
+          </div>
+        </section>
+
+        <section class="control-section reproducibility-section">
+          <div class="section-title">Reproducibility</div>
+          <div class="mini-note" id="reproduceNote">Validate locked claims and export active-galaxy case files.</div>
+          <div class="export-grid">
+            <button id="runPaperChecks" class="primary-action" type="button">Run Claims</button>
+            <button id="exportPaperReport" class="secondary-action" type="button">Export Claims</button>
+            <button id="exportCaseFile" class="secondary-action wide-action" type="button">Export Case File</button>
+          </div>
+        </section>
+
+        <section class="control-section uncertainty-section">
+          <div class="section-title">Uncertainty Lab</div>
+          <label class="field">
+            <span>Velocity noise <output id="uncertaintyNoiseOut">5.0</output>%</span>
+            <input id="uncertaintyNoise" type="range" min="0" max="12" step="0.5" value="5">
+          </label>
+          <label class="field">
+            <span>M/L jitter <output id="uncertaintyMlOut">8.0</output>%</span>
+            <input id="uncertaintyMl" type="range" min="0" max="20" step="0.5" value="8">
+          </label>
+          <label class="select-field">
+            <span>Trials</span>
+            <select id="uncertaintyTrials">
+              <option value="32">32 quick</option>
+              <option value="64" selected>64 balanced</option>
+              <option value="128">128 deep</option>
+            </select>
+          </label>
+          <div class="mini-note" id="uncertaintyNote">Perturb the active galaxy and test route stability.</div>
+          <div class="export-grid">
+            <button id="runUncertainty" class="primary-action" type="button">Run Robustness</button>
+            <button id="exportUncertaintyCsv" class="secondary-action" type="button">Export Robustness</button>
+          </div>
+        </section>
+
+        <section class="control-section scienceqa-section">
+          <div class="section-title">Scientific QA</div>
+          <div class="mini-note" id="scienceQaNote">Builds source-lock, unit/schema, stress, and feature-audit rows for the active case.</div>
+          <div class="export-grid">
+            <button id="runScienceQa" class="primary-action" type="button">Run Scientific QA</button>
+            <button id="exportScienceQa" class="secondary-action" type="button">Export QA Report</button>
+            <button id="exportScienceQaCsv" class="secondary-action wide-action" type="button">Export QA CSV</button>
+          </div>
+        </section>
+
+        <section class="control-section tournament-section">
+          <div class="section-title">Framework Tournament</div>
+          <label class="formula-field">
+            <span>Formula queue</span>
+            <textarea id="tournamentQueue" spellcheck="false" aria-label="Framework formula queue"></textarea>
+          </label>
+          <div class="mini-note" id="tournamentNote">One framework per line. Use Name = support_law_v2.</div>
+          <div class="export-grid">
+            <button id="runTournament" class="primary-action" type="button">Run Tournament</button>
+            <button id="exportTournamentCsv" class="secondary-action" type="button">Export Board</button>
+          </div>
+        </section>
+
+        <section class="control-section sweep-section">
+          <div class="section-title">Parameter Landscape</div>
+          <div class="numeric-grid">
+            <label class="number-field">
+              <span>Gamma min</span>
+              <input id="sweepGammaMin" type="number" min="0.1" max="3" step="0.05" value="0.70">
+            </label>
+            <label class="number-field">
+              <span>Gamma max</span>
+              <input id="sweepGammaMax" type="number" min="0.1" max="3" step="0.05" value="1.30">
+            </label>
+            <label class="number-field">
+              <span>q min</span>
+              <input id="sweepQMin" type="number" min="0.2" max="2" step="0.01" value="0.55">
+            </label>
+            <label class="number-field">
+              <span>q max</span>
+              <input id="sweepQMax" type="number" min="0.2" max="2" step="0.01" value="1.05">
+            </label>
+          </div>
+          <label class="select-field">
+            <span>Grid</span>
+            <select id="sweepGrid">
+              <option value="9x7">9 x 7 quick</option>
+              <option value="13x9" selected>13 x 9 balanced</option>
+              <option value="17x11">17 x 11 deeper</option>
+            </select>
+          </label>
+          <div class="mini-note" id="sweepNote">Scans MTS-family Gamma0 scale versus q across all bundled LTGs.</div>
+          <div class="export-grid">
+            <button id="runParameterSweep" class="primary-action" type="button">Run Heatmap</button>
+            <button id="exportSweepCsv" class="secondary-action" type="button">Export Sweep</button>
+          </div>
+        </section>
+
+        <section class="control-section evidence-section">
+          <div class="section-title">Evidence Pack</div>
+          <div class="export-grid">
+            <button id="exportCurrentCsv" class="secondary-action" type="button">Current CSV</button>
+            <button id="exportFilteredCsv" class="secondary-action" type="button">LTG Index CSV</button>
+            <button id="exportSummaryJson" class="secondary-action" type="button">Summary JSON</button>
+            <button id="exportPlotSvg" class="secondary-action" type="button">Plot SVG</button>
+            <button id="exportCapsule" class="secondary-action" type="button">Export Capsule</button>
+            <button id="exportSheetHtml" class="secondary-action" type="button">Diagnostic Sheet</button>
+            <button id="exportTrustReport" class="primary-action wide-action" type="button">Trust Report</button>
+            <button id="exportFigurePack" class="secondary-action wide-action" type="button">Figure Pack</button>
+          </div>
+          <label class="file-field">
+            <span>Load capsule</span>
+            <input id="capsuleInput" type="file" accept=".json,application/json">
+          </label>
+          <div class="mini-note" id="exportNote">Exports use the active galaxy and current LTG browser filters.</div>
+        </section>
+
+        <section class="control-section capsule-library-section">
+          <div class="section-title">Capsule Library</div>
+          <label class="text-field">
+            <span>Snapshot name</span>
+            <input id="capsuleSnapshotName" type="text" placeholder="Active experiment">
+          </label>
+          <label class="text-field">
+            <span>Search</span>
+            <input id="capsuleSearch" type="search" placeholder="Find saved snapshots">
+          </label>
+          <label class="select-field">
+            <span>Snapshot A</span>
+            <select id="capsuleSelectA"></select>
+          </label>
+          <label class="select-field">
+            <span>Snapshot B</span>
+            <select id="capsuleSelectB"></select>
+          </label>
+          <div class="mini-note" id="capsuleLibraryNote">Save active experiment snapshots, compare them, reload them, or publish a report.</div>
+          <div class="export-grid">
+            <button id="saveCapsuleSnapshot" class="primary-action" type="button">Save Snapshot</button>
+            <button id="loadCapsuleSnapshot" class="secondary-action" type="button">Load A</button>
+            <button id="diffCapsuleSnapshots" class="secondary-action" type="button">Diff A/B</button>
+            <button id="publishCapsuleSnapshot" class="secondary-action" type="button">Publish Active</button>
+            <button id="exportCapsuleLibrary" class="secondary-action" type="button">Export Library</button>
+            <button id="deleteCapsuleSnapshot" class="secondary-action" type="button">Delete A</button>
+          </div>
+        </section>
+
+        <section class="constant-strip">
+          <div><span>Gamma0</span><strong>809.956</strong></div>
+          <div><span>Rmax</span><strong>1.758948</strong></div>
+          <div><span>ML disk</span><strong>0.5</strong></div>
+          <div><span>ML bulge</span><strong>0.7</strong></div>
+        </section>
+      </aside>
+
+      <main class="workbench">
+        <section class="canvas-zone">
+          <div class="topbar">
+            <div>
+              <h2 id="sceneTitle">Synthetic transport disk</h2>
+              <p id="sceneSubtitle">Live particles from the computed circular velocity field</p>
+            </div>
+            <div class="readout-pill" id="routePill">low-load</div>
+          </div>
+          <canvas id="galaxyCanvas" width="1100" height="760" aria-label="Galaxy particle simulation"></canvas>
+        </section>
+
+        <aside class="diagnostic-rail" aria-label="Diagnostics">
+          <section class="metric-grid">
+            <div class="metric">
+              <span id="metricLeffLabel">L_eff</span>
+              <strong id="metricLeff">--</strong>
+              <small id="metricLeffUnit">kpc</small>
+            </div>
+            <div class="metric">
+              <span id="metricMemoryLabel">Memory load</span>
+              <strong id="metricMemory">--</strong>
+              <small id="metricMemoryUnit">(1-fgas) rout/h</small>
+            </div>
+            <div class="metric">
+              <span id="metricUoutLabel">u_out</span>
+              <strong id="metricUout">--</strong>
+              <small id="metricUoutUnit">outer gate</small>
+            </div>
+            <div class="metric">
+              <span id="metricRmseLabel">RMSE</span>
+              <strong id="metricRmse">--</strong>
+              <small id="metricRmseUnit">km/s</small>
+            </div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Trust Fingerprint</h3>
+              <span id="trustStatus">capsule ready</span>
+            </div>
+            <div class="trust-grid">
+              <div><span>Capsule hash</span><strong id="trustHash">--</strong></div>
+              <div><span>Mode</span><strong id="trustMode">--</strong></div>
+              <div><span>Route</span><strong id="trustRoute">--</strong></div>
+              <div><span>Points</span><strong id="trustPoints">--</strong></div>
+            </div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Capsule Library</h3>
+              <span id="capsuleLibraryStatus">empty</span>
+            </div>
+            <div class="capsule-metrics">
+              <div><span>Saved</span><strong id="capsuleSavedCount">--</strong></div>
+              <div><span>Selected A</span><strong id="capsuleSelectedA">--</strong></div>
+              <div><span>Selected B</span><strong id="capsuleSelectedB">--</strong></div>
+              <div><span>Diff rows</span><strong id="capsuleDiffCount">--</strong></div>
+            </div>
+            <div class="capsule-table" id="capsuleDiffTable"></div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>v18 Structure</h3>
+              <span id="v18Status">canonical</span>
+            </div>
+            <div class="v18-metrics">
+              <div><span id="v18MetricALabel">Priority L</span><strong id="v18MetricA">--</strong></div>
+              <div><span id="v18MetricBLabel">Diagnostic L3</span><strong id="v18MetricB">--</strong></div>
+              <div><span id="v18MetricCLabel">Curvature A</span><strong id="v18MetricC">--</strong></div>
+              <div><span id="v18MetricDLabel">S-law dU</span><strong id="v18MetricD">--</strong></div>
+            </div>
+            <div class="v18-note" id="v18Note">v18 diagnostics are computed from the active curve.</div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Claim Validator</h3>
+              <span id="claimStatus">not run</span>
+            </div>
+            <div class="claim-table" id="claimTable"></div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Galaxy Case File</h3>
+              <span id="caseStatus">active curve</span>
+            </div>
+            <div class="case-grid" id="caseGrid"></div>
+            <div class="case-note" id="caseNote">Load a galaxy to generate a case file.</div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Uncertainty Lab</h3>
+              <span id="uncertaintyStatus">not run</span>
+            </div>
+            <div class="uncertainty-metrics">
+              <div><span>Route stability</span><strong id="uncertaintyRouteRate">--</strong></div>
+              <div><span>Dominant route</span><strong id="uncertaintyDominantRoute">--</strong></div>
+              <div><span>RMSE median</span><strong id="uncertaintyRmseMedian">--</strong></div>
+              <div><span>u_out range</span><strong id="uncertaintyUoutRange">--</strong></div>
+            </div>
+            <div class="uncertainty-table" id="uncertaintyTable"></div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Scientific QA</h3>
+              <span id="scienceQaStatus">not run</span>
+            </div>
+            <div class="scienceqa-metrics">
+              <div><span>Provenance</span><strong id="scienceQaProvenance">--</strong></div>
+              <div><span>Schema</span><strong id="scienceQaSchema">--</strong></div>
+              <div><span>Error bars</span><strong id="scienceQaErrors">--</strong></div>
+              <div><span>Stress</span><strong id="scienceQaStress">--</strong></div>
+            </div>
+            <div class="scienceqa-table" id="scienceQaTable"></div>
+          </section>
+
+          <section class="diagnostic-block synthetic-only">
+            <div class="block-head">
+              <h3>Forge Profile</h3>
+              <span id="forgeStatus">manual synthetic</span>
+            </div>
+            <div class="forge-metrics">
+              <div><span>Morphology</span><strong id="forgeMorphology">Manual</strong></div>
+              <div><span>Seed</span><strong id="forgeSeedMetric">--</strong></div>
+              <div><span>Stress</span><strong id="forgeStress">custom</strong></div>
+              <div><span>Route</span><strong id="forgeRoute">--</strong></div>
+            </div>
+            <div class="forge-recipe" id="forgeRecipe">Move sliders manually or forge a reproducible stress galaxy.</div>
+          </section>
+
+          <section class="diagnostic-block synthetic-only">
+            <div class="block-head">
+              <h3>Evolution Track</h3>
+              <span id="evolutionStatus">epoch 0.00</span>
+            </div>
+            <div class="evolution-metrics">
+              <div><span>Phase</span><strong id="evolutionPhase">--</strong></div>
+              <div><span>Gas</span><strong id="evolutionGas">--</strong></div>
+              <div><span>q</span><strong id="evolutionQMetric">--</strong></div>
+              <div><span>Route flips</span><strong id="evolutionFlips">--</strong></div>
+            </div>
+            <svg id="evolutionPlot" viewBox="0 0 420 190" role="img" aria-label="Synthetic evolution route timeline"></svg>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Framework Score</h3>
+              <span id="frameworkStatus">baseline slot</span>
+            </div>
+            <div class="framework-metrics">
+              <div><span>Custom RMSE</span><strong id="frameworkRmse">--</strong></div>
+              <div><span>MTS RMSE</span><strong id="frameworkMtsRmse">--</strong></div>
+              <div><span>Delta</span><strong id="frameworkDelta">--</strong></div>
+              <div><span>Batch Wins</span><strong id="frameworkWins">--</strong></div>
+            </div>
+            <div class="framework-table" id="frameworkTable"></div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Comparative View</h3>
+              <span id="comparisonStatus">B not run</span>
+            </div>
+            <div class="comparison-metrics">
+              <div><span>A RMSE</span><strong id="comparisonARmse">--</strong></div>
+              <div><span>B RMSE</span><strong id="comparisonBRmse">--</strong></div>
+              <div><span>Winner</span><strong id="comparisonWinner">--</strong></div>
+              <div><span>Outer Delta</span><strong id="comparisonOuterDelta">--</strong></div>
+            </div>
+            <div class="comparison-table" id="comparisonTable"></div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Benchmark Suite</h3>
+              <span id="benchmarkStatus">not run</span>
+            </div>
+            <div class="benchmark-metrics">
+              <div><span>Pack</span><strong id="benchmarkPackMetric">--</strong></div>
+              <div><span>Winner</span><strong id="benchmarkWinner">--</strong></div>
+              <div><span>A Wins</span><strong id="benchmarkAWins">--</strong></div>
+              <div><span>B Wins</span><strong id="benchmarkBWins">--</strong></div>
+            </div>
+            <div class="benchmark-table" id="benchmarkTable"></div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Tournament Board</h3>
+              <span id="tournamentStatus">not run</span>
+            </div>
+            <div class="tournament-table" id="tournamentTable"></div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Parameter Heatmap</h3>
+              <span id="sweepStatus">not run</span>
+            </div>
+            <div class="sweep-metrics">
+              <div><span>Best Gamma</span><strong id="sweepBestGamma">--</strong></div>
+              <div><span>Best q</span><strong id="sweepBestQ">--</strong></div>
+              <div><span>Mean RMSE</span><strong id="sweepBestRmse">--</strong></div>
+              <div><span>Robust Cells</span><strong id="sweepRobustCells">--</strong></div>
+            </div>
+            <svg id="sweepHeatmap" viewBox="0 0 420 270" role="img" aria-label="Parameter heatmap"></svg>
+          </section>
+
+          <section class="diagnostic-block ltg-browser-only hidden">
+            <div class="block-head">
+              <h3>Route-Space Map</h3>
+              <span id="routeMapCount">175 LTGs</span>
+            </div>
+            <div class="map-tools">
+              <select id="routeMapX" aria-label="Route map x axis">
+                <option value="xCross">x_cross</option>
+                <option value="uOut">u_out</option>
+                <option value="memoryLoad">memory</option>
+                <option value="hOverRout">h/r_out</option>
+                <option value="rmse">RMSE</option>
+                <option value="priorityL">Priority L</option>
+                <option value="priorityL3">Priority L3</option>
+                <option value="leffOverH">L_eff/h</option>
+                <option value="u075">u_0.75</option>
+                <option value="ltgCurvatureA">LTG A</option>
+                <option value="sLawS">S-law S</option>
+                <option value="sLawResidual">S-law dU</option>
+              </select>
+              <select id="routeMapY" aria-label="Route map y axis">
+                <option value="uOut">u_out</option>
+                <option value="xCross">x_cross</option>
+                <option value="memoryLoad">memory</option>
+                <option value="hOverRout">h/r_out</option>
+                <option value="rmse">RMSE</option>
+                <option value="priorityL">Priority L</option>
+                <option value="priorityL3">Priority L3</option>
+                <option value="leffOverH">L_eff/h</option>
+                <option value="u075">u_0.75</option>
+                <option value="ltgCurvatureA">LTG A</option>
+                <option value="sLawS">S-law S</option>
+                <option value="sLawResidual">S-law dU</option>
+              </select>
+            </div>
+            <svg id="routeMapPlot" viewBox="0 0 420 250" role="img" aria-label="Route-space map"></svg>
+          </section>
+
+          <section class="diagnostic-block ltg-browser-only hidden">
+            <div class="block-head">
+              <h3>Population Statistics</h3>
+              <span id="populationStatus">not run</span>
+            </div>
+            <div class="population-metrics">
+              <div><span>Sample N</span><strong id="populationN">--</strong></div>
+              <div><span>Correlation</span><strong id="populationCorr">--</strong></div>
+              <div><span>Bootstrap</span><strong id="populationBootstrap">--</strong></div>
+              <div><span>Dominant route</span><strong id="populationDominantRoute">--</strong></div>
+            </div>
+            <svg id="populationPlot" viewBox="0 0 420 250" role="img" aria-label="Population correlation plot"></svg>
+            <div class="population-table" id="populationTable"></div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Rotation Curve</h3>
+              <span id="curveLegend">model</span>
+            </div>
+            <svg id="curvePlot" viewBox="0 0 420 260" role="img" aria-label="Rotation curve plot"></svg>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Load Profile</h3>
+              <span>u(r)</span>
+            </div>
+            <svg id="uPlot" viewBox="0 0 420 230" role="img" aria-label="u profile plot"></svg>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Residual View</h3>
+              <span id="residualLegend">support share</span>
+            </div>
+            <svg id="residualPlot" viewBox="0 0 420 220" role="img" aria-label="Residual plot"></svg>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Fit Correlation</h3>
+              <span id="fitStatus">baseline</span>
+            </div>
+            <div class="fit-metrics">
+              <div><span>Points</span><strong id="fitPointCount">--</strong></div>
+              <div><span>r_fit</span><strong id="fitCorrelation">--</strong></div>
+              <div><span>RMSE</span><strong id="fitRmse">--</strong></div>
+              <div><span>Bias</span><strong id="fitBias">--</strong></div>
+            </div>
+            <svg id="fitCorrelationPlot" viewBox="0 0 420 240" role="img" aria-label="Observed versus model velocity correlation"></svg>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Residual Bands</h3>
+              <span id="residualBandStatus">not run</span>
+            </div>
+            <div class="residual-band-metrics">
+              <div><span>Inner RMSE</span><strong id="bandInnerRmse">--</strong></div>
+              <div><span>Mid RMSE</span><strong id="bandMidRmse">--</strong></div>
+              <div><span>Outer RMSE</span><strong id="bandOuterRmse">--</strong></div>
+              <div><span>Max residual</span><strong id="bandMaxResidual">--</strong></div>
+            </div>
+            <div class="residual-band-table" id="residualBandTable"></div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Failure Anatomy</h3>
+              <span id="failureStatus">active curve</span>
+            </div>
+            <div class="failure-grid" id="failureGrid"></div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>Route State</h3>
+              <span id="routeCount">--</span>
+            </div>
+            <div class="route-stack" id="routeStack"></div>
+          </section>
+
+          <section class="diagnostic-block ltg-browser-only hidden">
+            <div class="block-head">
+              <h3>SPARC Browser</h3>
+              <span id="ltgBrowserCount">--</span>
+            </div>
+            <div class="browser-tools">
+              <input id="galaxySearch" type="search" placeholder="Search galaxy">
+              <select id="routeFilter" aria-label="Route filter">
+                <option value="all">All routes</option>
+                <option value="low-load">Low-load</option>
+                <option value="buffered upward-crossing">Upward</option>
+                <option value="buffered single-crossing">Single</option>
+                <option value="outer-infeasible">Infeasible</option>
+                <option value="CDC-low-load">CDC-low</option>
+              </select>
+              <select id="sortSelect" aria-label="Sort galaxies">
+                <option value="rmse-desc">Worst RMSE</option>
+                <option value="rmse-asc">Best RMSE</option>
+                <option value="uout-desc">Highest u_out</option>
+                <option value="priority-desc">Priority L MAE</option>
+                <option value="xcross-desc">Latest crossing</option>
+                <option value="name-asc">Name A-Z</option>
+              </select>
+            </div>
+            <div class="hunt-row" aria-label="Outlier hunts">
+              <button class="hunt-button active" data-hunt="all" type="button">All</button>
+              <button class="hunt-button" data-hunt="late" type="button">Late-load</button>
+              <button class="hunt-button" data-hunt="cdc" type="button">CDC</button>
+              <button class="hunt-button" data-hunt="single" type="button">Single</button>
+              <button class="hunt-button" data-hunt="infeasible" type="button">Infeasible</button>
+              <button class="hunt-button" data-hunt="worst" type="button">Worst</button>
+              <button class="hunt-button" data-hunt="best" type="button">Best</button>
+            </div>
+            <div class="route-summary" id="ltgRouteSummary"></div>
+            <div class="galaxy-table" id="galaxyTable"></div>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <script src="data/samples.js"></script>
+    <script src="data/etg-samples.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,6 @@
+*.zip
+*.tar
+*.tar.gz
+node_modules/
+.DS_Store
+Thumbs.db
