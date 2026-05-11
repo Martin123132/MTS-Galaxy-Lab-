@@ -1041,6 +1041,41 @@ def classify_support_failure(row: dict) -> str:
     return "mixed residual"
 
 
+def classify_closure_shape_branch(row: dict) -> str:
+    closure = row["ampConflictType"] != "compatible" and row["routeClosurePenalty"] > 5
+    shape = row["optimalRmse"] >= 20 or (
+        row["optimalImprovementPct"] < 35 and row["baselineRmse"] >= 20
+    )
+    if row["baselineRmse"] < 20 and row["optimalImprovementPct"] < 25:
+        return "baseline acceptable"
+    if closure and shape:
+        return "closure + radial-shape failure"
+    if closure:
+        return "route-closure bottleneck"
+    if shape:
+        return "radial-shape residual"
+    if row["optimalAmp"] > 1.5:
+        return "scalar support deficit"
+    if row["optimalAmp"] < 0.6:
+        return "scalar over-support"
+    return "mixed but scalar-correctable"
+
+
+def closure_shape_reason(row: dict) -> str:
+    pieces = []
+    if row["routeMismatch"]:
+        pieces.append(f"locked route {row['baselineModelRoute']} vs observed {row['route']}")
+    if row["ampConflictType"] != "compatible":
+        pieces.append(row["ampConflictType"])
+    if row["routeClosurePenalty"] > 5:
+        pieces.append(f"route-safe penalty {fmt(row['routeClosurePenalty'])} km/s")
+    if row["optimalRmse"] >= 20:
+        pieces.append(f"scalar residual remains {fmt(row['optimalRmse'])} km/s")
+    if row["observedRouteRecoveredAtOptimalAmp"]:
+        pieces.append("optimal scalar recovers observed route")
+    return "; ".join(pieces) if pieces else "scalar support mostly explains residual"
+
+
 def support_deficit_rows(curves: list[dict]) -> list[dict]:
     rows = []
     for curve in curves:
@@ -1050,11 +1085,15 @@ def support_deficit_rows(curves: list[dict]) -> list[dict]:
         safe_amp = clamp_amp_to_interval(amp, interval)
         safe_score = score_curve_with_amp(curve, safe_amp)
         gain = base["rmse"] - opt["rmse"]
+        route_safe_gain = base["rmse"] - safe_score["rmse"]
+        route_closure_penalty = safe_score["rmse"] - opt["rmse"]
+        safe_gain_fraction = route_safe_gain / gain if gain > 1e-9 else math.nan
         row = {
             "name": curve["name"],
             "route": curve["route"],
             "baselineModelRoute": base["candidateRoute"],
             "optimalAmpRoute": opt["candidateRoute"],
+            "observedRouteRecoveredAtOptimalAmp": opt["candidateRoute"] == curve["route"],
             "routeMismatch": curve["route"] != base["candidateRoute"],
             "routeChangeAtOptimalAmp": base["candidateRoute"] != opt["candidateRoute"],
             "baselineRmse": base["rmse"],
@@ -1070,13 +1109,23 @@ def support_deficit_rows(curves: list[dict]) -> list[dict]:
             "routeSafeAmp": safe_amp,
             "routeSafeRoute": safe_score["candidateRoute"],
             "routeSafeRmse": safe_score["rmse"],
-            "routeSafeGain": base["rmse"] - safe_score["rmse"],
+            "routeSafeGain": route_safe_gain,
             "routeSafeImprovementPct": pct_improvement(base["rmse"], safe_score["rmse"]),
+            "routeClosurePenalty": route_closure_penalty,
+            "routeSafeGainFraction": safe_gain_fraction,
             "ampRouteCompatible": amp_within_interval(amp, interval),
             "ampConflictType": amp_conflict_type(amp, interval),
             "innerBias": base["innerBias"],
             "midBias": base["midBias"],
             "outerBias": base["outerBias"],
+            "optimalInnerBias": opt["innerBias"],
+            "optimalMidBias": opt["midBias"],
+            "optimalOuterBias": opt["outerBias"],
+            "routeSafeInnerBias": safe_score["innerBias"],
+            "routeSafeMidBias": safe_score["midBias"],
+            "routeSafeOuterBias": safe_score["outerBias"],
+            "optimalResidualSignature": residual_signature(opt),
+            "routeSafeResidualSignature": residual_signature(safe_score),
             "residualSignature": residual_signature(base),
             "worstResidual": base["worstResidual"],
             "worstX": base["worstX"],
@@ -1093,6 +1142,8 @@ def support_deficit_rows(curves: list[dict]) -> list[dict]:
             "routeBreakRisk": curve["routeBreakRisk"],
         }
         row["failureMode"] = classify_support_failure(row)
+        row["closureShapeBranch"] = classify_closure_shape_branch(row)
+        row["closureShapeReason"] = closure_shape_reason(row)
         rows.append(row)
     return rows
 
@@ -1140,6 +1191,8 @@ def grouped_deficit_summary(rows: list[dict], key: str) -> list[dict]:
                 "meanRouteSafeImprovementPct": safe_mean(row["routeSafeImprovementPct"] for row in group),
                 "routeMismatchRate": safe_mean(1.0 if row["routeMismatch"] else 0.0 for row in group),
                 "ampConflictRate": safe_mean(0.0 if row["ampRouteCompatible"] else 1.0 for row in group),
+                "meanRouteClosurePenalty": safe_mean(row["routeClosurePenalty"] for row in group),
+                "observedRouteRecoveryRate": safe_mean(1.0 if row["observedRouteRecoveredAtOptimalAmp"] else 0.0 for row in group),
             }
         )
     return summary
@@ -1296,6 +1349,7 @@ def proxy_score_rows(curves: list[dict], deficit_rows: list[dict], split: dict, 
                 "routeSafeAmpFloor": deficit["routeSafeAmpFloor"],
                 "routeSafeAmpCeiling": deficit["routeSafeAmpCeiling"],
                 "failureMode": deficit["failureMode"],
+                "closureShapeBranch": deficit["closureShapeBranch"],
             }
         )
     return rows
@@ -1336,6 +1390,7 @@ def proxy_summary(rows: list[dict]) -> dict:
 def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: list[dict]) -> str:
     route_summary = capsule["routeSummary"]
     mode_summary = capsule["failureModeSummary"]
+    branch_summary = capsule["closureShapeSummary"]
     correlations = capsule["correlations"]
     proxy = capsule["proxy"]
     top = sorted(deficit_rows, key=lambda row: row["baselineRmse"], reverse=True)[:20]
@@ -1345,6 +1400,9 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
     signature_counts: dict[str, int] = {}
     for row in high:
         signature_counts[row["residualSignature"]] = signature_counts.get(row["residualSignature"], 0) + 1
+    high_branch_text = ", ".join(
+        f"{row['closureShapeBranch']}={row['highRmseCount']}" for row in branch_summary if row["highRmseCount"]
+    )
 
     lines = [
         "# MTS Support-Deficit Diagnosis",
@@ -1357,6 +1415,7 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
         f"Dominant high-RMSE residual signature: `{max(signature_counts, key=signature_counts.get) if signature_counts else '--'}`.",
         f"Route mismatch between observed state and locked MTS model state: {sum(1 for row in deficit_rows if row['routeMismatch'])} / {len(deficit_rows)}.",
         f"Required scalar support outside the locked-route-safe interval: {len(conflicts)} / {len(deficit_rows)} overall, {len(high_conflicts)} / {len(high)} for high-RMSE systems.",
+        f"Primary high-RMSE branches: {high_branch_text}.",
         "",
         "## Route-Level Deficit",
         "",
@@ -1388,6 +1447,47 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
         lines.append(
             f"| {label} | {len(group)} | {sum(1 for row in group if row['baselineRmse'] >= 30)} | "
             f"{fmt(statistics.median(row['optimalAmp'] for row in group))} | {fmt(statistics.median(row['routeSafeAmp'] for row in group))} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Closure Vs Shape Split",
+            "",
+            "| Branch | Count | High RMSE | Baseline mean | Optimal scalar mean | Route-safe mean | Closure penalty | Observed route recovered |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in branch_summary:
+        lines.append(
+            f"| {row['closureShapeBranch']} | {row['count']} | {row['highRmseCount']} | {fmt(row['baselineMean'])} | "
+            f"{fmt(row['optimalMean'])} | {fmt(row['routeSafeMean'])} | {fmt(row['meanRouteClosurePenalty'])} | "
+            f"{fmt(row['observedRouteRecoveryRate'] * 100)}% |"
+        )
+
+    branch_examples = sorted(
+        [row for row in deficit_rows if row["baselineRmse"] >= 30],
+        key=lambda row: (row["closureShapeBranch"], -row["baselineRmse"]),
+    )
+    lines.extend(
+        [
+            "",
+            "### High-RMSE Branch Examples",
+            "",
+            "| Galaxy | Branch | Route | MTS route | RMSE | Optimal | Route-safe | Required amp | Reason |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    seen_branches: dict[str, int] = {}
+    for row in branch_examples:
+        count = seen_branches.get(row["closureShapeBranch"], 0)
+        if count >= 5:
+            continue
+        seen_branches[row["closureShapeBranch"]] = count + 1
+        lines.append(
+            f"| {row['name']} | {row['closureShapeBranch']} | {row['route']} | {row['baselineModelRoute']} | "
+            f"{fmt(row['baselineRmse'])} | {fmt(row['optimalRmse'])} | {fmt(row['routeSafeRmse'])} | "
+            f"{fmt(row['optimalAmp'])} | {row['closureShapeReason']} |"
         )
 
     lines.extend(
@@ -1461,6 +1561,8 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             "",
             "The route-safe interval test sharpens the issue: where the required amplitude lies outside the locked-route-safe interval, a scalar support-efficiency term is not enough. Those cases require either a route-state closure change, a radial-shape change, or a refined definition of what route preservation should mean for MTS.",
             "",
+            "The closure-vs-shape split makes the next work separable: closure branches need a state-transition or admissible-route revision; radial-shape branches need a radial kernel/transport-shape revision; scalar-support branches can be used as the cleanest laboratory for a route-stable efficiency term.",
+            "",
         ]
     )
     return "\n".join(lines)
@@ -1526,6 +1628,7 @@ def write_support_deficit_artifacts(out_dir: Path, curves: list[dict], split: di
         },
         "routeSummary": grouped_deficit_summary(deficit_rows, "route"),
         "failureModeSummary": grouped_deficit_summary(deficit_rows, "failureMode"),
+        "closureShapeSummary": grouped_deficit_summary(deficit_rows, "closureShapeBranch"),
         "conflictSummary": conflict_summary,
         "correlations": correlations,
         "proxyModel": {
@@ -2068,6 +2171,23 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
                     f"high={row['highRmseCount']}",
                     f"median_amp={fmt(row['medianOptimalAmp'])}",
                     f"median_safe_amp={fmt(row['medianRouteSafeAmp'])}",
+                ]
+            )
+        )
+    print("CLOSURE VS SHAPE")
+    print("branch\tcount\thigh_rmse\tbaseline\toptimal\troute_safe\tclosure_penalty\trecovered_observed_route%")
+    for row in capsule["closureShapeSummary"]:
+        print(
+            "\t".join(
+                [
+                    row["closureShapeBranch"],
+                    str(row["count"]),
+                    str(row["highRmseCount"]),
+                    fmt(row["baselineMean"]),
+                    fmt(row["optimalMean"]),
+                    fmt(row["routeSafeMean"]),
+                    fmt(row["meanRouteClosurePenalty"]),
+                    fmt(row["observedRouteRecoveryRate"] * 100),
                 ]
             )
         )
