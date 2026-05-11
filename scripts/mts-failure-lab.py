@@ -39,6 +39,8 @@ HARD_ROUTES = {"buffered single-crossing", "outer-infeasible"}
 GATED_ROUTES = {"buffered single-crossing", "buffered upward-crossing", "outer-infeasible"}
 STRICT_ROUTE_PRESERVATION = 0.95
 Q_DIAGNOSTIC_GRID = [0.35 + 0.05 * index for index in range(31)]
+TWO_KERNEL_ETA_GRID = [0.4, 0.7, 1.6, 2.8]
+TWO_KERNEL_Q2_GRID = [0.35, 0.55, 0.77, 1.0, 1.35, 1.85]
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -554,6 +556,41 @@ def stratified_split(curves: list[dict], seed: int, holdout_fraction: float) -> 
 
 
 def score_curve_with_params(curve: dict, amp: float, q_value: float = Q_DEFAULT) -> dict:
+    def support(point: dict) -> float:
+        return GAMMA0 * curve["leff"] * (1 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+
+    return score_curve_with_support(curve, support, amp=amp, q_value=q_value)
+
+
+def score_curve_with_two_kernel(
+    curve: dict,
+    a1: float,
+    a2: float,
+    q1: float,
+    q2: float,
+    eta: float,
+) -> dict:
+    scale2 = max(1e-9, eta * curve["leff"])
+
+    def support(point: dict) -> float:
+        kernel1 = 1 - math.exp(-((point["r"] / curve["leff"]) ** q1))
+        kernel2 = 1 - math.exp(-((point["r"] / scale2) ** q2))
+        return GAMMA0 * curve["leff"] * (a1 * kernel1 + a2 * kernel2)
+
+    score = score_curve_with_support(curve, support, amp=a1 + a2, q_value=q1)
+    score.update(
+        {
+            "twoKernelA1": a1,
+            "twoKernelA2": a2,
+            "twoKernelQ1": q1,
+            "twoKernelQ2": q2,
+            "twoKernelEta": eta,
+        }
+    )
+    return score
+
+
+def score_curve_with_support(curve: dict, support_fn: Callable[[dict], float], amp: float, q_value: float) -> dict:
     sse = 0.0
     band = {
         "inner": {"sse": 0.0, "n": 0, "bias": 0.0},
@@ -563,7 +600,7 @@ def score_curve_with_params(curve: dict, amp: float, q_value: float = Q_DEFAULT)
     worst = {"r": math.nan, "x": math.nan, "residual": 0.0}
     custom_points = []
     for point in curve["points"]:
-        support2 = GAMMA0 * curve["leff"] * (1 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+        support2 = support_fn(point)
         model2 = point["bar2"] + support2
         model = math.sqrt(max(0.0, model2))
         residual = model - point["vObs"]
@@ -702,6 +739,11 @@ def score_rows(curves: list[dict], candidate: Candidate) -> list[dict]:
 def safe_mean(values: Iterable[float]) -> float:
     clean = [value for value in values if isinstance(value, (int, float)) and math.isfinite(value)]
     return sum(clean) / len(clean) if clean else math.nan
+
+
+def safe_median(values: Iterable[float]) -> float:
+    clean = [value for value in values if isinstance(value, (int, float)) and math.isfinite(value)]
+    return statistics.median(clean) if clean else math.nan
 
 
 def pct_improvement(base: float, candidate: float) -> float:
@@ -991,6 +1033,68 @@ def optimal_q_shape(curve: dict) -> tuple[float, float, dict]:
     return best_q, best_amp, best_score
 
 
+def optimize_two_kernel_for_shape(
+    curve: dict,
+    q1: float,
+    q2: float,
+    eta: float,
+    seed_amp: float,
+) -> tuple[float, float, dict]:
+    candidates = [
+        (max(0.0, seed_amp), 0.0),
+        (0.0, max(0.0, seed_amp)),
+        (0.65 * max(0.0, seed_amp), 0.35 * max(0.0, seed_amp)),
+        (1.0, 1.0),
+    ]
+
+    def score_pair(a1: float, a2: float) -> dict:
+        return score_curve_with_two_kernel(curve, a1, a2, q1, q2, eta)
+
+    best_a1, best_a2 = candidates[0]
+    best_score = score_pair(best_a1, best_a2)
+    for a1, a2 in candidates[1:]:
+        score = score_pair(a1, a2)
+        if score["rmse"] < best_score["rmse"]:
+            best_a1, best_a2, best_score = a1, a2, score
+
+    for step in [8.0, 4.0, 2.0, 1.0, 0.5, 0.25, 0.1, 0.05, 0.02]:
+        improved = True
+        passes = 0
+        while improved and passes < 18:
+            improved = False
+            passes += 1
+            neighborhood = [
+                (best_a1 + step, best_a2),
+                (best_a1 - step, best_a2),
+                (best_a1, best_a2 + step),
+                (best_a1, best_a2 - step),
+                (best_a1 + step, best_a2 + step),
+                (best_a1 + step, best_a2 - step),
+                (best_a1 - step, best_a2 + step),
+                (best_a1 - step, best_a2 - step),
+            ]
+            for next_a1, next_a2 in neighborhood:
+                next_a1 = clamp(next_a1, 0.0, 80.0)
+                next_a2 = clamp(next_a2, 0.0, 80.0)
+                score = score_pair(next_a1, next_a2)
+                if score["rmse"] + 1e-9 < best_score["rmse"]:
+                    best_a1, best_a2, best_score = next_a1, next_a2, score
+                    improved = True
+    return best_a1, best_a2, best_score
+
+
+def optimal_two_kernel_shape(curve: dict, q1: float, seed_amp: float) -> tuple[float, float, float, float, dict]:
+    best_eta = TWO_KERNEL_ETA_GRID[0]
+    best_q2 = TWO_KERNEL_Q2_GRID[0]
+    best_a1, best_a2, best_score = optimize_two_kernel_for_shape(curve, q1, best_q2, best_eta, seed_amp)
+    for eta in TWO_KERNEL_ETA_GRID:
+        for q2 in TWO_KERNEL_Q2_GRID:
+            a1, a2, score = optimize_two_kernel_for_shape(curve, q1, q2, eta, seed_amp)
+            if score["rmse"] < best_score["rmse"]:
+                best_eta, best_q2, best_a1, best_a2, best_score = eta, q2, a1, a2, score
+    return best_eta, best_q2, best_a1, best_a2, best_score
+
+
 def route_safe_amp_interval(curve: dict, base_score: dict | None = None) -> dict:
     base = base_score or score_curve_with_amp(curve, 1.0)
     base_route = base["candidateRoute"]
@@ -1136,6 +1240,22 @@ def classify_q_shape_result(row: dict) -> str:
     return "scalar shape sufficient"
 
 
+def should_run_two_kernel_probe(row: dict) -> bool:
+    return bool(row["qShapeTested"]) and row["qShapeRmse"] >= 20
+
+
+def classify_two_kernel_result(row: dict) -> str:
+    if not row["qShapeTested"]:
+        return "not tested"
+    if row["qShapeRmse"] < 20:
+        return "q sufficient"
+    if row["twoKernelGainOverQ"] >= 5 and row["twoKernelRmse"] < 20:
+        return "two-kernel repairable"
+    if row["twoKernelGainOverQ"] >= 5:
+        return "two-kernel helps but residual remains"
+    return "not two-kernel repairable"
+
+
 def support_deficit_rows(curves: list[dict]) -> list[dict]:
     rows = []
     for curve in curves:
@@ -1229,6 +1349,34 @@ def support_deficit_rows(curves: list[dict]) -> list[dict]:
             }
         )
         row["qShapeClass"] = classify_q_shape_result(row)
+        two_kernel_tested = should_run_two_kernel_probe(row)
+        if two_kernel_tested:
+            two_eta, two_q2, two_a1, two_a2, two_score = optimal_two_kernel_shape(curve, q_shape, q_amp)
+        else:
+            two_eta = math.nan
+            two_q2 = math.nan
+            two_a1 = q_amp
+            two_a2 = 0.0
+            two_score = q_score
+        row.update(
+            {
+                "twoKernelTested": two_kernel_tested,
+                "twoKernelRmse": two_score["rmse"],
+                "twoKernelGainOverQ": q_score["rmse"] - two_score["rmse"],
+                "twoKernelEta": two_eta,
+                "twoKernelQ1": q_shape,
+                "twoKernelQ2": two_q2,
+                "twoKernelA1": two_a1,
+                "twoKernelA2": two_a2,
+                "twoKernelRoute": two_score["candidateRoute"],
+                "twoKernelResidualSignature": residual_signature(two_score),
+                "twoKernelInnerBias": two_score["innerBias"],
+                "twoKernelMidBias": two_score["midBias"],
+                "twoKernelOuterBias": two_score["outerBias"],
+                "twoKernelRouteRecovered": two_score["candidateRoute"] == curve["route"],
+            }
+        )
+        row["twoKernelClass"] = classify_two_kernel_result(row)
         rows.append(row)
     return rows
 
@@ -1270,7 +1418,7 @@ def grouped_deficit_summary(rows: list[dict], key: str) -> list[dict]:
                 "baselineMean": safe_mean(row["baselineRmse"] for row in group),
                 "optimalMean": safe_mean(row["optimalRmse"] for row in group),
                 "routeSafeMean": safe_mean(row["routeSafeRmse"] for row in group),
-                "medianOptimalAmp": statistics.median(row["optimalAmp"] for row in group),
+                "medianOptimalAmp": safe_median(row["optimalAmp"] for row in group),
                 "meanOptimalAmp": safe_mean(row["optimalAmp"] for row in group),
                 "meanImprovementPct": safe_mean(row["optimalImprovementPct"] for row in group),
                 "meanRouteSafeImprovementPct": safe_mean(row["routeSafeImprovementPct"] for row in group),
@@ -1280,9 +1428,17 @@ def grouped_deficit_summary(rows: list[dict], key: str) -> list[dict]:
                 "observedRouteRecoveryRate": safe_mean(1.0 if row["observedRouteRecoveredAtOptimalAmp"] else 0.0 for row in group),
                 "qShapeTestRate": safe_mean(1.0 if row["qShapeTested"] else 0.0 for row in group),
                 "qShapeMean": safe_mean(row["qShapeRmse"] for row in group),
-                "medianQShape": statistics.median(row["qShape"] for row in group),
+                "medianQShape": safe_median(row["qShape"] for row in group),
                 "meanQShapeGainOverScalar": safe_mean(row["qShapeGainOverScalar"] for row in group),
                 "qShapeRouteRecoveryRate": safe_mean(1.0 if row["qShapeRouteRecovered"] else 0.0 for row in group),
+                "twoKernelTestRate": safe_mean(1.0 if row["twoKernelTested"] else 0.0 for row in group),
+                "twoKernelMean": safe_mean(row["twoKernelRmse"] for row in group),
+                "meanTwoKernelGainOverQ": safe_mean(row["twoKernelGainOverQ"] for row in group),
+                "twoKernelRouteRecoveryRate": safe_mean(1.0 if row["twoKernelRouteRecovered"] else 0.0 for row in group),
+                "medianTwoKernelEta": safe_median(row["twoKernelEta"] for row in group),
+                "medianTwoKernelQ2": safe_median(row["twoKernelQ2"] for row in group),
+                "medianTwoKernelA1": safe_median(row["twoKernelA1"] for row in group),
+                "medianTwoKernelA2": safe_median(row["twoKernelA2"] for row in group),
             }
         )
     return summary
@@ -1485,6 +1641,7 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
     mode_summary = capsule["failureModeSummary"]
     branch_summary = capsule["closureShapeSummary"]
     q_shape_summary = capsule["qShapeSummary"]
+    two_kernel_summary = capsule["twoKernelSummary"]
     correlations = capsule["correlations"]
     proxy = capsule["proxy"]
     top = sorted(deficit_rows, key=lambda row: row["baselineRmse"], reverse=True)[:20]
@@ -1592,6 +1749,70 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             f"{fmt(row['qShapeMean'])} | {fmt(row['medianQShape'])} | {fmt(row['meanQShapeGainOverScalar'])} |"
         )
 
+    lines.extend(
+        [
+            "",
+            "## Two-Kernel Probe",
+            "",
+            "This probe keeps canonical MTS locked and tests whether post-q residuals need a second radial support scale. It uses non-negative amplitudes only and is diagnostic, not a promoted law.",
+            "",
+            "| Two-kernel class | Count | High RMSE | Q-shape mean | Two-kernel mean | Median eta | Median q2 | Gain over q | Route recovered |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in two_kernel_summary:
+        lines.append(
+            f"| {row['twoKernelClass']} | {row['count']} | {row['highRmseCount']} | {fmt(row['qShapeMean'])} | "
+            f"{fmt(row['twoKernelMean'])} | {fmt(row['medianTwoKernelEta'])} | {fmt(row['medianTwoKernelQ2'])} | "
+            f"{fmt(row['meanTwoKernelGainOverQ'])} | {fmt(row['twoKernelRouteRecoveryRate'] * 100)}% |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "### Two-Kernel By Closure Branch",
+            "",
+            "| Branch | Count | High RMSE | Q-shape mean | Two-kernel mean | Tested | Gain over q | Median eta | Median q2 |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in branch_summary:
+        lines.append(
+            f"| {row['closureShapeBranch']} | {row['count']} | {row['highRmseCount']} | {fmt(row['qShapeMean'])} | "
+            f"{fmt(row['twoKernelMean'])} | {fmt(row['twoKernelTestRate'] * 100)}% | {fmt(row['meanTwoKernelGainOverQ'])} | "
+            f"{fmt(row['medianTwoKernelEta'])} | {fmt(row['medianTwoKernelQ2'])} |"
+        )
+
+    still_unrepaired = sorted(
+        [
+            row
+            for row in deficit_rows
+            if row["baselineRmse"] >= 30
+            and row["twoKernelClass"] in {"not two-kernel repairable", "two-kernel helps but residual remains"}
+        ],
+        key=lambda row: row["twoKernelRmse"],
+        reverse=True,
+    )
+    lines.extend(
+        [
+            "",
+            "### Still Unrepaired After Two Kernels",
+            "",
+            "| Galaxy | Branch | Route | Q-shape RMSE | Two-kernel RMSE | Class | eta | q2 | A1 | A2 | Residual |",
+            "| --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    if still_unrepaired:
+        for row in still_unrepaired:
+            lines.append(
+                f"| {row['name']} | {row['closureShapeBranch']} | {row['route']} | {fmt(row['qShapeRmse'])} | "
+                f"{fmt(row['twoKernelRmse'])} | {row['twoKernelClass']} | {fmt(row['twoKernelEta'])} | "
+                f"{fmt(row['twoKernelQ2'])} | {fmt(row['twoKernelA1'])} | {fmt(row['twoKernelA2'])} | "
+                f"`{row['twoKernelResidualSignature']}` |"
+            )
+    else:
+        lines.append("| none | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |")
+
     branch_examples = sorted(
         [row for row in deficit_rows if row["baselineRmse"] >= 30],
         key=lambda row: (row["closureShapeBranch"], -row["baselineRmse"]),
@@ -1601,8 +1822,8 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             "",
             "### High-RMSE Branch Examples",
             "",
-            "| Galaxy | Branch | Q-class | Route | MTS route | RMSE | Scalar | Q-shape | q | Required amp | Reason |",
-            "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+            "| Galaxy | Branch | Q-class | Two-kernel | Route | MTS route | RMSE | Scalar | Q-shape | Two-kernel | q | Required amp | Reason |",
+            "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     seen_branches: dict[str, int] = {}
@@ -1612,8 +1833,9 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             continue
         seen_branches[row["closureShapeBranch"]] = count + 1
         lines.append(
-            f"| {row['name']} | {row['closureShapeBranch']} | {row['qShapeClass']} | {row['route']} | {row['baselineModelRoute']} | "
-            f"{fmt(row['baselineRmse'])} | {fmt(row['optimalRmse'])} | {fmt(row['qShapeRmse'])} | {fmt(row['qShape'])} | "
+            f"| {row['name']} | {row['closureShapeBranch']} | {row['qShapeClass']} | {row['twoKernelClass']} | "
+            f"{row['route']} | {row['baselineModelRoute']} | {fmt(row['baselineRmse'])} | {fmt(row['optimalRmse'])} | "
+            f"{fmt(row['qShapeRmse'])} | {fmt(row['twoKernelRmse'])} | {fmt(row['qShape'])} | "
             f"{fmt(row['optimalAmp'])} | {row['closureShapeReason']} |"
         )
 
@@ -1692,6 +1914,8 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             "",
             "The q-shape probe tests the simplest radial-kernel degree of freedom. Cases that remain bad after scalar and q optimization are stronger evidence for missing radial structure beyond the current one-parameter support shape.",
             "",
+            "The two-kernel probe tests whether those stubborn cases need multi-scale radial transport. If a galaxy is still unrepaired here, the issue likely lies outside scalar amplitude, q, and a second radial support scale.",
+            "",
         ]
     )
     return "\n".join(lines)
@@ -1739,7 +1963,7 @@ def write_support_deficit_artifacts(out_dir: Path, curves: list[dict], split: di
 
     capsule = {
         "type": "mts-support-deficit-diagnosis",
-        "version": 2,
+        "version": 3,
         "generatedAt": dt.datetime.now(dt.UTC).isoformat(),
         "sourceScript": "scripts/mts-failure-lab.py",
         "constants": {
@@ -1759,6 +1983,7 @@ def write_support_deficit_artifacts(out_dir: Path, curves: list[dict], split: di
         "failureModeSummary": grouped_deficit_summary(deficit_rows, "failureMode"),
         "closureShapeSummary": grouped_deficit_summary(deficit_rows, "closureShapeBranch"),
         "qShapeSummary": grouped_deficit_summary(deficit_rows, "qShapeClass"),
+        "twoKernelSummary": grouped_deficit_summary(deficit_rows, "twoKernelClass"),
         "conflictSummary": conflict_summary,
         "correlations": correlations,
         "proxyModel": {
@@ -2336,6 +2561,24 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
                     fmt(row["medianQShape"]),
                     fmt(row["meanQShapeGainOverScalar"]),
                     fmt(row["qShapeRouteRecoveryRate"] * 100),
+                ]
+            )
+        )
+    print("TWO-KERNEL PROBE")
+    print("two_kernel_class\tcount\thigh_rmse\tq_shape\ttwo_kernel\tmedian_eta\tmedian_q2\tgain_over_q\trecovered_route%")
+    for row in capsule["twoKernelSummary"]:
+        print(
+            "\t".join(
+                [
+                    row["twoKernelClass"],
+                    str(row["count"]),
+                    str(row["highRmseCount"]),
+                    fmt(row["qShapeMean"]),
+                    fmt(row["twoKernelMean"]),
+                    fmt(row["medianTwoKernelEta"]),
+                    fmt(row["medianTwoKernelQ2"]),
+                    fmt(row["meanTwoKernelGainOverQ"]),
+                    fmt(row["twoKernelRouteRecoveryRate"] * 100),
                 ]
             )
         )
