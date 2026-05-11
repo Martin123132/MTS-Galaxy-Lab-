@@ -317,7 +317,7 @@ mts-support-deficit-report.md
 mts-support-deficit-model.json
 ```
 
-This mode is not a candidate search. It keeps the MTS radial shape fixed, solves the scalar support multiplier each galaxy would need, computes the route-safe amplitude interval that preserves the locked MTS model route, separates likely route-closure bottlenecks from radial-shape residuals and scalar support deficits, runs a diagnostic `q`-shape probe for residual kernel failures, and tests whether stubborn post-`q` cases need a second radial support scale.
+This mode is not a candidate search. It keeps the MTS radial shape fixed, solves the scalar support multiplier each galaxy would need, computes the route-safe amplitude interval that preserves the locked MTS model route, separates likely route-closure bottlenecks from radial-shape residuals and scalar support deficits, runs diagnostic `q` and two-kernel probes, and classifies the remaining residual anatomy with baryonic-floor, delayed-onset, and three-zone radial oracle checks.
 
 ## Benchmark Suite
 

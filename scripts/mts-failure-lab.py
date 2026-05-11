@@ -41,6 +41,10 @@ STRICT_ROUTE_PRESERVATION = 0.95
 Q_DIAGNOSTIC_GRID = [0.35 + 0.05 * index for index in range(31)]
 TWO_KERNEL_ETA_GRID = [0.4, 0.7, 1.6, 2.8]
 TWO_KERNEL_Q2_GRID = [0.35, 0.55, 0.77, 1.0, 1.35, 1.85]
+DELAYED_ONSET_X0_GRID = [0.10, 0.18, 0.26, 0.34, 0.45, 0.58]
+DELAYED_ONSET_WIDTH_GRID = [0.04, 0.08, 0.14, 0.22]
+RESIDUAL_REPAIR_RMSE = 20.0
+RESIDUAL_MEANINGFUL_GAIN = 5.0
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -590,6 +594,57 @@ def score_curve_with_two_kernel(
     return score
 
 
+def score_curve_baryon_only(curve: dict) -> dict:
+    return score_curve_with_support(curve, lambda _point: 0.0, amp=0.0, q_value=Q_DEFAULT)
+
+
+def logistic_gate(value: float) -> float:
+    clipped = clamp(value, -60.0, 60.0)
+    return 1.0 / (1.0 + math.exp(-clipped))
+
+
+def score_curve_with_delayed_onset(curve: dict, amp: float, q_value: float, x0: float, width: float) -> dict:
+    safe_width = max(1e-6, width)
+
+    def support(point: dict) -> float:
+        base = 1 - math.exp(-((point["r"] / curve["leff"]) ** q_value))
+        onset = logistic_gate((point["x"] - x0) / safe_width)
+        return GAMMA0 * curve["leff"] * base * onset * amp
+
+    score = score_curve_with_support(curve, support, amp=amp, q_value=q_value)
+    score.update({"delayedOnsetAmp": amp, "delayedOnsetX0": x0, "delayedOnsetWidth": width})
+    return score
+
+
+def score_curve_with_three_zone(
+    curve: dict,
+    inner_amp: float,
+    mid_amp: float,
+    outer_amp: float,
+    q_value: float,
+) -> dict:
+    def zone_amp(point: dict) -> float:
+        if point["x"] < 0.33:
+            return inner_amp
+        if point["x"] < 0.66:
+            return mid_amp
+        return outer_amp
+
+    def support(point: dict) -> float:
+        base = 1 - math.exp(-((point["r"] / curve["leff"]) ** q_value))
+        return GAMMA0 * curve["leff"] * base * zone_amp(point)
+
+    score = score_curve_with_support(curve, support, amp=(inner_amp + mid_amp + outer_amp) / 3, q_value=q_value)
+    score.update(
+        {
+            "threeZoneInnerAmp": inner_amp,
+            "threeZoneMidAmp": mid_amp,
+            "threeZoneOuterAmp": outer_amp,
+        }
+    )
+    return score
+
+
 def score_curve_with_support(curve: dict, support_fn: Callable[[dict], float], amp: float, q_value: float) -> dict:
     sse = 0.0
     band = {
@@ -1095,6 +1150,86 @@ def optimal_two_kernel_shape(curve: dict, q1: float, seed_amp: float) -> tuple[f
     return best_eta, best_q2, best_a1, best_a2, best_score
 
 
+def optimize_delayed_onset_amp(curve: dict, q_value: float, x0: float, width: float) -> tuple[float, dict]:
+    def objective(amp: float) -> float:
+        return score_curve_with_delayed_onset(curve, amp, q_value, x0, width)["rmse"]
+
+    high = 30.0
+    while high < 300 and objective(high) < objective(high * 0.75):
+        high *= 2
+
+    low = 0.0
+    for _ in range(52):
+        m1 = low + (high - low) / 3
+        m2 = high - (high - low) / 3
+        if objective(m1) < objective(m2):
+            high = m2
+        else:
+            low = m1
+
+    amp = (low + high) / 2
+    return amp, score_curve_with_delayed_onset(curve, amp, q_value, x0, width)
+
+
+def optimal_delayed_onset(curve: dict, q_value: float) -> tuple[float, float, float, dict]:
+    best_x0 = DELAYED_ONSET_X0_GRID[0]
+    best_width = DELAYED_ONSET_WIDTH_GRID[0]
+    best_amp, best_score = optimize_delayed_onset_amp(curve, q_value, best_x0, best_width)
+    for x0 in DELAYED_ONSET_X0_GRID:
+        for width in DELAYED_ONSET_WIDTH_GRID:
+            amp, score = optimize_delayed_onset_amp(curve, q_value, x0, width)
+            if score["rmse"] < best_score["rmse"]:
+                best_x0, best_width, best_amp, best_score = x0, width, amp, score
+    return best_x0, best_width, best_amp, best_score
+
+
+def optimal_three_zone_oracle(curve: dict, q_value: float, seed_amp: float) -> tuple[float, float, float, dict]:
+    seed = max(0.0, seed_amp)
+    candidates = [
+        (seed, seed, seed),
+        (0.0, seed, seed),
+        (seed, 0.0, seed),
+        (seed, seed, 0.0),
+        (0.0, 0.0, seed),
+        (seed * 0.5, seed, seed * 1.5),
+        (1.0, 1.0, 1.0),
+    ]
+
+    def score_triplet(inner_amp: float, mid_amp: float, outer_amp: float) -> dict:
+        return score_curve_with_three_zone(curve, inner_amp, mid_amp, outer_amp, q_value)
+
+    best_inner, best_mid, best_outer = candidates[0]
+    best_score = score_triplet(best_inner, best_mid, best_outer)
+    for inner_amp, mid_amp, outer_amp in candidates[1:]:
+        score = score_triplet(inner_amp, mid_amp, outer_amp)
+        if score["rmse"] < best_score["rmse"]:
+            best_inner, best_mid, best_outer, best_score = inner_amp, mid_amp, outer_amp, score
+
+    for step in [8.0, 4.0, 2.0, 1.0, 0.5, 0.25, 0.1, 0.05, 0.02]:
+        improved = True
+        passes = 0
+        while improved and passes < 20:
+            improved = False
+            passes += 1
+            neighborhood = [
+                (best_inner + step, best_mid, best_outer),
+                (best_inner - step, best_mid, best_outer),
+                (best_inner, best_mid + step, best_outer),
+                (best_inner, best_mid - step, best_outer),
+                (best_inner, best_mid, best_outer + step),
+                (best_inner, best_mid, best_outer - step),
+            ]
+            for next_inner, next_mid, next_outer in neighborhood:
+                next_inner = clamp(next_inner, 0.0, 80.0)
+                next_mid = clamp(next_mid, 0.0, 80.0)
+                next_outer = clamp(next_outer, 0.0, 80.0)
+                score = score_triplet(next_inner, next_mid, next_outer)
+                if score["rmse"] + 1e-9 < best_score["rmse"]:
+                    best_inner, best_mid, best_outer, best_score = next_inner, next_mid, next_outer, score
+                    improved = True
+    return best_inner, best_mid, best_outer, best_score
+
+
 def route_safe_amp_interval(curve: dict, base_score: dict | None = None) -> dict:
     base = base_score or score_curve_with_amp(curve, 1.0)
     base_route = base["candidateRoute"]
@@ -1256,6 +1391,91 @@ def classify_two_kernel_result(row: dict) -> str:
     return "not two-kernel repairable"
 
 
+def baryon_floor_stats(curve: dict, post_shape_score: dict) -> tuple[dict, dict]:
+    baryon_score = score_curve_baryon_only(curve)
+    excesses = [math.sqrt(max(0.0, point["bar2"])) - point["vObs"] for point in curve["points"]]
+    violation_rate = safe_mean(1.0 if excess > 10.0 else 0.0 for excess in excesses)
+    max_excess = max(excesses) if excesses else math.nan
+    same_floor_residual = (
+        post_shape_score["rmse"] >= RESIDUAL_REPAIR_RMSE
+        and baryon_score["rmse"] <= post_shape_score["rmse"] + 2.0
+        and max_excess > 10.0
+        and residual_signature(baryon_score).count("+") >= 2
+    )
+    positive_support_impossible = violation_rate >= 0.25 or same_floor_residual
+    return (
+        {
+            "baryonFloorViolationRate": violation_rate,
+            "maxBaryonExcess": max_excess,
+            "positiveSupportImpossible": positive_support_impossible,
+        },
+        baryon_score,
+    )
+
+
+def residual_band_metrics(score: dict) -> dict:
+    bands = {
+        "inner": score["innerBias"],
+        "mid": score["midBias"],
+        "outer": score["outerBias"],
+    }
+    dominant = max(bands, key=lambda key: abs(bands[key]))
+    tilt = score["outerBias"] - score["innerBias"]
+    curvature = score["midBias"] - 0.5 * (score["innerBias"] + score["outerBias"])
+    return {
+        "postShapeSignedBands": residual_signature(score),
+        "dominantResidualBand": dominant,
+        "residualTilt": tilt,
+        "residualCurvature": curvature,
+    }
+
+
+def classify_residual_mode(score: dict) -> str:
+    metrics = residual_band_metrics(score)
+    inner = score["innerBias"]
+    mid = score["midBias"]
+    outer = score["outerBias"]
+    biases = {"inner": inner, "mid": mid, "outer": outer}
+    dominant = metrics["dominantResidualBand"]
+    max_abs = max(abs(value) for value in biases.values())
+    signs = [residual_sign(value) for value in [inner, mid, outer]]
+
+    if max_abs <= 5.0:
+        return "flat offset"
+    if abs(metrics["residualCurvature"]) >= 8.0 and abs(mid) >= 0.75 * max(abs(inner), abs(outer), 1e-9):
+        return "mid hump" if metrics["residualCurvature"] > 0 else "mid dip"
+    if dominant == "inner":
+        return "central excess" if inner > 0 else "central deficit"
+    if dominant == "outer":
+        return "outer excess" if outer > 0 else "outer deficit"
+    if abs(metrics["residualTilt"]) >= 10.0:
+        return "positive tilt" if metrics["residualTilt"] > 0 else "negative tilt"
+    if all(sign == signs[0] and sign != "0" for sign in signs):
+        return "flat offset"
+    return "mixed residual"
+
+
+def should_run_residual_probe(row: dict) -> bool:
+    return row["postShapeRmse"] >= RESIDUAL_REPAIR_RMSE
+
+
+def classify_residual_probe(row: dict) -> str:
+    if not row["residualProbeTested"]:
+        return "not tested"
+    if row["positiveSupportImpossible"]:
+        return "baryonic floor limited"
+    if (
+        row["delayedOnsetGainOverPostShape"] >= RESIDUAL_MEANINGFUL_GAIN
+        and row["delayedOnsetRmse"] < RESIDUAL_REPAIR_RMSE
+    ):
+        return "delayed-onset repairable"
+    if row["threeZoneGainOverPostShape"] >= RESIDUAL_MEANINGFUL_GAIN and row["threeZoneRmse"] < RESIDUAL_REPAIR_RMSE:
+        return "radial redistribution repairable"
+    if max(row["delayedOnsetGainOverPostShape"], row["threeZoneGainOverPostShape"]) >= RESIDUAL_MEANINGFUL_GAIN:
+        return "radial redistribution helps but residual remains"
+    return "not radial-support repairable"
+
+
 def support_deficit_rows(curves: list[dict]) -> list[dict]:
     rows = []
     for curve in curves:
@@ -1377,6 +1597,69 @@ def support_deficit_rows(curves: list[dict]) -> list[dict]:
             }
         )
         row["twoKernelClass"] = classify_two_kernel_result(row)
+        if two_score["rmse"] <= q_score["rmse"]:
+            post_shape_source = "two-kernel" if two_kernel_tested else "q-shape"
+            post_shape_score = two_score
+        else:
+            post_shape_source = "q-shape"
+            post_shape_score = q_score
+        baryon_stats, baryon_score = baryon_floor_stats(curve, post_shape_score)
+        residual_metrics = residual_band_metrics(post_shape_score)
+        row.update(
+            {
+                "postShapeSource": post_shape_source,
+                "postShapeRmse": post_shape_score["rmse"],
+                "postShapeRoute": post_shape_score["candidateRoute"],
+                "postShapeResidualSignature": residual_signature(post_shape_score),
+                "postShapeInnerBias": post_shape_score["innerBias"],
+                "postShapeMidBias": post_shape_score["midBias"],
+                "postShapeOuterBias": post_shape_score["outerBias"],
+                "postShapeResidualMode": classify_residual_mode(post_shape_score),
+                **residual_metrics,
+                "baryonOnlyRmse": baryon_score["rmse"],
+                "baryonOnlyInnerBias": baryon_score["innerBias"],
+                "baryonOnlyMidBias": baryon_score["midBias"],
+                "baryonOnlyOuterBias": baryon_score["outerBias"],
+                **baryon_stats,
+            }
+        )
+        residual_probe_tested = should_run_residual_probe(row)
+        if residual_probe_tested:
+            delayed_x0, delayed_width, delayed_amp, delayed_score = optimal_delayed_onset(curve, q_shape)
+            zone_inner, zone_mid, zone_outer, zone_score = optimal_three_zone_oracle(
+                curve,
+                q_shape,
+                max(q_amp, two_a1 + two_a2),
+            )
+        else:
+            delayed_x0 = math.nan
+            delayed_width = math.nan
+            delayed_amp = math.nan
+            delayed_score = post_shape_score
+            zone_inner = math.nan
+            zone_mid = math.nan
+            zone_outer = math.nan
+            zone_score = post_shape_score
+        row.update(
+            {
+                "residualProbeTested": residual_probe_tested,
+                "delayedOnsetRmse": delayed_score["rmse"],
+                "delayedOnsetGainOverPostShape": post_shape_score["rmse"] - delayed_score["rmse"],
+                "delayedOnsetAmp": delayed_amp,
+                "delayedOnsetX0": delayed_x0,
+                "delayedOnsetWidth": delayed_width,
+                "delayedOnsetRoute": delayed_score["candidateRoute"],
+                "delayedOnsetResidualSignature": residual_signature(delayed_score),
+                "threeZoneRmse": zone_score["rmse"],
+                "threeZoneGainOverPostShape": post_shape_score["rmse"] - zone_score["rmse"],
+                "threeZoneInnerAmp": zone_inner,
+                "threeZoneMidAmp": zone_mid,
+                "threeZoneOuterAmp": zone_outer,
+                "threeZoneRoute": zone_score["candidateRoute"],
+                "threeZoneResidualSignature": residual_signature(zone_score),
+            }
+        )
+        row["residualProbeClass"] = classify_residual_probe(row)
         rows.append(row)
     return rows
 
@@ -1439,6 +1722,22 @@ def grouped_deficit_summary(rows: list[dict], key: str) -> list[dict]:
                 "medianTwoKernelQ2": safe_median(row["twoKernelQ2"] for row in group),
                 "medianTwoKernelA1": safe_median(row["twoKernelA1"] for row in group),
                 "medianTwoKernelA2": safe_median(row["twoKernelA2"] for row in group),
+                "postShapeMean": safe_mean(row["postShapeRmse"] for row in group),
+                "baryonOnlyMean": safe_mean(row["baryonOnlyRmse"] for row in group),
+                "baryonFloorRate": safe_mean(1.0 if row["positiveSupportImpossible"] else 0.0 for row in group),
+                "medianBaryonFloorViolationRate": safe_median(row["baryonFloorViolationRate"] for row in group),
+                "maxBaryonExcess": max(
+                    [row["maxBaryonExcess"] for row in group if isinstance(row["maxBaryonExcess"], (int, float)) and math.isfinite(row["maxBaryonExcess"])],
+                    default=math.nan,
+                ),
+                "residualProbeTestRate": safe_mean(1.0 if row["residualProbeTested"] else 0.0 for row in group),
+                "delayedOnsetMean": safe_mean(row["delayedOnsetRmse"] for row in group),
+                "meanDelayedOnsetGainOverPostShape": safe_mean(row["delayedOnsetGainOverPostShape"] for row in group),
+                "threeZoneMean": safe_mean(row["threeZoneRmse"] for row in group),
+                "meanThreeZoneGainOverPostShape": safe_mean(row["threeZoneGainOverPostShape"] for row in group),
+                "medianThreeZoneInnerAmp": safe_median(row["threeZoneInnerAmp"] for row in group),
+                "medianThreeZoneMidAmp": safe_median(row["threeZoneMidAmp"] for row in group),
+                "medianThreeZoneOuterAmp": safe_median(row["threeZoneOuterAmp"] for row in group),
             }
         )
     return summary
@@ -1642,6 +1941,9 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
     branch_summary = capsule["closureShapeSummary"]
     q_shape_summary = capsule["qShapeSummary"]
     two_kernel_summary = capsule["twoKernelSummary"]
+    residual_mode_summary = capsule["residualModeSummary"]
+    residual_probe_summary = capsule["residualProbeSummary"]
+    baryon_floor_summary = capsule["baryonFloorSummary"]
     correlations = capsule["correlations"]
     proxy = capsule["proxy"]
     top = sorted(deficit_rows, key=lambda row: row["baselineRmse"], reverse=True)[:20]
@@ -1813,6 +2115,178 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
     else:
         lines.append("| none | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |")
 
+    lines.extend(
+        [
+            "",
+            "## Residual Mode Probe",
+            "",
+            "This layer classifies the best post-shape residual after scalar, q, and two-kernel diagnostics. It asks what geometry remains before any new framework idea is allowed into candidate search.",
+            "",
+            "| Residual mode | Count | High RMSE | Post-shape mean | Tested | Baryon-floor rate | Delayed mean | Three-zone mean |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in residual_mode_summary:
+        lines.append(
+            f"| {row['postShapeResidualMode']} | {row['count']} | {row['highRmseCount']} | {fmt(row['postShapeMean'])} | "
+            f"{fmt(row['residualProbeTestRate'] * 100)}% | {fmt(row['baryonFloorRate'] * 100)}% | "
+            f"{fmt(row['delayedOnsetMean'])} | {fmt(row['threeZoneMean'])} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Baryonic Floor Check",
+            "",
+            "This check uses zero added support. If baryons alone already sit above the observed curve, any non-negative support law is structurally blocked at those radii.",
+            "",
+            "| Positive support impossible | Count | High RMSE | Baryon-only mean | Post-shape mean | Median violation rate | Max excess |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in baryon_floor_summary:
+        lines.append(
+            f"| {row['positiveSupportImpossible']} | {row['count']} | {row['highRmseCount']} | {fmt(row['baryonOnlyMean'])} | "
+            f"{fmt(row['postShapeMean'])} | {fmt(row['medianBaryonFloorViolationRate'] * 100)}% | {fmt(row['maxBaryonExcess'])} |"
+        )
+
+    floor_examples = sorted(
+        [row for row in deficit_rows if row["positiveSupportImpossible"]],
+        key=lambda row: (row["baselineRmse"], row["maxBaryonExcess"]),
+        reverse=True,
+    )[:10]
+    lines.extend(
+        [
+            "",
+            "### Baryonic Floor Examples",
+            "",
+            "| Galaxy | Route | Residual mode | Baryon RMSE | Post-shape RMSE | Violation rate | Max excess | Class |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    if floor_examples:
+        for row in floor_examples:
+            lines.append(
+                f"| {row['name']} | {row['route']} | {row['postShapeResidualMode']} | {fmt(row['baryonOnlyRmse'])} | "
+                f"{fmt(row['postShapeRmse'])} | {fmt(row['baryonFloorViolationRate'] * 100)}% | "
+                f"{fmt(row['maxBaryonExcess'])} | {row['residualProbeClass']} |"
+            )
+    else:
+        lines.append("| none | -- | -- | -- | -- | -- | -- | -- |")
+
+    lines.extend(
+        [
+            "",
+            "## Delayed-Onset Probe",
+            "",
+            "This diagnostic suppresses inner support and lets the MTS kernel turn on later. It tests whether remaining failures need delayed transport onset rather than more total support.",
+            "",
+            "| Class | Count | High RMSE | Post-shape mean | Delayed mean | Delayed gain | Three-zone mean |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in residual_probe_summary:
+        lines.append(
+            f"| {row['residualProbeClass']} | {row['count']} | {row['highRmseCount']} | {fmt(row['postShapeMean'])} | "
+            f"{fmt(row['delayedOnsetMean'])} | {fmt(row['meanDelayedOnsetGainOverPostShape'])} | {fmt(row['threeZoneMean'])} |"
+        )
+
+    delayed_examples = sorted(
+        [row for row in deficit_rows if row["residualProbeTested"]],
+        key=lambda row: row["delayedOnsetGainOverPostShape"],
+        reverse=True,
+    )[:10]
+    lines.extend(
+        [
+            "",
+            "### Best Delayed-Onset Gains",
+            "",
+            "| Galaxy | Post-shape | Delayed | Gain | x0 | width | amp | Residual | Class |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+        ]
+    )
+    for row in delayed_examples:
+        lines.append(
+            f"| {row['name']} | {fmt(row['postShapeRmse'])} | {fmt(row['delayedOnsetRmse'])} | "
+            f"{fmt(row['delayedOnsetGainOverPostShape'])} | {fmt(row['delayedOnsetX0'])} | "
+            f"{fmt(row['delayedOnsetWidth'])} | {fmt(row['delayedOnsetAmp'])} | "
+            f"`{row['delayedOnsetResidualSignature']}` | {row['residualProbeClass']} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Three-Zone Radial Oracle",
+            "",
+            "This upper-bound oracle fits non-negative inner, mid, and outer support multipliers. If it cannot repair a curve, ordinary positive radial support reshaping is unlikely to be enough.",
+            "",
+            "| Class | Count | High RMSE | Post-shape mean | Three-zone mean | Three-zone gain | Median inner amp | Median mid amp | Median outer amp |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in residual_probe_summary:
+        lines.append(
+            f"| {row['residualProbeClass']} | {row['count']} | {row['highRmseCount']} | {fmt(row['postShapeMean'])} | "
+            f"{fmt(row['threeZoneMean'])} | {fmt(row['meanThreeZoneGainOverPostShape'])} | "
+            f"{fmt(row['medianThreeZoneInnerAmp'])} | {fmt(row['medianThreeZoneMidAmp'])} | "
+            f"{fmt(row['medianThreeZoneOuterAmp'])} |"
+        )
+
+    zone_examples = sorted(
+        [row for row in deficit_rows if row["residualProbeTested"]],
+        key=lambda row: row["threeZoneGainOverPostShape"],
+        reverse=True,
+    )[:10]
+    lines.extend(
+        [
+            "",
+            "### Best Three-Zone Gains",
+            "",
+            "| Galaxy | Post-shape | Three-zone | Gain | Inner amp | Mid amp | Outer amp | Residual | Class |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+        ]
+    )
+    for row in zone_examples:
+        lines.append(
+            f"| {row['name']} | {fmt(row['postShapeRmse'])} | {fmt(row['threeZoneRmse'])} | "
+            f"{fmt(row['threeZoneGainOverPostShape'])} | {fmt(row['threeZoneInnerAmp'])} | "
+            f"{fmt(row['threeZoneMidAmp'])} | {fmt(row['threeZoneOuterAmp'])} | "
+            f"`{row['threeZoneResidualSignature']}` | {row['residualProbeClass']} |"
+        )
+
+    remaining_failure_ledger = sorted(
+        [
+            row
+            for row in deficit_rows
+            if row["residualProbeTested"]
+            and (
+                row["positiveSupportImpossible"]
+                or row["threeZoneRmse"] >= RESIDUAL_REPAIR_RMSE
+                or row["delayedOnsetRmse"] >= RESIDUAL_REPAIR_RMSE
+            )
+        ],
+        key=lambda row: min(row["threeZoneRmse"], row["delayedOnsetRmse"]),
+        reverse=True,
+    )
+    lines.extend(
+        [
+            "",
+            "## Remaining Failure Ledger",
+            "",
+            "| Galaxy | Branch | Route | Mode | Post-shape | Delayed | Three-zone | Baryon floor | Class | Signed bands |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- | --- |",
+        ]
+    )
+    if remaining_failure_ledger:
+        for row in remaining_failure_ledger:
+            lines.append(
+                f"| {row['name']} | {row['closureShapeBranch']} | {row['route']} | {row['postShapeResidualMode']} | "
+                f"{fmt(row['postShapeRmse'])} | {fmt(row['delayedOnsetRmse'])} | {fmt(row['threeZoneRmse'])} | "
+                f"{row['positiveSupportImpossible']} | {row['residualProbeClass']} | `{row['postShapeSignedBands']}` |"
+            )
+    else:
+        lines.append("| none | -- | -- | -- | -- | -- | -- | -- | -- | -- |")
+
     branch_examples = sorted(
         [row for row in deficit_rows if row["baselineRmse"] >= 30],
         key=lambda row: (row["closureShapeBranch"], -row["baselineRmse"]),
@@ -1916,6 +2390,8 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             "",
             "The two-kernel probe tests whether those stubborn cases need multi-scale radial transport. If a galaxy is still unrepaired here, the issue likely lies outside scalar amplitude, q, and a second radial support scale.",
             "",
+            "The residual-mode probe separates those leftovers into baryonic-floor limits, delayed-onset repairs, radial-redistribution repairs, and systems that remain outside non-negative radial support reshaping.",
+            "",
         ]
     )
     return "\n".join(lines)
@@ -1963,7 +2439,7 @@ def write_support_deficit_artifacts(out_dir: Path, curves: list[dict], split: di
 
     capsule = {
         "type": "mts-support-deficit-diagnosis",
-        "version": 3,
+        "version": 4,
         "generatedAt": dt.datetime.now(dt.UTC).isoformat(),
         "sourceScript": "scripts/mts-failure-lab.py",
         "constants": {
@@ -1984,6 +2460,9 @@ def write_support_deficit_artifacts(out_dir: Path, curves: list[dict], split: di
         "closureShapeSummary": grouped_deficit_summary(deficit_rows, "closureShapeBranch"),
         "qShapeSummary": grouped_deficit_summary(deficit_rows, "qShapeClass"),
         "twoKernelSummary": grouped_deficit_summary(deficit_rows, "twoKernelClass"),
+        "residualModeSummary": grouped_deficit_summary(deficit_rows, "postShapeResidualMode"),
+        "residualProbeSummary": grouped_deficit_summary(deficit_rows, "residualProbeClass"),
+        "baryonFloorSummary": grouped_deficit_summary(deficit_rows, "positiveSupportImpossible"),
         "conflictSummary": conflict_summary,
         "correlations": correlations,
         "proxyModel": {
@@ -2579,6 +3058,23 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
                     fmt(row["medianTwoKernelQ2"]),
                     fmt(row["meanTwoKernelGainOverQ"]),
                     fmt(row["twoKernelRouteRecoveryRate"] * 100),
+                ]
+            )
+        )
+    print("RESIDUAL MODE PROBE")
+    print("residual_class\tcount\thigh_rmse\tpost_shape\tdelayed\tthree_zone\tbaryon_floor%\ttested%")
+    for row in capsule["residualProbeSummary"]:
+        print(
+            "\t".join(
+                [
+                    row["residualProbeClass"],
+                    str(row["count"]),
+                    str(row["highRmseCount"]),
+                    fmt(row["postShapeMean"]),
+                    fmt(row["delayedOnsetMean"]),
+                    fmt(row["threeZoneMean"]),
+                    fmt(row["baryonFloorRate"] * 100),
+                    fmt(row["residualProbeTestRate"] * 100),
                 ]
             )
         )
