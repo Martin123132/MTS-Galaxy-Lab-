@@ -282,6 +282,7 @@ python .\scripts\mts-failure-lab.py --mode baseline
 python .\scripts\mts-failure-lab.py --mode discover
 python .\scripts\mts-failure-lab.py --mode validate
 python .\scripts\mts-failure-lab.py --mode report
+python .\scripts\mts-failure-lab.py --mode diagnose
 ```
 
 The split is route-stratified with seed `20260511`. Candidate formulas may use MTS state gates such as memory, `u_0.75`, `u_out`, route class, locked-baseline route variables, and route-safety headroom, but not galaxy names, raw RMSE, residual signs, or lookup rules.
@@ -306,6 +307,17 @@ mts-high-rmse-candidate.json
 ```
 
 Candidate capsules include `selectionTier`, `routeBreaks`, `guardrailFailures`, `nearestPassingCandidate`, and the best frontier candidate. The browser app can import `mts-high-rmse-candidate.json` in the Research Candidate panel. Imported candidates can be loaded into formula A or queued into the tournament, but their status remains `frontier`, `rejected`, or `promoted for review`; they never replace locked MTS silently.
+
+Diagnose mode writes a support-deficit anatomy pack:
+
+```text
+mts-support-deficit.csv
+mts-support-deficit-proxy-scores.csv
+mts-support-deficit-report.md
+mts-support-deficit-model.json
+```
+
+This mode is not a candidate search. It keeps the MTS radial shape fixed, solves the scalar support multiplier each galaxy would need, and reports which MTS state variables explain the missing scale.
 
 ## Benchmark Suite
 

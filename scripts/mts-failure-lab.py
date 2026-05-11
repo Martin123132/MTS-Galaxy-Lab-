@@ -552,8 +552,7 @@ def stratified_split(curves: list[dict], seed: int, holdout_fraction: float) -> 
     }
 
 
-def score_curve(curve: dict, candidate: Candidate | None = None) -> dict:
-    amp = candidate.amp(curve) if candidate else 1.0
+def score_curve_with_amp(curve: dict, amp: float) -> dict:
     sse = 0.0
     band = {
         "inner": {"sse": 0.0, "n": 0, "bias": 0.0},
@@ -608,6 +607,11 @@ def score_curve(curve: dict, candidate: Candidate | None = None) -> dict:
         "candidateUpCrossings": candidate_route["upCrossings"],
         "routePreserved": candidate_route["route"] == curve["route"],
     }
+
+
+def score_curve(curve: dict, candidate: Candidate | None = None) -> dict:
+    amp = candidate.amp(curve) if candidate else 1.0
+    return score_curve_with_amp(curve, amp)
 
 
 def route_break_reason(base: dict, cand: dict) -> str:
@@ -908,6 +912,485 @@ def print_summary_table(label: str, summary: dict) -> None:
         value = summary.get(key)
         digits = 3 if "Rate" in key else 2
         print(f"{key}\t{fmt(value, digits) if isinstance(value, float) else value}")
+
+
+def residual_sign(value: float, threshold: float = 5.0) -> str:
+    if not math.isfinite(value) or abs(value) <= threshold:
+        return "0"
+    return "+" if value > 0 else "-"
+
+
+def residual_signature(score: dict) -> str:
+    return "".join(
+        [
+            residual_sign(score["innerBias"]),
+            residual_sign(score["midBias"]),
+            residual_sign(score["outerBias"]),
+        ]
+    )
+
+
+def optimal_scalar_amp(curve: dict) -> tuple[float, dict]:
+    def objective(amp: float) -> float:
+        return score_curve_with_amp(curve, amp)["rmse"]
+
+    high = 30.0
+    while high < 300 and objective(high) < objective(high * 0.75):
+        high *= 2
+
+    low = 0.0
+    for _ in range(72):
+        m1 = low + (high - low) / 3
+        m2 = high - (high - low) / 3
+        if objective(m1) < objective(m2):
+            high = m2
+        else:
+            low = m1
+
+    amp = (low + high) / 2
+    return amp, score_curve_with_amp(curve, amp)
+
+
+def classify_support_failure(row: dict) -> str:
+    if row["baselineRmse"] < 20 and row["optimalImprovementPct"] < 25:
+        return "baseline-acceptable"
+    if row["optimalAmp"] > 1.5 and row["outerBias"] < -5:
+        if row["route"] == "outer-infeasible":
+            return "outer-infeasible under-support"
+        if row["route"] == "buffered single-crossing":
+            return "single-crossing under-support"
+        if row["route"] == "buffered upward-crossing":
+            return "upward-crossing under-support"
+        return "state under-support"
+    if row["optimalAmp"] < 0.6 and row["innerBias"] > 5 and row["outerBias"] > 5:
+        return "low-load over-support"
+    if row["innerBias"] > 5 and row["outerBias"] < -5:
+        return "radial-shape tilt"
+    if row["optimalRmse"] > 20 and row["optimalImprovementPct"] < 35:
+        return "shape residual after scalar"
+    return "mixed residual"
+
+
+def support_deficit_rows(curves: list[dict]) -> list[dict]:
+    rows = []
+    for curve in curves:
+        base = score_curve(curve)
+        amp, opt = optimal_scalar_amp(curve)
+        gain = base["rmse"] - opt["rmse"]
+        row = {
+            "name": curve["name"],
+            "route": curve["route"],
+            "baselineModelRoute": base["candidateRoute"],
+            "optimalAmpRoute": opt["candidateRoute"],
+            "routeMismatch": curve["route"] != base["candidateRoute"],
+            "routeChangeAtOptimalAmp": base["candidateRoute"] != opt["candidateRoute"],
+            "baselineRmse": base["rmse"],
+            "optimalRmse": opt["rmse"],
+            "optimalGain": gain,
+            "optimalImprovementPct": pct_improvement(base["rmse"], opt["rmse"]),
+            "optimalAmp": amp,
+            "supportDeficit": amp - 1,
+            "innerBias": base["innerBias"],
+            "midBias": base["midBias"],
+            "outerBias": base["outerBias"],
+            "residualSignature": residual_signature(base),
+            "worstResidual": base["worstResidual"],
+            "worstX": base["worstX"],
+            "memoryLoad": curve["memoryLoad"],
+            "u0": curve["u0"],
+            "u075": curve["u075"],
+            "uOut": curve["uOut"],
+            "uMax": curve["uMax"],
+            "leffOverH": curve["leffOverH"],
+            "fGasOut": curve["fGasOut"],
+            "hOverRout": curve["h"] / curve["rOut"] if curve["rOut"] else math.nan,
+            "outerHeadroom": curve["outerHeadroom"],
+            "routeMargin": curve["routeMargin"],
+            "routeBreakRisk": curve["routeBreakRisk"],
+        }
+        row["failureMode"] = classify_support_failure(row)
+        rows.append(row)
+    return rows
+
+
+def pearson(rows: list[dict], x_key: str, y_key: str) -> float:
+    pairs = [
+        (row[x_key], row[y_key])
+        for row in rows
+        if isinstance(row.get(x_key), (int, float))
+        and isinstance(row.get(y_key), (int, float))
+        and math.isfinite(row[x_key])
+        and math.isfinite(row[y_key])
+    ]
+    if len(pairs) < 3:
+        return math.nan
+    xs = [pair[0] for pair in pairs]
+    ys = [pair[1] for pair in pairs]
+    mx = safe_mean(xs)
+    my = safe_mean(ys)
+    dx = sum((x - mx) ** 2 for x in xs)
+    dy = sum((y - my) ** 2 for y in ys)
+    if dx <= 0 or dy <= 0:
+        return math.nan
+    return sum((x - mx) * (y - my) for x, y in pairs) / math.sqrt(dx * dy)
+
+
+def grouped_deficit_summary(rows: list[dict], key: str) -> list[dict]:
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        groups.setdefault(str(row[key]), []).append(row)
+    summary = []
+    for label, group in sorted(groups.items()):
+        high = [row for row in group if row["baselineRmse"] >= 30]
+        summary.append(
+            {
+                key: label,
+                "count": len(group),
+                "highRmseCount": len(high),
+                "baselineMean": safe_mean(row["baselineRmse"] for row in group),
+                "optimalMean": safe_mean(row["optimalRmse"] for row in group),
+                "medianOptimalAmp": statistics.median(row["optimalAmp"] for row in group),
+                "meanOptimalAmp": safe_mean(row["optimalAmp"] for row in group),
+                "meanImprovementPct": safe_mean(row["optimalImprovementPct"] for row in group),
+                "routeMismatchRate": safe_mean(1.0 if row["routeMismatch"] else 0.0 for row in group),
+            }
+        )
+    return summary
+
+
+def route_gate(route: str, target: str) -> float:
+    return 1.0 if route == target else 0.0
+
+
+def deficit_feature_vector(row: dict) -> list[float]:
+    return [
+        math.log1p(row["memoryLoad"]),
+        row["u075"],
+        row["uOut"],
+        row["leffOverH"],
+        row["fGasOut"],
+        row["hOverRout"],
+        route_gate(row["route"], "buffered single-crossing"),
+        route_gate(row["route"], "buffered upward-crossing"),
+        route_gate(row["route"], "outer-infeasible"),
+        route_gate(row["route"], "CDC-low-load"),
+    ]
+
+
+DEFICIT_FEATURE_NAMES = [
+    "log1p(memoryLoad)",
+    "u075",
+    "uOut",
+    "L_eff/h",
+    "fGasOut",
+    "h/rOut",
+    "routeSingle",
+    "routeUpward",
+    "routeOuterInfeasible",
+    "routeCdc",
+]
+
+
+def solve_linear_system(matrix: list[list[float]], rhs: list[float]) -> list[float]:
+    n = len(rhs)
+    aug = [row[:] + [rhs[index]] for index, row in enumerate(matrix)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda row: abs(aug[row][col]))
+        if abs(aug[pivot][col]) < 1e-12:
+            continue
+        aug[col], aug[pivot] = aug[pivot], aug[col]
+        scale = aug[col][col]
+        aug[col] = [value / scale for value in aug[col]]
+        for row in range(n):
+            if row == col:
+                continue
+            factor = aug[row][col]
+            if abs(factor) < 1e-12:
+                continue
+            aug[row] = [value - factor * aug[col][idx] for idx, value in enumerate(aug[row])]
+    return [aug[row][-1] for row in range(n)]
+
+
+def fit_deficit_proxy(train_rows: list[dict], ridge: float = 0.05) -> dict:
+    raw = [deficit_feature_vector(row) for row in train_rows]
+    columns = list(zip(*raw))
+    means = [safe_mean(col) for col in columns]
+    stds = []
+    for col, mean in zip(columns, means):
+        variance = safe_mean((value - mean) ** 2 for value in col)
+        stds.append(math.sqrt(variance) if variance > 1e-12 else 1.0)
+
+    def normalized(row: dict) -> list[float]:
+        return [(value - mean) / std for value, mean, std in zip(deficit_feature_vector(row), means, stds)]
+
+    x_rows = [[1.0] + normalized(row) for row in train_rows]
+    y_values = [math.log(clamp(row["optimalAmp"], 0.02, 80.0)) for row in train_rows]
+    n = len(x_rows[0])
+    xtx = [[0.0 for _ in range(n)] for _ in range(n)]
+    xty = [0.0 for _ in range(n)]
+    for x_row, y_value in zip(x_rows, y_values):
+        for i in range(n):
+            xty[i] += x_row[i] * y_value
+            for j in range(n):
+                xtx[i][j] += x_row[i] * x_row[j]
+    for index in range(1, n):
+        xtx[index][index] += ridge
+    coefficients = solve_linear_system(xtx, xty)
+    return {
+        "featureNames": DEFICIT_FEATURE_NAMES,
+        "means": means,
+        "stds": stds,
+        "coefficients": coefficients,
+        "ridge": ridge,
+    }
+
+
+def predict_deficit_amp(model: dict, row: dict) -> float:
+    features = deficit_feature_vector(row)
+    total = model["coefficients"][0]
+    for value, mean, std, coefficient in zip(features, model["means"], model["stds"], model["coefficients"][1:]):
+        total += ((value - mean) / std) * coefficient
+    return clamp(math.exp(total), 0.02, 80.0)
+
+
+def r2_score(rows: list[dict], prediction_key: str, target_key: str) -> float:
+    values = [
+        (row[target_key], row[prediction_key])
+        for row in rows
+        if math.isfinite(row[target_key]) and math.isfinite(row[prediction_key])
+    ]
+    if len(values) < 3:
+        return math.nan
+    mean_target = safe_mean(target for target, _ in values)
+    ss_tot = sum((target - mean_target) ** 2 for target, _ in values)
+    ss_res = sum((target - pred) ** 2 for target, pred in values)
+    return 1 - ss_res / ss_tot if ss_tot > 0 else math.nan
+
+
+def proxy_score_rows(curves: list[dict], deficit_rows: list[dict], split: dict, model: dict) -> list[dict]:
+    by_name = {row["name"]: row for row in deficit_rows}
+    rows = []
+    for curve in curves:
+        deficit = by_name[curve["name"]]
+        amp = predict_deficit_amp(model, deficit)
+        proxy = score_curve_with_amp(curve, amp)
+        deficit["proxyAmp"] = amp
+        deficit["proxyLogAmp"] = math.log(amp)
+        deficit["targetLogAmp"] = math.log(clamp(deficit["optimalAmp"], 0.02, 80.0))
+        rows.append(
+            {
+                "name": curve["name"],
+                "split": split_label(curve, split),
+                "route": curve["route"],
+                "baselineModelRoute": deficit["baselineModelRoute"],
+                "proxyRoute": proxy["candidateRoute"],
+                "routePreservedVsBaseline": proxy["candidateRoute"] == deficit["baselineModelRoute"],
+                "baselineRmse": deficit["baselineRmse"],
+                "proxyRmse": proxy["rmse"],
+                "optimalRmse": deficit["optimalRmse"],
+                "deltaProxy": proxy["rmse"] - deficit["baselineRmse"],
+                "proxyImprovementPct": pct_improvement(deficit["baselineRmse"], proxy["rmse"]),
+                "optimalAmp": deficit["optimalAmp"],
+                "proxyAmp": amp,
+                "failureMode": deficit["failureMode"],
+            }
+        )
+    return rows
+
+
+def proxy_summary(rows: list[dict]) -> dict:
+    base = safe_mean(row["baselineRmse"] for row in rows)
+    proxy = safe_mean(row["proxyRmse"] for row in rows)
+    optimal = safe_mean(row["optimalRmse"] for row in rows)
+    hard_base = safe_mean(row["baselineRmse"] for row in rows if row["route"] in HARD_ROUTES)
+    hard_proxy = safe_mean(row["proxyRmse"] for row in rows if row["route"] in HARD_ROUTES)
+    return {
+        "count": len(rows),
+        "baselineMean": base,
+        "proxyMean": proxy,
+        "optimalMean": optimal,
+        "proxyImprovementPct": pct_improvement(base, proxy),
+        "optimalImprovementPct": pct_improvement(base, optimal),
+        "hardBaselineMean": hard_base,
+        "hardProxyMean": hard_proxy,
+        "hardProxyImprovementPct": pct_improvement(hard_base, hard_proxy),
+        "routePreservationRate": safe_mean(1.0 if row["routePreservedVsBaseline"] else 0.0 for row in rows),
+        "wins": sum(1 for row in rows if row["proxyRmse"] < row["baselineRmse"]),
+    }
+
+
+def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: list[dict]) -> str:
+    route_summary = capsule["routeSummary"]
+    mode_summary = capsule["failureModeSummary"]
+    correlations = capsule["correlations"]
+    proxy = capsule["proxy"]
+    top = sorted(deficit_rows, key=lambda row: row["baselineRmse"], reverse=True)[:20]
+    high = [row for row in deficit_rows if row["baselineRmse"] >= 30]
+    signature_counts: dict[str, int] = {}
+    for row in high:
+        signature_counts[row["residualSignature"]] = signature_counts.get(row["residualSignature"], 0) + 1
+
+    lines = [
+        "# MTS Support-Deficit Diagnosis",
+        "",
+        "This is a failure-anatomy report, not a promoted support law. It keeps canonical MTS locked, then asks how much scalar support each galaxy would need if the radial MTS shape were left unchanged.",
+        "",
+        "## Headline",
+        "",
+        f"High-RMSE systems (`RMSE >= 30 km/s`): {len(high)} / {len(deficit_rows)}.",
+        f"Dominant high-RMSE residual signature: `{max(signature_counts, key=signature_counts.get) if signature_counts else '--'}`.",
+        f"Route mismatch between observed state and locked MTS model state: {sum(1 for row in deficit_rows if row['routeMismatch'])} / {len(deficit_rows)}.",
+        "",
+        "## Route-Level Deficit",
+        "",
+        "| Route | Count | High RMSE | Baseline mean | Optimal scalar mean | Median amp | Mean amp | Gain | Route mismatch |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in route_summary:
+        lines.append(
+            f"| {row['route']} | {row['count']} | {row['highRmseCount']} | {fmt(row['baselineMean'])} | {fmt(row['optimalMean'])} | "
+            f"{fmt(row['medianOptimalAmp'])} | {fmt(row['meanOptimalAmp'])} | {fmt(row['meanImprovementPct'])}% | {fmt(row['routeMismatchRate'] * 100)}% |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Failure Modes",
+            "",
+            "| Failure mode | Count | High RMSE | Baseline mean | Optimal scalar mean | Median amp | Gain |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in mode_summary:
+        lines.append(
+            f"| {row['failureMode']} | {row['count']} | {row['highRmseCount']} | {fmt(row['baselineMean'])} | "
+            f"{fmt(row['optimalMean'])} | {fmt(row['medianOptimalAmp'])} | {fmt(row['meanImprovementPct'])}% |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## State Correlations",
+            "",
+            "| Feature | Corr with RMSE | Corr with required amp |",
+            "| --- | ---: | ---: |",
+        ]
+    )
+    for row in correlations:
+        lines.append(f"| {row['feature']} | {fmt(row['corrBaselineRmse'], 3)} | {fmt(row['corrOptimalAmp'], 3)} |")
+
+    lines.extend(
+        [
+            "",
+            "## Diagnostic Proxy",
+            "",
+            "A ridge regression was fit on the train split to predict `log(required_amp)` from MTS state variables only. This is a post-fit diagnostic probe, not a blind MTS replacement.",
+            "",
+            "| Split | Baseline mean | Proxy mean | Optimal scalar mean | Proxy gain | Hard-route proxy gain | Route keep | R2 log amp |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for split_name in ["train", "holdout", "all"]:
+        item = proxy[split_name]
+        lines.append(
+            f"| {split_name} | {fmt(item['baselineMean'])} | {fmt(item['proxyMean'])} | {fmt(item['optimalMean'])} | "
+            f"{fmt(item['proxyImprovementPct'])}% | {fmt(item['hardProxyImprovementPct'])}% | {fmt(item['routePreservationRate'] * 100)}% | {fmt(item['r2LogAmp'], 3)} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Worst Baseline Failures",
+            "",
+            "| Galaxy | Route | MTS route | RMSE | Optimal RMSE | Required amp | Signature | Failure mode |",
+            "| --- | --- | --- | ---: | ---: | ---: | --- | --- |",
+        ]
+    )
+    for row in top:
+        lines.append(
+            f"| {row['name']} | {row['route']} | {row['baselineModelRoute']} | {fmt(row['baselineRmse'])} | "
+            f"{fmt(row['optimalRmse'])} | {fmt(row['optimalAmp'])} | `{row['residualSignature']}` | {row['failureMode']} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Working Diagnosis",
+            "",
+            "The main failure is not a random residual cloud. Locked MTS is close to neutral for low-load systems, but hard-route systems want substantially larger support amplitude. The route mismatch count says the baseline often does not move itself into the observed high-load state.",
+            "",
+            "The next framework-level question is therefore narrow: derive a route-stable transport-efficiency term from invariant MTS state variables, then test whether it fixes hard-route under-support without changing low-load and CDC systems.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def write_support_deficit_artifacts(out_dir: Path, curves: list[dict], split: dict) -> dict:
+    deficit_rows = support_deficit_rows(curves)
+    train_rows = [row for row in deficit_rows if row["name"] in split["trainNames"]]
+    holdout_rows = [row for row in deficit_rows if row["name"] in split["holdoutNames"]]
+    model = fit_deficit_proxy(train_rows)
+    proxy_rows = proxy_score_rows(curves, deficit_rows, split, model)
+    proxy_train = [row for row in proxy_rows if row["split"] == "train"]
+    proxy_holdout = [row for row in proxy_rows if row["split"] == "holdout"]
+    for row in deficit_rows:
+        row["split"] = "holdout" if row["name"] in split["holdoutNames"] else "train"
+    correlations = [
+        {
+            "feature": feature,
+            "corrBaselineRmse": pearson(deficit_rows, feature, "baselineRmse"),
+            "corrOptimalAmp": pearson(deficit_rows, feature, "optimalAmp"),
+        }
+        for feature in ["memoryLoad", "u075", "uOut", "uMax", "leffOverH", "fGasOut", "hOverRout", "routeBreakRisk"]
+    ]
+
+    def with_r2(rows: list[dict], summary: dict) -> dict:
+        names = {row["name"] for row in rows}
+        drows = [row for row in deficit_rows if row["name"] in names]
+        summary["r2LogAmp"] = r2_score(drows, "proxyLogAmp", "targetLogAmp")
+        return summary
+
+    capsule = {
+        "type": "mts-support-deficit-diagnosis",
+        "version": 1,
+        "generatedAt": dt.datetime.now(dt.UTC).isoformat(),
+        "sourceScript": "scripts/mts-failure-lab.py",
+        "constants": {
+            "gamma0": GAMMA0,
+            "rMax": R_MAX,
+            "mlDisk": ML_DISK,
+            "mlBulge": ML_BULGE,
+            "qDefault": Q_DEFAULT,
+        },
+        "split": {
+            "seed": split["seed"],
+            "holdoutFraction": split["holdoutFraction"],
+            "trainCount": len(split["train"]),
+            "holdoutCount": len(split["holdout"]),
+        },
+        "routeSummary": grouped_deficit_summary(deficit_rows, "route"),
+        "failureModeSummary": grouped_deficit_summary(deficit_rows, "failureMode"),
+        "correlations": correlations,
+        "proxyModel": {
+            **model,
+            "target": "log(required scalar support multiplier)",
+            "claimStatus": "diagnostic only",
+        },
+        "proxy": {
+            "train": with_r2(proxy_train, proxy_summary(proxy_train)),
+            "holdout": with_r2(proxy_holdout, proxy_summary(proxy_holdout)),
+            "all": with_r2(proxy_rows, proxy_summary(proxy_rows)),
+        },
+    }
+    report = support_deficit_report(capsule, deficit_rows, proxy_rows)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    write_csv(out_dir / "mts-support-deficit.csv", deficit_rows)
+    write_csv(out_dir / "mts-support-deficit-proxy-scores.csv", proxy_rows)
+    (out_dir / "mts-support-deficit-report.md").write_text(report, encoding="utf-8")
+    (out_dir / "mts-support-deficit-model.json").write_text(json.dumps(json_clean(capsule), indent=2), encoding="utf-8")
+    return capsule
 
 
 def top_rows(rows: list[dict], key: str, reverse: bool = True, limit: int = 12) -> list[dict]:
@@ -1394,6 +1877,48 @@ def cmd_validate(args: argparse.Namespace, include_html: bool) -> None:
     print(f"Wrote reports to {Path(args.out).resolve()}")
 
 
+def cmd_diagnose(args: argparse.Namespace) -> None:
+    curves = build_curves()
+    split = stratified_split(curves, args.seed, args.holdout_fraction)
+    capsule = write_support_deficit_artifacts(Path(args.out), curves, split)
+    print(f"Loaded {len(curves)} LTG curves; train={len(split['train'])}, holdout={len(split['holdout'])}, seed={args.seed}")
+    print("Support-deficit diagnosis: fixed MTS radial shape, per-galaxy scalar support multiplier")
+    print("ROUTE DEFICIT")
+    print("route\tcount\thigh_rmse\tbaseline\toptimal\tmedian_amp\tgain%\tmismatch%")
+    for row in capsule["routeSummary"]:
+        print(
+            "\t".join(
+                [
+                    row["route"],
+                    str(row["count"]),
+                    str(row["highRmseCount"]),
+                    fmt(row["baselineMean"]),
+                    fmt(row["optimalMean"]),
+                    fmt(row["medianOptimalAmp"]),
+                    fmt(row["meanImprovementPct"]),
+                    fmt(row["routeMismatchRate"] * 100),
+                ]
+            )
+        )
+    print("PROXY")
+    for split_name in ["train", "holdout", "all"]:
+        item = capsule["proxy"][split_name]
+        print(
+            "\t".join(
+                [
+                    split_name,
+                    f"baseline={fmt(item['baselineMean'])}",
+                    f"proxy={fmt(item['proxyMean'])}",
+                    f"gain={fmt(item['proxyImprovementPct'])}%",
+                    f"hard_gain={fmt(item['hardProxyImprovementPct'])}%",
+                    f"route_keep={fmt(item['routePreservationRate'] * 100)}%",
+                    f"r2={fmt(item['r2LogAmp'], 3)}",
+                ]
+            )
+        )
+    print(f"Wrote diagnosis to {Path(args.out).resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -1402,7 +1927,7 @@ def cmd_list_candidates() -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MTS high-RMSE research harness")
-    parser.add_argument("--mode", choices=["baseline", "discover", "validate", "report"], default="baseline")
+    parser.add_argument("--mode", choices=["baseline", "discover", "validate", "report", "diagnose"], default="baseline")
     parser.add_argument("--seed", type=int, default=SPLIT_SEED)
     parser.add_argument("--holdout-fraction", type=float, default=HOLDOUT_FRACTION)
     parser.add_argument("--candidate-id", default="")
@@ -1427,6 +1952,8 @@ def main() -> None:
         cmd_validate(args, include_html=False)
     elif args.mode == "report":
         cmd_validate(args, include_html=True)
+    elif args.mode == "diagnose":
+        cmd_diagnose(args)
 
 
 if __name__ == "__main__":
