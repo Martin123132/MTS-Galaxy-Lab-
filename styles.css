@@ -1019,6 +1019,10 @@ svg {
   color: var(--danger);
 }
 
+.delta-warn {
+  color: var(--warn);
+}
+
 .map-tools {
   display: grid;
   grid-template-columns: 1fr 1fr;

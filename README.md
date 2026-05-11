@@ -225,8 +225,12 @@ r, x, h, rOut, fGas, fGasOut, leff, memory, q
 gamma0, rMax, mlDisk, mlBulge
 vGas, vDisk, vBulge, vBar, vObs, uObs
 u0, uOut, uMax, u075, xCross, hOverRout, leffOverH
+lockedU0, lockedUOut, lockedUMax, lockedU075, lockedXCross
 routeLow, routeCdc, routeUpward, routeSingle, routeOuterInfeasible
 routeHard, routeNonLow, outerViable
+lockedRouteLow, lockedRouteCdc, lockedRouteUpward, lockedRouteSingle
+lockedRouteOuterInfeasible, lockedRouteHard, lockedRouteNonLow
+outerHeadroom, routeMargin, routeBreakRisk
 pi, e
 ```
 
@@ -280,19 +284,28 @@ python .\scripts\mts-failure-lab.py --mode validate
 python .\scripts\mts-failure-lab.py --mode report
 ```
 
-The split is route-stratified with seed `20260511`. Candidate formulas may use MTS state gates such as memory, `u_0.75`, `u_out`, and route class, but not galaxy names, raw RMSE, residual signs, or lookup rules.
+The split is route-stratified with seed `20260511`. Candidate formulas may use MTS state gates such as memory, `u_0.75`, `u_out`, route class, locked-baseline route variables, and route-safety headroom, but not galaxy names, raw RMSE, residual signs, or lookup rules.
+
+Discovery writes two ranked tracks:
+
+```text
+mts-high-rmse-discovery-strict.csv
+mts-high-rmse-discovery-frontier.csv
+mts-high-rmse-discovery.csv
+```
+
+Strict candidates must preserve locked-MTS route states at `>= 95%` before they can rank in the strict track. Frontier candidates stay useful for failure anatomy, but remain rejected until holdout guardrails pass.
 
 Report mode writes:
 
 ```text
-mts-high-rmse-discovery.csv
 mts-high-rmse-scores.csv
 mts-high-rmse-report.md
 mts-high-rmse-report.html
 mts-high-rmse-candidate.json
 ```
 
-The browser app can import `mts-high-rmse-candidate.json` in the Research Candidate panel. Imported candidates can be loaded into formula A or queued into the tournament, but their status remains `diagnostic`, `rejected`, or `promoted for review`; they never replace locked MTS silently.
+Candidate capsules include `selectionTier`, `routeBreaks`, `guardrailFailures`, `nearestPassingCandidate`, and the best frontier candidate. The browser app can import `mts-high-rmse-candidate.json` in the Research Candidate panel. Imported candidates can be loaded into formula A or queued into the tournament, but their status remains `frontier`, `rejected`, or `promoted for review`; they never replace locked MTS silently.
 
 ## Benchmark Suite
 

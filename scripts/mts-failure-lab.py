@@ -37,6 +37,7 @@ HOLDOUT_FRACTION = 0.33
 
 HARD_ROUTES = {"buffered single-crossing", "outer-infeasible"}
 GATED_ROUTES = {"buffered single-crossing", "buffered upward-crossing", "outer-infeasible"}
+STRICT_ROUTE_PRESERVATION = 0.95
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -162,6 +163,25 @@ def route_state(points: list[dict], r_out: float) -> dict:
     }
 
 
+def route_safety(state: dict) -> dict:
+    outer_headroom = max(0.0, 1.0 - state["uOut"])
+    peak_headroom = max(0.0, 1.0 - state["uMax"])
+    if state["route"] == "outer-infeasible":
+        route_margin = 1.0 + max(0.0, state["uOut"] - 1.0)
+        route_break_risk = 0.0
+    elif state["route"] in {"buffered single-crossing", "buffered upward-crossing"}:
+        route_margin = outer_headroom
+        route_break_risk = 1.0 / (1.0 + route_margin / 0.12)
+    else:
+        route_margin = min(outer_headroom, peak_headroom)
+        route_break_risk = 1.0 / (1.0 + route_margin / 0.12)
+    return {
+        "outerHeadroom": outer_headroom,
+        "routeMargin": route_margin,
+        "routeBreakRisk": route_break_risk,
+    }
+
+
 def build_curve(sample: dict) -> dict:
     rows = parse_rotmod(sample["text"])
     h = fit_scale_length(rows)
@@ -181,6 +201,16 @@ def build_curve(sample: dict) -> dict:
         points.append({**row, "bar2": bar2, "x": row["r"] / r_out, "u": u})
 
     state = route_state(points, r_out)
+    locked_points = []
+    for point in points:
+        support2 = GAMMA0 * leff * (1 - math.exp(-((point["r"] / leff) ** Q_DEFAULT)))
+        model2 = point["bar2"] + support2
+        u = (model2 - ML_DISK * point["vDisk"] ** 2 - ML_BULGE * point["vBulge"] ** 2) / (
+            GAMMA0 * point["r"] * R_MAX
+        )
+        locked_points.append({**point, "u": u})
+    locked_state = route_state(locked_points, r_out)
+    safety = route_safety(locked_state)
     return {
         "name": clean_name(sample["name"]),
         "points": points,
@@ -190,6 +220,15 @@ def build_curve(sample: dict) -> dict:
         "leff": leff,
         "leffOverH": leff / h if h else math.nan,
         "memoryLoad": memory,
+        "lockedModelRoute": locked_state["route"],
+        "lockedModelU0": locked_state["u0"],
+        "lockedModelUOut": locked_state["uOut"],
+        "lockedModelUMax": locked_state["uMax"],
+        "lockedModelU075": locked_state["u075"],
+        "lockedModelXCross": locked_state["xCross"],
+        "lockedModelDownCrossings": locked_state["downCrossings"],
+        "lockedModelUpCrossings": locked_state["upCrossings"],
+        **safety,
         **state,
     }
 
@@ -210,16 +249,47 @@ def fmt_num(value: float) -> str:
     return f"{value:.4g}"
 
 
-def route_gate_value(curve: dict, upward_weight: float) -> float:
-    if curve["route"] in {"buffered single-crossing", "outer-infeasible"}:
+def route_gate_from_route(route: str, upward_weight: float) -> float:
+    if route in {"buffered single-crossing", "outer-infeasible"}:
         return 1.0
-    if curve["route"] == "buffered upward-crossing":
+    if route == "buffered upward-crossing":
         return upward_weight
     return 0.0
 
 
-def route_gate_expr(upward_weight: float) -> str:
+def route_gate_value(curve: dict, upward_weight: float, route_basis: str = "observed") -> float:
+    route = curve["lockedModelRoute"] if route_basis == "locked" else curve["route"]
+    return route_gate_from_route(route, upward_weight)
+
+
+def route_gate_expr(upward_weight: float, route_basis: str = "observed") -> str:
+    if route_basis == "locked":
+        return f"max(lockedRouteSingle, lockedRouteOuterInfeasible, {fmt_num(upward_weight)} * lockedRouteUpward)"
     return f"max(routeSingle, routeOuterInfeasible, {fmt_num(upward_weight)} * routeUpward)"
+
+
+def damping_value(curve: dict, mode: str, scale: float) -> float:
+    if mode == "none":
+        return 1.0
+    if curve["lockedModelRoute"] == "outer-infeasible":
+        return 1.0
+    denom = max(1e-9, scale)
+    if mode == "outer-headroom":
+        return curve["outerHeadroom"] / (curve["outerHeadroom"] + denom)
+    if mode == "route-margin":
+        return curve["routeMargin"] / (curve["routeMargin"] + denom)
+    raise ValueError(f"Unknown damping mode: {mode}")
+
+
+def damping_expr(mode: str, scale: float) -> str:
+    if mode == "none":
+        return "1"
+    scale_text = fmt_num(max(1e-9, scale))
+    if mode == "outer-headroom":
+        return f"max(lockedRouteOuterInfeasible, outerHeadroom / (outerHeadroom + {scale_text}))"
+    if mode == "route-margin":
+        return f"max(lockedRouteOuterInfeasible, routeMargin / (routeMargin + {scale_text}))"
+    raise ValueError(f"Unknown damping mode: {mode}")
 
 
 @dataclass(frozen=True)
@@ -233,6 +303,9 @@ class Candidate:
     load_mode: str
     upward_weight: float
     source: str = "registry"
+    route_basis: str = "observed"
+    damping_mode: str = "none"
+    damping_scale: float = 0.0
 
     @property
     def kind(self) -> str:
@@ -242,7 +315,7 @@ class Candidate:
     def description(self) -> str:
         return (
             "MTS support multiplied by a smooth route-state gate using memory, "
-            "u_0.75, u_out, and crossing class only."
+            "u_0.75, u_out, crossing class, and route-safety headroom only."
         )
 
     @property
@@ -251,18 +324,40 @@ class Candidate:
             "memory",
             "u075",
             "uOut",
+            "lockedU075",
+            "lockedUOut",
             "routeSingle",
             "routeUpward",
             "routeOuterInfeasible",
+            "lockedRouteSingle",
+            "lockedRouteUpward",
+            "lockedRouteOuterInfeasible",
+            "outerHeadroom",
+            "routeMargin",
+            "routeBreakRisk",
             "leff",
             "r",
             "q",
             "gamma0",
         ]
 
+    def feature_values(self, curve: dict) -> dict:
+        if self.route_basis == "locked":
+            return {
+                "u075": curve["lockedModelU075"],
+                "uOut": curve["lockedModelUOut"],
+                "route": curve["lockedModelRoute"],
+            }
+        return {
+            "u075": curve["u075"],
+            "uOut": curve["uOut"],
+            "route": curve["route"],
+        }
+
     def load_gate(self, curve: dict) -> float:
-        g075 = smooth_gate(curve["u075"], self.u075_threshold)
-        gout = smooth_gate(curve["uOut"], self.uout_threshold)
+        features = self.feature_values(curve)
+        g075 = smooth_gate(features["u075"], self.u075_threshold)
+        gout = smooth_gate(features["uOut"], self.uout_threshold)
         if self.load_mode == "u075":
             return g075
         if self.load_mode == "min-u075-uout":
@@ -273,29 +368,34 @@ class Candidate:
 
     def amp(self, curve: dict) -> float:
         memory = smooth_gate(curve["memoryLoad"], self.memory_threshold)
-        route = route_gate_value(curve, self.upward_weight)
-        return 1 + self.alpha * memory * self.load_gate(curve) * route
+        route = route_gate_value(curve, self.upward_weight, self.route_basis)
+        damping = damping_value(curve, self.damping_mode, self.damping_scale)
+        return 1 + self.alpha * memory * self.load_gate(curve) * route * damping
 
     def app_expression(self) -> str:
         base = "gamma0 * leff * (1 - exp(-pow(r / leff, q)))"
         memory = gate_expr("memory", self.memory_threshold)
-        g075 = gate_expr("u075", self.u075_threshold)
-        gout = gate_expr("uOut", self.uout_threshold)
+        u075_name = "lockedU075" if self.route_basis == "locked" else "u075"
+        uout_name = "lockedUOut" if self.route_basis == "locked" else "uOut"
+        g075 = gate_expr(u075_name, self.u075_threshold)
+        gout = gate_expr(uout_name, self.uout_threshold)
         if self.load_mode == "u075":
             load = g075
         elif self.load_mode == "min-u075-uout":
             load = f"min({g075}, {gout})"
         else:
             load = f"(0.65 * {g075} + 0.35 * {gout})"
-        route = route_gate_expr(self.upward_weight)
-        return f"{base} * (1 + {fmt_num(self.alpha)} * {memory} * {load} * {route})"
+        route = route_gate_expr(self.upward_weight, self.route_basis)
+        damping = damping_expr(self.damping_mode, self.damping_scale)
+        return f"{base} * (1 + {fmt_num(self.alpha)} * {memory} * {load} * {route} * {damping})"
 
     def science_expression(self) -> str:
         return (
             "S_base * (1 + "
             f"{fmt_num(self.alpha)} * gate(memory>{fmt_num(self.memory_threshold)})"
             f" * gate_load({self.load_mode}, u075>{fmt_num(self.u075_threshold)}, uOut>{fmt_num(self.uout_threshold)})"
-            f" * route_gate(single/outer=1, upward={fmt_num(self.upward_weight)}))"
+            f" * route_gate({self.route_basis}, single/outer=1, upward={fmt_num(self.upward_weight)})"
+            f" * route_damping({self.damping_mode}, scale={fmt_num(self.damping_scale)}))"
         )
 
     def to_json(self) -> dict:
@@ -313,13 +413,28 @@ class Candidate:
             "uOutThreshold": self.uout_threshold,
             "loadMode": self.load_mode,
             "upwardWeight": self.upward_weight,
+            "routeBasis": self.route_basis,
+            "dampingMode": self.damping_mode,
+            "dampingScale": self.damping_scale,
             "allowedVariables": self.allowed_variables,
             "forbiddenShortcuts": ["galaxy name", "raw RMSE", "residual sign", "per-galaxy lookup"],
         }
 
 
-def candidate_id(alpha: float, mem: float, u075: float, uout: float, mode: str, up: float) -> str:
+def candidate_id(
+    alpha: float,
+    mem: float,
+    u075: float,
+    uout: float,
+    mode: str,
+    up: float,
+    route_basis: str = "observed",
+    damping_mode: str = "none",
+    damping_scale: float = 0.0,
+) -> str:
     token = f"a{fmt_num(alpha)}-m{fmt_num(mem)}-u75{fmt_num(u075)}-uo{fmt_num(uout)}-{mode}-up{fmt_num(up)}"
+    if route_basis != "observed" or damping_mode != "none":
+        token += f"-{route_basis}-d{damping_mode}-ds{fmt_num(damping_scale)}"
     return "mts-state-" + re.sub(r"[^a-zA-Z0-9]+", "-", token).strip("-").lower()
 
 
@@ -363,6 +478,42 @@ def candidate_registry() -> list[Candidate]:
                                     upward_weight=up,
                                 )
                             )
+
+    for mode in ["u075", "mean-u075-uout"]:
+        uout_values = [0.0] if mode == "u075" else [0.35, 0.5]
+        for alpha in [2.0, 3.0, 4.0, 5.0, 6.0]:
+            for mem in [0.0, 1.5, 3.0]:
+                for u075 in [0.15, 0.25, 0.35]:
+                    for uout in uout_values:
+                        for up in [0.0, 0.35, 0.55]:
+                            for damping_mode in ["outer-headroom", "route-margin"]:
+                                for damping_scale in [0.08, 0.16, 0.28]:
+                                    ident = candidate_id(
+                                        alpha,
+                                        mem,
+                                        u075,
+                                        uout,
+                                        mode,
+                                        up,
+                                        route_basis="locked",
+                                        damping_mode=damping_mode,
+                                        damping_scale=damping_scale,
+                                    )
+                                    add(
+                                        Candidate(
+                                            id=ident,
+                                            name=ident.replace("mts-state-", "").replace("-", " "),
+                                            alpha=alpha,
+                                            memory_threshold=mem,
+                                            u075_threshold=u075,
+                                            uout_threshold=uout,
+                                            load_mode=mode,
+                                            upward_weight=up,
+                                            route_basis="locked",
+                                            damping_mode=damping_mode,
+                                            damping_scale=damping_scale,
+                                        )
+                                    )
     return list(candidates.values())
 
 
@@ -448,8 +599,30 @@ def score_curve(curve: dict, candidate: Candidate | None = None) -> dict:
         "worstResidual": worst["residual"],
         "amp": amp,
         "candidateRoute": candidate_route["route"],
+        "candidateU0": candidate_route["u0"],
+        "candidateUOut": candidate_route["uOut"],
+        "candidateUMax": candidate_route["uMax"],
+        "candidateU075": candidate_route["u075"],
+        "candidateXCross": candidate_route["xCross"],
+        "candidateDownCrossings": candidate_route["downCrossings"],
+        "candidateUpCrossings": candidate_route["upCrossings"],
         "routePreserved": candidate_route["route"] == curve["route"],
     }
+
+
+def route_break_reason(base: dict, cand: dict) -> str:
+    if cand["candidateRoute"] == base["candidateRoute"]:
+        return ""
+    reasons = []
+    if base["candidateUOut"] < 1 <= cand["candidateUOut"]:
+        reasons.append("u_out crossed 1")
+    if base["candidateUMax"] < 1 <= cand["candidateUMax"]:
+        reasons.append("u_max crossed 1")
+    if (base["candidateU0"] < 0) != (cand["candidateU0"] < 0):
+        reasons.append("CDC sign changed")
+    if base["candidateDownCrossings"] != cand["candidateDownCrossings"] or base["candidateUpCrossings"] != cand["candidateUpCrossings"]:
+        reasons.append("crossing count changed")
+    return "; ".join(reasons) if reasons else "route id changed"
 
 
 def score_rows(curves: list[dict], candidate: Candidate) -> list[dict]:
@@ -465,6 +638,8 @@ def score_rows(curves: list[dict], candidate: Candidate) -> list[dict]:
                 "baselineModelRoute": base["candidateRoute"],
                 "candidateRoute": cand["candidateRoute"],
                 "routePreserved": locked_route_preserved,
+                "routeTransition": "" if locked_route_preserved else f"{base['candidateRoute']} -> {cand['candidateRoute']}",
+                "routeBreakReason": route_break_reason(base, cand),
                 "baselineRmse": base["rmse"],
                 "candidateRmse": cand["rmse"],
                 "delta": cand["rmse"] - base["rmse"],
@@ -492,6 +667,23 @@ def score_rows(curves: list[dict], candidate: Candidate) -> list[dict]:
                 "xCross": curve["xCross"],
                 "downCrossings": curve["downCrossings"],
                 "upCrossings": curve["upCrossings"],
+                "baselineModelU0": base["candidateU0"],
+                "baselineModelUOut": base["candidateUOut"],
+                "baselineModelUMax": base["candidateUMax"],
+                "baselineModelU075": base["candidateU075"],
+                "baselineModelXCross": base["candidateXCross"],
+                "baselineModelDownCrossings": base["candidateDownCrossings"],
+                "baselineModelUpCrossings": base["candidateUpCrossings"],
+                "candidateModelU0": cand["candidateU0"],
+                "candidateModelUOut": cand["candidateUOut"],
+                "candidateModelUMax": cand["candidateUMax"],
+                "candidateModelU075": cand["candidateU075"],
+                "candidateModelXCross": cand["candidateXCross"],
+                "candidateModelDownCrossings": cand["candidateDownCrossings"],
+                "candidateModelUpCrossings": cand["candidateUpCrossings"],
+                "outerHeadroom": curve["outerHeadroom"],
+                "routeMargin": curve["routeMargin"],
+                "routeBreakRisk": curve["routeBreakRisk"],
             }
         )
     return rows
@@ -522,6 +714,7 @@ def summarize_rows(rows: list[dict]) -> dict:
     cdc_cand = route_mean(lambda row: row["route"] == "CDC-low-load", "candidateRmse")
     regressions = [row for row in rows if row["candidateRmse"] - row["baselineRmse"] > 2]
     max_regression = max([row["candidateRmse"] - row["baselineRmse"] for row in rows] or [math.nan])
+    route_breaks = [row for row in rows if not row["routePreserved"]]
     return {
         "count": len(rows),
         "routes": sorted(routes),
@@ -554,6 +747,7 @@ def summarize_rows(rows: list[dict]) -> dict:
         "cdcCandidateMean": cdc_cand,
         "cdcWorsening": cdc_cand - cdc_base if math.isfinite(cdc_base) and math.isfinite(cdc_cand) else math.nan,
         "routePreservationRate": safe_mean(1.0 if row["routePreserved"] else 0.0 for row in rows),
+        "routeBreakCount": len(route_breaks),
         "regressionOver2Count": len(regressions),
         "regressionOver2Rate": len(regressions) / len(rows) if rows else math.nan,
         "maxRegression": max_regression,
@@ -587,6 +781,10 @@ def claim_status(guardrails: list[dict]) -> str:
     return "promoted for review" if all(row["passed"] for row in guardrails) else "rejected"
 
 
+def selection_tier(summary: dict) -> str:
+    return "strict" if summary["routePreservationRate"] >= STRICT_ROUTE_PRESERVATION else "frontier"
+
+
 def discovery_score(summary: dict) -> float:
     regression_penalty = 80 * max(0.0, summary["regressionOver2Rate"] - 0.02)
     max_penalty = max(0.0, summary["maxRegression"] - 6)
@@ -605,28 +803,67 @@ def discovery_score(summary: dict) -> float:
     )
 
 
-def discover_candidates(train_curves: list[dict]) -> list[dict]:
-    ranked = []
+def strict_score(summary: dict) -> float:
+    if summary["routePreservationRate"] < STRICT_ROUTE_PRESERVATION:
+        return -1_000_000 + 100 * summary["routePreservationRate"] + summary["meanImprovementPct"]
+    return discovery_score(summary)
+
+
+def discovery_sort_key(item: dict, score_key: str) -> tuple:
+    summary = item["summary"]
+    return (
+        item[score_key],
+        summary["routePreservationRate"],
+        summary["meanImprovementPct"],
+        summary["hardImprovementPct"],
+        -summary["maxRegression"],
+        item["candidate"].id,
+    )
+
+
+def nearest_strict_near_miss(records: list[dict]) -> dict | None:
+    near = [item for item in records if item["selectionTier"] == "frontier"]
+    if not near:
+        return records[0] if records else None
+    near.sort(
+        key=lambda item: (
+            item["summary"]["routePreservationRate"],
+            item["summary"]["meanImprovementPct"],
+            item["summary"]["hardImprovementPct"],
+            -item["summary"]["maxRegression"],
+            item["candidate"].id,
+        ),
+        reverse=True,
+    )
+    return near[0]
+
+
+def discover_candidates(train_curves: list[dict]) -> dict:
+    records = []
     for candidate in candidate_registry():
         rows = score_rows(train_curves, candidate)
         summary = summarize_rows(rows)
-        ranked.append(
+        records.append(
             {
                 "candidate": candidate,
                 "summary": summary,
                 "score": discovery_score(summary),
+                "strictScore": strict_score(summary),
+                "selectionTier": selection_tier(summary),
             }
         )
-    ranked.sort(
-        key=lambda item: (
-            item["score"],
-            item["summary"]["meanImprovementPct"],
-            item["summary"]["hardImprovementPct"],
-            -item["summary"]["maxRegression"],
-        ),
-        reverse=True,
-    )
-    return ranked
+    strict_ranked = [item for item in records if item["selectionTier"] == "strict"]
+    strict_ranked.sort(key=lambda item: discovery_sort_key(item, "strictScore"), reverse=True)
+    frontier_ranked = [item for item in records if item["selectionTier"] == "frontier"]
+    frontier_ranked.sort(key=lambda item: discovery_sort_key(item, "score"), reverse=True)
+    all_ranked = records[:]
+    all_ranked.sort(key=lambda item: discovery_sort_key(item, "score"), reverse=True)
+    return {
+        "strict": strict_ranked,
+        "frontier": frontier_ranked,
+        "all": all_ranked,
+        "nearestStrictNearMiss": nearest_strict_near_miss(records),
+    }
 
 
 def baseline_summary(curves: list[dict]) -> dict:
@@ -714,13 +951,89 @@ def write_csv(path: Path, rows: list[dict]) -> None:
             writer.writerow({key: row.get(key) for key in headers})
 
 
-def candidate_capsule(candidate: Candidate, split: dict, train_summary: dict, holdout_summary: dict, all_summary: dict, guardrails: list[dict]) -> dict:
-    status = claim_status(guardrails)
+def route_break_summary(rows: list[dict]) -> dict:
+    broken = [row for row in rows if not row["routePreserved"]]
+    transitions: dict[str, int] = {}
+    reasons: dict[str, int] = {}
+    galaxies = []
+    for row in broken:
+        transition = row["routeTransition"] or "unknown"
+        reason = row["routeBreakReason"] or "unknown"
+        transitions[transition] = transitions.get(transition, 0) + 1
+        for item in reason.split("; "):
+            reasons[item] = reasons.get(item, 0) + 1
+        galaxies.append(
+            {
+                "name": row["name"],
+                "split": row.get("split", ""),
+                "observedRoute": row["route"],
+                "from": row["baselineModelRoute"],
+                "to": row["candidateRoute"],
+                "reason": reason,
+                "uOutBefore": row["baselineModelUOut"],
+                "uOutAfter": row["candidateModelUOut"],
+                "uMaxBefore": row["baselineModelUMax"],
+                "uMaxAfter": row["candidateModelUMax"],
+                "downCrossingsBefore": row["baselineModelDownCrossings"],
+                "downCrossingsAfter": row["candidateModelDownCrossings"],
+                "upCrossingsBefore": row["baselineModelUpCrossings"],
+                "upCrossingsAfter": row["candidateModelUpCrossings"],
+            }
+        )
+    return {
+        "count": len(broken),
+        "rate": len(broken) / len(rows) if rows else math.nan,
+        "transitions": dict(sorted(transitions.items())),
+        "reasons": dict(sorted(reasons.items())),
+        "galaxies": galaxies,
+    }
+
+
+def discovery_item_json(item: dict | None) -> dict | None:
+    if not item:
+        return None
+    summary = item["summary"]
+    return {
+        "candidate": item["candidate"].to_json(),
+        "selectionTier": item["selectionTier"],
+        "score": item["score"],
+        "strictScore": item["strictScore"],
+        "summary": {
+            "count": summary["count"],
+            "meanImprovementPct": summary["meanImprovementPct"],
+            "hardImprovementPct": summary["hardImprovementPct"],
+            "outerImprovementPct": summary["outerImprovementPct"],
+            "routePreservationRate": summary["routePreservationRate"],
+            "routeBreakCount": summary["routeBreakCount"],
+            "regressionOver2Rate": summary["regressionOver2Rate"],
+            "maxRegression": summary["maxRegression"],
+        },
+    }
+
+
+def candidate_capsule(
+    candidate: Candidate,
+    split: dict,
+    train_summary: dict,
+    holdout_summary: dict,
+    all_summary: dict,
+    guardrails: list[dict],
+    route_breaks: dict,
+    nearest_passing_candidate: dict | None,
+    frontier_candidate: dict | None,
+) -> dict:
+    claim = claim_status(guardrails)
+    tier = selection_tier(holdout_summary)
+    status = claim if claim == "promoted for review" else ("frontier" if tier == "frontier" else "rejected")
+    guardrail_failures = [row for row in guardrails if not row["passed"]]
     return {
         "type": "mts-high-rmse-candidate",
-        "version": 1,
+        "version": 2,
         "generatedAt": dt.datetime.now(dt.UTC).isoformat(),
         "sourceScript": "scripts/mts-failure-lab.py",
+        "selectionTier": tier,
+        "claimStatus": claim,
+        "status": status,
         "constants": {
             "gamma0": GAMMA0,
             "rMax": R_MAX,
@@ -738,15 +1051,24 @@ def candidate_capsule(candidate: Candidate, split: dict, train_summary: dict, ho
         "candidate": {
             **candidate.to_json(),
             "status": status,
-            "claimStatus": status,
+            "claimStatus": claim,
+            "selectionTier": tier,
         },
         "validation": {
             "train": train_summary,
             "holdout": holdout_summary,
             "all": all_summary,
             "guardrails": guardrails,
-            "claimStatus": status,
+            "guardrailFailures": guardrail_failures,
+            "routeBreaks": route_breaks,
+            "claimStatus": claim,
+            "status": status,
+            "selectionTier": tier,
         },
+        "routeBreaks": route_breaks,
+        "guardrailFailures": guardrail_failures,
+        "nearestPassingCandidate": nearest_passing_candidate,
+        "frontierCandidate": frontier_candidate,
     }
 
 
@@ -756,12 +1078,15 @@ def markdown_report(capsule: dict, rows: list[dict]) -> str:
     guardrails = validation["guardrails"]
     holdout = validation["holdout"]
     all_summary = validation["all"]
+    route_breaks = validation["routeBreaks"]
     improvements = top_rows(rows, "improvement", True, 12)
     regressions = [row for row in top_rows(rows, "delta", True, 12) if row["delta"] > 0]
     lines = [
         "# MTS High-RMSE Candidate Report",
         "",
         f"Candidate: `{candidate['id']}`",
+        f"Selection tier: `{validation['selectionTier']}`",
+        f"Candidate status: `{validation['status']}`",
         f"Status: `{candidate['claimStatus']}`",
         f"Kind: `{candidate['kind']}`",
         "",
@@ -787,6 +1112,7 @@ def markdown_report(capsule: dict, rows: list[dict]) -> str:
         f"| Hard-route improvement | {fmt(holdout['hardImprovementPct'])}% | {fmt(all_summary['hardImprovementPct'])}% |",
         f"| Outer-band improvement | {fmt(holdout['outerImprovementPct'])}% | {fmt(all_summary['outerImprovementPct'])}% |",
         f"| Route preservation | {fmt(holdout['routePreservationRate'] * 100)}% | {fmt(all_summary['routePreservationRate'] * 100)}% |",
+        f"| Route breaks | {holdout['routeBreakCount']} | {all_summary['routeBreakCount']} |",
         f"| Regression rate >2 km/s | {fmt(holdout['regressionOver2Rate'] * 100)}% | {fmt(all_summary['regressionOver2Rate'] * 100)}% |",
         "",
         "## Guardrails",
@@ -803,6 +1129,66 @@ def markdown_report(capsule: dict, rows: list[dict]) -> str:
         else:
             actual_text = fmt(actual)
         lines.append(f"| {row['label']} | {actual_text} | {row['threshold']} | {'pass' if row['passed'] else 'fail'} |")
+
+    if validation["selectionTier"] == "strict" and validation["claimStatus"] != "promoted for review":
+        failures = ", ".join(row["label"] for row in validation.get("guardrailFailures", [])) or "holdout guardrails"
+        lines.extend(
+            [
+                "",
+                "## Strict Track",
+                "",
+                "A route-preserving strict candidate exists, but it is not review-ready because the holdout guardrails did not all pass.",
+                f"Failed checks: {failures}.",
+            ]
+        )
+    elif validation["selectionTier"] != "strict":
+        nearest = capsule.get("nearestPassingCandidate")
+        strict_message = (
+            f"No strict candidate reached the `{fmt(STRICT_ROUTE_PRESERVATION * 100, 0)}%` route-preservation tier in discovery. "
+            if not validation.get("strictCandidateExists")
+            else "A strict candidate exists in discovery, but this selected candidate is frontier-tier. "
+        )
+        lines.extend(
+            [
+                "",
+                "## Strict Track",
+                "",
+                strict_message
+                + "The selected candidate is kept as frontier evidence and remains rejected unless every holdout guardrail passes.",
+            ]
+        )
+        if nearest:
+            nearest_summary = nearest["summary"]
+            nearest_label = "Best strict candidate" if validation.get("strictCandidateExists") else "Nearest strict near-miss"
+            lines.append(
+                f"{nearest_label}: `{nearest['candidate']['id']}` with route preservation "
+                f"{fmt(nearest_summary['routePreservationRate'] * 100)}% and mean improvement {fmt(nearest_summary['meanImprovementPct'])}% on train."
+            )
+
+    lines.extend(["", "## Route-Break Anatomy", ""])
+    for split_name in ["holdout", "all"]:
+        summary = route_breaks[split_name]
+        lines.extend(
+            [
+                f"### {split_name.title()}",
+                "",
+                f"Route breaks: {summary['count']} ({fmt(summary['rate'] * 100)}%)",
+                "",
+                "| Transition | Count |",
+                "| --- | ---: |",
+            ]
+        )
+        if summary["transitions"]:
+            for transition, count in summary["transitions"].items():
+                lines.append(f"| {transition} | {count} |")
+        else:
+            lines.append("| none | 0 |")
+        lines.extend(["", "| Cause | Count |", "| --- | ---: |"])
+        if summary["reasons"]:
+            for reason, count in summary["reasons"].items():
+                lines.append(f"| {reason} | {count} |")
+        else:
+            lines.append("| none | 0 |")
 
     lines.extend(["", "## Top Improvements", "", "| Galaxy | Split | Route | Baseline | Candidate | Improvement |", "| --- | --- | --- | ---: | ---: | ---: |"])
     for row in improvements:
@@ -848,7 +1234,14 @@ def html_report(markdown: str, capsule: dict) -> str:
     )
 
 
-def write_validation_artifacts(out_dir: Path, candidate: Candidate, split: dict, curves: list[dict], include_html: bool) -> dict:
+def write_validation_artifacts(
+    out_dir: Path,
+    candidate: Candidate,
+    split: dict,
+    curves: list[dict],
+    include_html: bool,
+    discovery: dict | None = None,
+) -> dict:
     rows = all_scored_rows(curves, candidate, split)
     train_rows = [row for row in rows if row["split"] == "train"]
     holdout_rows = [row for row in rows if row["split"] == "holdout"]
@@ -856,7 +1249,29 @@ def write_validation_artifacts(out_dir: Path, candidate: Candidate, split: dict,
     holdout_summary = summarize_rows(holdout_rows)
     all_summary = summarize_rows(rows)
     guardrails = evaluate_guardrails(holdout_summary)
-    capsule = candidate_capsule(candidate, split, train_summary, holdout_summary, all_summary, guardrails)
+    route_breaks = {
+        "train": route_break_summary(train_rows),
+        "holdout": route_break_summary(holdout_rows),
+        "all": route_break_summary(rows),
+    }
+    nearest = discovery_item_json(discovery["strict"][0]) if discovery and discovery["strict"] else None
+    if nearest is None and discovery:
+        nearest = discovery_item_json(discovery["nearestStrictNearMiss"])
+    frontier = discovery_item_json(discovery["frontier"][0]) if discovery and discovery["frontier"] else None
+    capsule = candidate_capsule(
+        candidate,
+        split,
+        train_summary,
+        holdout_summary,
+        all_summary,
+        guardrails,
+        route_breaks,
+        nearest,
+        frontier,
+    )
+    strict_exists = bool(discovery and discovery["strict"])
+    capsule["strictCandidateExists"] = strict_exists
+    capsule["validation"]["strictCandidateExists"] = strict_exists
     report = markdown_report(capsule, rows)
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -868,7 +1283,7 @@ def write_validation_artifacts(out_dir: Path, candidate: Candidate, split: dict,
     return capsule
 
 
-def write_discovery(out_dir: Path, ranked: list[dict]) -> None:
+def write_ranked_discovery(path: Path, ranked: list[dict], track: str) -> None:
     rows = []
     for rank, item in enumerate(ranked, start=1):
         candidate = item["candidate"]
@@ -876,28 +1291,47 @@ def write_discovery(out_dir: Path, ranked: list[dict]) -> None:
         rows.append(
             {
                 "rank": rank,
+                "track": track,
+                "selection_tier": item["selectionTier"],
                 "candidate_id": candidate.id,
                 "name": candidate.name,
                 "score": item["score"],
+                "strict_score": item["strictScore"],
                 "mean_improvement_pct": summary["meanImprovementPct"],
                 "hard_improvement_pct": summary["hardImprovementPct"],
                 "outer_improvement_pct": summary["outerImprovementPct"],
                 "route_preservation_rate": summary["routePreservationRate"],
+                "route_break_count": summary["routeBreakCount"],
                 "regression_over_2_rate": summary["regressionOver2Rate"],
                 "max_regression": summary["maxRegression"],
+                "route_basis": candidate.route_basis,
+                "damping_mode": candidate.damping_mode,
+                "damping_scale": candidate.damping_scale,
                 "app_expression": candidate.app_expression(),
             }
         )
-    write_csv(out_dir / "mts-high-rmse-discovery.csv", rows)
+    write_csv(path, rows)
 
 
-def select_candidate(ranked: list[dict], candidate_id: str | None) -> Candidate:
+def write_discovery(out_dir: Path, discovery: dict) -> None:
+    combined = discovery["strict"] + discovery["frontier"]
+    write_ranked_discovery(out_dir / "mts-high-rmse-discovery.csv", combined, "combined")
+    write_ranked_discovery(out_dir / "mts-high-rmse-discovery-strict.csv", discovery["strict"], "strict")
+    write_ranked_discovery(out_dir / "mts-high-rmse-discovery-frontier.csv", discovery["frontier"], "frontier")
+
+
+def select_candidate(discovery: dict, candidate_id: str | None) -> Candidate:
+    ranked = discovery["all"]
     if candidate_id:
         for item in ranked:
             if item["candidate"].id == candidate_id:
                 return item["candidate"]
         raise SystemExit(f"Candidate id not found: {candidate_id}")
-    return ranked[0]["candidate"]
+    if discovery["strict"]:
+        return discovery["strict"][0]["candidate"]
+    if discovery["frontier"]:
+        return discovery["frontier"][0]["candidate"]
+    raise SystemExit("No candidates were generated")
 
 
 def build_curves() -> list[dict]:
@@ -915,38 +1349,45 @@ def cmd_baseline(args: argparse.Namespace) -> None:
 def cmd_discover(args: argparse.Namespace) -> None:
     curves = build_curves()
     split = stratified_split(curves, args.seed, args.holdout_fraction)
-    ranked = discover_candidates(split["train"])
+    discovery = discover_candidates(split["train"])
     if args.out:
-        write_discovery(Path(args.out), ranked)
+        write_discovery(Path(args.out), discovery)
     print(f"Loaded {len(curves)} LTG curves; train={len(split['train'])}, holdout={len(split['holdout'])}, seed={args.seed}")
-    print("DISCOVERY RANKING (train split only)")
-    print("rank\tcandidate\tscore\tmean%\thard%\touter%\tregress>2%\tmax_reg")
-    for rank, item in enumerate(ranked[:15], start=1):
-        s = item["summary"]
-        print(
-            "\t".join(
-                [
-                    str(rank),
-                    item["candidate"].id,
-                    fmt(item["score"]),
-                    fmt(s["meanImprovementPct"]),
-                    fmt(s["hardImprovementPct"]),
-                    fmt(s["outerImprovementPct"]),
-                    fmt(s["regressionOver2Rate"] * 100),
-                    fmt(s["maxRegression"]),
-                ]
+    print(f"Strict candidates: {len(discovery['strict'])}; frontier candidates: {len(discovery['frontier'])}")
+    if not discovery["strict"]:
+        print("No strict candidate reached the 95% route-preservation tier in discovery.")
+    for track in ["strict", "frontier"]:
+        print(f"{track.upper()} DISCOVERY RANKING (train split only)")
+        print("rank\tcandidate\tscore\tmean%\thard%\touter%\troute_keep%\tregress>2%\tmax_reg")
+        for rank, item in enumerate(discovery[track][:10], start=1):
+            s = item["summary"]
+            print(
+                "\t".join(
+                    [
+                        str(rank),
+                        item["candidate"].id,
+                        fmt(item["strictScore"] if track == "strict" else item["score"]),
+                        fmt(s["meanImprovementPct"]),
+                        fmt(s["hardImprovementPct"]),
+                        fmt(s["outerImprovementPct"]),
+                        fmt(s["routePreservationRate"] * 100),
+                        fmt(s["regressionOver2Rate"] * 100),
+                        fmt(s["maxRegression"]),
+                    ]
+                )
             )
-        )
 
 
 def cmd_validate(args: argparse.Namespace, include_html: bool) -> None:
     curves = build_curves()
     split = stratified_split(curves, args.seed, args.holdout_fraction)
-    ranked = discover_candidates(split["train"])
-    candidate = select_candidate(ranked, args.candidate_id)
-    capsule = write_validation_artifacts(Path(args.out), candidate, split, curves, include_html)
+    discovery = discover_candidates(split["train"])
+    candidate = select_candidate(discovery, args.candidate_id)
+    capsule = write_validation_artifacts(Path(args.out), candidate, split, curves, include_html, discovery)
     print(f"Loaded {len(curves)} LTG curves; train={len(split['train'])}, holdout={len(split['holdout'])}, seed={args.seed}")
     print(f"Candidate: {candidate.id}")
+    print(f"Selection tier: {capsule['validation']['selectionTier']}")
+    print(f"Candidate status: {capsule['validation']['status']}")
     print(f"Claim status: {capsule['validation']['claimStatus']}")
     print_summary_table("TRAIN", capsule["validation"]["train"])
     print_summary_table("HOLDOUT", capsule["validation"]["holdout"])

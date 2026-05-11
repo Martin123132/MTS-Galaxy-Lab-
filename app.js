@@ -376,6 +376,11 @@
     "uMax",
     "u075",
     "xCross",
+    "lockedU0",
+    "lockedUOut",
+    "lockedUMax",
+    "lockedU075",
+    "lockedXCross",
     "hOverRout",
     "leffOverH",
     "routeLow",
@@ -385,7 +390,17 @@
     "routeOuterInfeasible",
     "routeHard",
     "routeNonLow",
+    "lockedRouteLow",
+    "lockedRouteCdc",
+    "lockedRouteUpward",
+    "lockedRouteSingle",
+    "lockedRouteOuterInfeasible",
+    "lockedRouteHard",
+    "lockedRouteNonLow",
     "outerViable",
+    "outerHeadroom",
+    "routeMargin",
+    "routeBreakRisk",
     "pi",
     "e"
   ];
@@ -1730,6 +1745,45 @@
     };
   }
 
+  function routeSafetyFromState(route) {
+    var uOut = Number.isFinite(route.uOut) ? route.uOut : 0;
+    var uMax = Number.isFinite(route.uMax) ? route.uMax : 0;
+    var outerHeadroom = Math.max(0, 1 - uOut);
+    var peakHeadroom = Math.max(0, 1 - uMax);
+    var routeMargin;
+    var routeBreakRisk;
+    if (route.id === "outer-infeasible") {
+      routeMargin = 1 + Math.max(0, uOut - 1);
+      routeBreakRisk = 0;
+    } else if (route.id === "buffered single-crossing" || route.id === "buffered upward-crossing") {
+      routeMargin = outerHeadroom;
+      routeBreakRisk = 1 / (1 + routeMargin / 0.12);
+    } else {
+      routeMargin = Math.min(outerHeadroom, peakHeadroom);
+      routeBreakRisk = 1 / (1 + routeMargin / 0.12);
+    }
+    return {
+      outerHeadroom: outerHeadroom,
+      routeMargin: routeMargin,
+      routeBreakRisk: routeBreakRisk
+    };
+  }
+
+  function lockedModelRouteState(curve) {
+    if (curve._frameworkLockedRouteState) return curve._frameworkLockedRouteState;
+    var leff = Number.isFinite(curve.leff) ? curve.leff : curve.rOut;
+    var q = Number.isFinite(curve.q) ? curve.q : CONST.qDefault;
+    var points = curve.points.map(function (point) {
+      var support2 = CONST.gamma0 * leff * (1 - Math.exp(-Math.pow(point.r / leff, q)));
+      var model2 = pointBar2(point) + support2;
+      var u = (model2 - CONST.mlDisk * point.vDisk * point.vDisk - CONST.mlBulge * point.vBulge * point.vBulge) /
+        (CONST.gamma0 * point.r * CONST.rMax);
+      return Object.assign({}, point, { u: u });
+    });
+    curve._frameworkLockedRouteState = classifyRoute(points, curve);
+    return curve._frameworkLockedRouteState;
+  }
+
   function compileFrameworkExpression(expression) {
     var source = String(expression || "").trim();
     if (!source) throw new Error("Framework formula is empty.");
@@ -1776,6 +1830,9 @@
       curve._frameworkRouteState = route;
     }
     var routeId = route.id || "";
+    var lockedRoute = lockedModelRouteState(curve);
+    var lockedRouteId = lockedRoute.id || "";
+    var safety = routeSafetyFromState(lockedRoute);
     return {
       r: point.r,
       x: point.r / curve.rOut,
@@ -1801,6 +1858,11 @@
       uMax: Number.isFinite(route.uMax) ? route.uMax : 0,
       u075: Number.isFinite(route.u075) ? route.u075 : 0,
       xCross: Number.isFinite(route.xCrossNorm) ? route.xCrossNorm : 0,
+      lockedU0: Number.isFinite(lockedRoute.u0) ? lockedRoute.u0 : 0,
+      lockedUOut: Number.isFinite(lockedRoute.uOut) ? lockedRoute.uOut : 0,
+      lockedUMax: Number.isFinite(lockedRoute.uMax) ? lockedRoute.uMax : 0,
+      lockedU075: Number.isFinite(lockedRoute.u075) ? lockedRoute.u075 : 0,
+      lockedXCross: Number.isFinite(lockedRoute.xCrossNorm) ? lockedRoute.xCrossNorm : 0,
       hOverRout: Number.isFinite(route.hOverRout) ? route.hOverRout : 0,
       leffOverH: h ? leff / h : 0,
       routeLow: routeId === "low-load" ? 1 : 0,
@@ -1810,7 +1872,17 @@
       routeOuterInfeasible: routeId === "outer-infeasible" ? 1 : 0,
       routeHard: routeId === "buffered single-crossing" || routeId === "outer-infeasible" ? 1 : 0,
       routeNonLow: routeId === "low-load" || routeId === "CDC-low-load" ? 0 : 1,
+      lockedRouteLow: lockedRouteId === "low-load" ? 1 : 0,
+      lockedRouteCdc: lockedRouteId === "CDC-low-load" ? 1 : 0,
+      lockedRouteUpward: lockedRouteId === "buffered upward-crossing" ? 1 : 0,
+      lockedRouteSingle: lockedRouteId === "buffered single-crossing" ? 1 : 0,
+      lockedRouteOuterInfeasible: lockedRouteId === "outer-infeasible" ? 1 : 0,
+      lockedRouteHard: lockedRouteId === "buffered single-crossing" || lockedRouteId === "outer-infeasible" ? 1 : 0,
+      lockedRouteNonLow: lockedRouteId === "low-load" || lockedRouteId === "CDC-low-load" ? 0 : 1,
       outerViable: route.outerViable ? 1 : 0,
+      outerHeadroom: safety.outerHeadroom,
+      routeMargin: safety.routeMargin,
+      routeBreakRisk: safety.routeBreakRisk,
       pi: Math.PI,
       e: Math.E
     };
@@ -2464,7 +2536,9 @@
     var expression = String(candidate.appExpression || "").trim();
     if (!expression) throw new Error("Candidate capsule is missing a browser app expression.");
     compileFrameworkExpression(expression);
-    var status = String(candidate.claimStatus || candidate.status || validation.claimStatus || "diagnostic");
+    var claim = String(candidate.claimStatus || validation.claimStatus || payload.claimStatus || "diagnostic");
+    var status = String(candidate.status || validation.status || payload.status || claim);
+    var tier = String(candidate.selectionTier || validation.selectionTier || payload.selectionTier || "frontier");
     return {
       type: payload.type,
       version: payload.version || 1,
@@ -2472,6 +2546,8 @@
       name: String(candidate.name || candidate.id || "Research candidate").slice(0, 96),
       kind: String(candidate.kind || "state-conditioned diagnostic"),
       status: status,
+      claimStatus: claim,
+      selectionTier: tier,
       expression: expression,
       scienceExpression: String(candidate.expression || ""),
       generatedAt: payload.generatedAt || "",
@@ -2480,6 +2556,10 @@
       holdout: validation.holdout || null,
       all: validation.all || null,
       guardrails: Array.isArray(validation.guardrails) ? validation.guardrails : [],
+      guardrailFailures: Array.isArray(validation.guardrailFailures) ? validation.guardrailFailures : (Array.isArray(payload.guardrailFailures) ? payload.guardrailFailures : []),
+      routeBreaks: validation.routeBreaks || payload.routeBreaks || null,
+      nearestPassingCandidate: payload.nearestPassingCandidate || null,
+      frontierCandidate: payload.frontierCandidate || null,
       raw: payload
     };
   }
@@ -2493,7 +2573,7 @@
         state.researchCandidate.loadedAt = new Date().toISOString();
         updateResearchCandidatePanel();
         if ($("researchCandidateNote")) {
-          $("researchCandidateNote").textContent = "Loaded " + candidate.id + " as " + candidate.status + ". Use Load to A to test it without changing locked MTS.";
+          $("researchCandidateNote").textContent = "Loaded " + candidate.id + " as " + candidate.status + " / " + candidate.selectionTier + ". Use Load to A to test it without changing locked MTS.";
         }
       } catch (error) {
         window.alert("Research candidate import failed: " + error.message);
@@ -2518,6 +2598,14 @@
     return fmt(value, 2);
   }
 
+  function researchCandidateClass(candidate) {
+    if (!candidate) return "";
+    if (candidate.claimStatus === "promoted for review" || candidate.status === "promoted for review") return "delta-good";
+    if (candidate.status === "frontier" || candidate.selectionTier === "frontier") return "delta-warn";
+    if (candidate.status === "rejected" || candidate.claimStatus === "rejected") return "delta-bad";
+    return "";
+  }
+
   function updateResearchCandidatePanel() {
     var candidate = state.researchCandidate.current;
     var table = $("researchCandidateTable");
@@ -2525,25 +2613,42 @@
     if (!candidate) {
       $("researchCandidateStatus").textContent = "not loaded";
       $("researchCandidateName").textContent = "--";
+      if ($("researchCandidateTier")) $("researchCandidateTier").textContent = "--";
       $("researchCandidateClaim").textContent = "--";
       $("researchCandidateGain").textContent = "--";
       $("researchCandidateRoute").textContent = "--";
+      if ($("researchCandidateBreaks")) $("researchCandidateBreaks").textContent = "--";
       table.innerHTML = '<div class="research-row warn"><strong>No candidate</strong><span>--</span><span>import</span><span>json</span></div>';
       return;
     }
 
     var holdout = candidate.holdout || {};
+    var routeBreaks = candidate.routeBreaks && candidate.routeBreaks.holdout ? candidate.routeBreaks.holdout : null;
+    var routeBreakCount = routeBreaks && Number.isFinite(Number(routeBreaks.count)) ? Number(routeBreaks.count) : Number(holdout.routeBreakCount);
     $("researchCandidateStatus").textContent = candidate.status;
     $("researchCandidateName").textContent = compactText(candidate.id, "--", 18);
-    $("researchCandidateClaim").textContent = candidate.status;
-    $("researchCandidateClaim").className = candidate.status === "promoted for review" ? "delta-good" : (candidate.status === "rejected" ? "delta-bad" : "");
+    if ($("researchCandidateTier")) {
+      $("researchCandidateTier").textContent = candidate.selectionTier || "--";
+      $("researchCandidateTier").className = researchCandidateClass(candidate);
+    }
+    $("researchCandidateClaim").textContent = candidate.claimStatus || candidate.status;
+    $("researchCandidateClaim").className = researchCandidateClass(candidate);
     $("researchCandidateGain").textContent = researchPct(Number(holdout.meanImprovementPct));
     $("researchCandidateRoute").textContent = researchRate(Number(holdout.routePreservationRate));
+    if ($("researchCandidateBreaks")) $("researchCandidateBreaks").textContent = Number.isFinite(routeBreakCount) ? String(routeBreakCount) : "--";
 
     table.innerHTML = "";
-    var rows = candidate.guardrails.length ? candidate.guardrails : [
+    var rows = candidate.guardrails.length ? candidate.guardrails.slice() : [
       { label: "Guardrails", passed: false, actual: NaN, threshold: "missing" }
     ];
+    if (Number.isFinite(routeBreakCount)) {
+      rows.unshift({
+        label: "Route breaks",
+        passed: routeBreakCount === 0,
+        actual: routeBreakCount,
+        threshold: "0 strict"
+      });
+    }
     rows.slice(0, 10).forEach(function (row) {
       var item = document.createElement("div");
       item.className = "research-row " + (row.passed ? "pass" : "fail");
@@ -2568,7 +2673,7 @@
     applyFrameworkExpression();
     runFrameworkBatch();
     if ($("researchCandidateNote")) {
-      $("researchCandidateNote").textContent = "Loaded " + candidate.id + " into A and ran the 175-LTG batch. Claim status remains " + candidate.status + ".";
+      $("researchCandidateNote").textContent = "Loaded " + candidate.id + " into A and ran the 175-LTG batch. Claim status remains " + (candidate.claimStatus || candidate.status) + ".";
     }
     updateResearchCandidatePanel();
   }
@@ -2586,7 +2691,7 @@
     }
     runTournament();
     if ($("researchCandidateNote")) {
-      $("researchCandidateNote").textContent = "Queued " + candidate.id + " in the tournament. It remains " + candidate.status + " until guardrails pass.";
+      $("researchCandidateNote").textContent = "Queued " + candidate.id + " in the tournament. It remains " + (candidate.claimStatus || candidate.status) + " until guardrails pass.";
     }
     updateResearchCandidatePanel();
   }
