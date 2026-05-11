@@ -43,6 +43,11 @@ TWO_KERNEL_ETA_GRID = [0.4, 0.7, 1.6, 2.8]
 TWO_KERNEL_Q2_GRID = [0.35, 0.55, 0.77, 1.0, 1.35, 1.85]
 DELAYED_ONSET_X0_GRID = [0.10, 0.18, 0.26, 0.34, 0.45, 0.58]
 DELAYED_ONSET_WIDTH_GRID = [0.04, 0.08, 0.14, 0.22]
+ML_DISK_STRESS_GRID = [0.30, 0.40, 0.50, 0.60, 0.70]
+ML_BULGE_STRESS_GRID = [0.50, 0.70, 0.90]
+VOBS_SCALE_STRESS_GRID = [0.94, 0.97, 1.00, 1.03, 1.06]
+BARYON_VELOCITY_SCALE_STRESS_GRID = [0.85, 0.925, 1.00, 1.075, 1.15]
+ERR_FLOOR = 2.0
 RESIDUAL_REPAIR_RMSE = 20.0
 RESIDUAL_MEANINGFUL_GAIN = 5.0
 
@@ -90,6 +95,11 @@ def parse_rotmod(text: str) -> list[dict]:
     if len(rows) < 2:
         raise RuntimeError("ROTMOD sample has fewer than two usable rows")
     return rows
+
+
+def parse_distance_mpc(text: str) -> float:
+    match = re.search(r"^\s*#\s*Distance\s*=\s*([0-9.+\-eE]+)\s*Mpc\b", text, re.M)
+    return float(match.group(1)) if match else math.nan
 
 
 def fit_scale_length(rows: list[dict]) -> float:
@@ -189,20 +199,25 @@ def route_safety(state: dict) -> dict:
     }
 
 
-def build_curve(sample: dict) -> dict:
-    rows = parse_rotmod(sample["text"])
+def build_curve_from_rows(
+    name: str,
+    rows: list[dict],
+    distance_mpc: float,
+    ml_disk: float = ML_DISK,
+    ml_bulge: float = ML_BULGE,
+) -> dict:
     h = fit_scale_length(rows)
     r_out = rows[-1]["r"]
     last = rows[-1]
-    vbar_out2 = last["vGas"] ** 2 + ML_DISK * last["vDisk"] ** 2 + ML_BULGE * last["vBulge"] ** 2
+    vbar_out2 = last["vGas"] ** 2 + ml_disk * last["vDisk"] ** 2 + ml_bulge * last["vBulge"] ** 2
     f_gas_out = clamp(last["vGas"] ** 2 / vbar_out2 if vbar_out2 > 0 else 0, 0, 1)
     leff = leff_exact(h, r_out, f_gas_out)
     memory = (1 - f_gas_out) * (r_out / h)
 
     points = []
     for row in rows:
-        bar2 = row["vGas"] ** 2 + ML_DISK * row["vDisk"] ** 2 + ML_BULGE * row["vBulge"] ** 2
-        u = (row["vObs"] ** 2 - ML_DISK * row["vDisk"] ** 2 - ML_BULGE * row["vBulge"] ** 2) / (
+        bar2 = row["vGas"] ** 2 + ml_disk * row["vDisk"] ** 2 + ml_bulge * row["vBulge"] ** 2
+        u = (row["vObs"] ** 2 - ml_disk * row["vDisk"] ** 2 - ml_bulge * row["vBulge"] ** 2) / (
             GAMMA0 * row["r"] * R_MAX
         )
         points.append({**row, "bar2": bar2, "x": row["r"] / r_out, "u": u})
@@ -212,15 +227,18 @@ def build_curve(sample: dict) -> dict:
     for point in points:
         support2 = GAMMA0 * leff * (1 - math.exp(-((point["r"] / leff) ** Q_DEFAULT)))
         model2 = point["bar2"] + support2
-        u = (model2 - ML_DISK * point["vDisk"] ** 2 - ML_BULGE * point["vBulge"] ** 2) / (
+        u = (model2 - ml_disk * point["vDisk"] ** 2 - ml_bulge * point["vBulge"] ** 2) / (
             GAMMA0 * point["r"] * R_MAX
         )
         locked_points.append({**point, "u": u})
     locked_state = route_state(locked_points, r_out)
     safety = route_safety(locked_state)
     return {
-        "name": clean_name(sample["name"]),
+        "name": name,
         "points": points,
+        "distanceMpc": distance_mpc,
+        "mlDisk": ml_disk,
+        "mlBulge": ml_bulge,
         "h": h,
         "rOut": r_out,
         "fGasOut": f_gas_out,
@@ -238,6 +256,41 @@ def build_curve(sample: dict) -> dict:
         **safety,
         **state,
     }
+
+
+def build_curve(sample: dict) -> dict:
+    rows = parse_rotmod(sample["text"])
+    return build_curve_from_rows(clean_name(sample["name"]), rows, parse_distance_mpc(sample["text"]))
+
+
+def transformed_curve(
+    curve: dict,
+    ml_disk: float | None = None,
+    ml_bulge: float | None = None,
+    vobs_scale: float = 1.0,
+    baryon_velocity_scale: float = 1.0,
+) -> dict:
+    rows = []
+    for point in curve["points"]:
+        rows.append(
+            {
+                "r": point["r"],
+                "vObs": point["vObs"] * vobs_scale,
+                "err": point["err"] * abs(vobs_scale),
+                "vGas": point["vGas"] * baryon_velocity_scale,
+                "vDisk": point["vDisk"] * baryon_velocity_scale,
+                "vBulge": point["vBulge"] * baryon_velocity_scale,
+                "sbDisk": point["sbDisk"],
+                "sbBulge": point["sbBulge"],
+            }
+        )
+    return build_curve_from_rows(
+        curve["name"],
+        rows,
+        curve["distanceMpc"],
+        ml_disk=curve["mlDisk"] if ml_disk is None else ml_disk,
+        ml_bulge=curve["mlBulge"] if ml_bulge is None else ml_bulge,
+    )
 
 
 def smooth_gate(value: float, threshold: float) -> float:
@@ -646,6 +699,8 @@ def score_curve_with_three_zone(
 
 
 def score_curve_with_support(curve: dict, support_fn: Callable[[dict], float], amp: float, q_value: float) -> dict:
+    ml_disk = curve.get("mlDisk", ML_DISK)
+    ml_bulge = curve.get("mlBulge", ML_BULGE)
     sse = 0.0
     band = {
         "inner": {"sse": 0.0, "n": 0, "bias": 0.0},
@@ -659,7 +714,7 @@ def score_curve_with_support(curve: dict, support_fn: Callable[[dict], float], a
         model2 = point["bar2"] + support2
         model = math.sqrt(max(0.0, model2))
         residual = model - point["vObs"]
-        u = (model2 - ML_DISK * point["vDisk"] ** 2 - ML_BULGE * point["vBulge"] ** 2) / (
+        u = (model2 - ml_disk * point["vDisk"] ** 2 - ml_bulge * point["vBulge"] ** 2) / (
             GAMMA0 * point["r"] * R_MAX
         )
         custom_points.append({**point, "u": u})
@@ -701,6 +756,37 @@ def score_curve_with_support(curve: dict, support_fn: Callable[[dict], float], a
         "candidateUpCrossings": candidate_route["upCrossings"],
         "routePreserved": candidate_route["route"] == curve["route"],
     }
+
+
+def weighted_rmse_with_support(curve: dict, support_fn: Callable[[dict], float]) -> float:
+    weighted_sse = 0.0
+    weight_sum = 0.0
+    for point in curve["points"]:
+        model = math.sqrt(max(0.0, point["bar2"] + support_fn(point)))
+        residual = model - point["vObs"]
+        sigma = max(ERR_FLOOR, abs(point.get("err", ERR_FLOOR)))
+        weight = 1.0 / (sigma * sigma)
+        weighted_sse += weight * residual * residual
+        weight_sum += weight
+    return math.sqrt(weighted_sse / weight_sum) if weight_sum else math.nan
+
+
+def weighted_rmse_with_params(curve: dict, amp: float, q_value: float = Q_DEFAULT) -> float:
+    def support(point: dict) -> float:
+        return GAMMA0 * curve["leff"] * (1 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+
+    return weighted_rmse_with_support(curve, support)
+
+
+def weighted_rmse_with_two_kernel(curve: dict, a1: float, a2: float, q1: float, q2: float, eta: float) -> float:
+    scale2 = max(1e-9, eta * curve["leff"])
+
+    def support(point: dict) -> float:
+        kernel1 = 1 - math.exp(-((point["r"] / curve["leff"]) ** q1))
+        kernel2 = 1 - math.exp(-((point["r"] / scale2) ** q2))
+        return GAMMA0 * curve["leff"] * (a1 * kernel1 + a2 * kernel2)
+
+    return weighted_rmse_with_support(curve, support)
 
 
 def score_curve_with_amp(curve: dict, amp: float) -> dict:
@@ -1476,6 +1562,84 @@ def classify_residual_probe(row: dict) -> str:
     return "not radial-support repairable"
 
 
+def stress_params_text(params: dict) -> str:
+    return json.dumps(params, sort_keys=True, separators=(",", ":"))
+
+
+def stress_score(curve: dict, q_value: float, kind: str, params: dict) -> dict:
+    amp, score = optimal_amp_for_q(curve, q_value)
+    floor_stats, _baryon_score = baryon_floor_stats(curve, score)
+    return {
+        "kind": kind,
+        "params": stress_params_text(params),
+        "rmse": score["rmse"],
+        "amp": amp,
+        "route": score["candidateRoute"],
+        "residualSignature": residual_signature(score),
+        "positiveSupportImpossible": floor_stats["positiveSupportImpossible"],
+        "baryonFloorViolationRate": floor_stats["baryonFloorViolationRate"],
+        "maxBaryonExcess": floor_stats["maxBaryonExcess"],
+    }
+
+
+def best_systematics_stress(curve: dict, q_value: float) -> dict:
+    best_by_kind: dict[str, dict] = {}
+
+    for ml_disk in ML_DISK_STRESS_GRID:
+        for ml_bulge in ML_BULGE_STRESS_GRID:
+            variant = transformed_curve(curve, ml_disk=ml_disk, ml_bulge=ml_bulge)
+            result = stress_score(variant, q_value, "M/L", {"mlDisk": ml_disk, "mlBulge": ml_bulge})
+            if "M/L" not in best_by_kind or result["rmse"] < best_by_kind["M/L"]["rmse"]:
+                best_by_kind["M/L"] = result
+
+    for vobs_scale in VOBS_SCALE_STRESS_GRID:
+        variant = transformed_curve(curve, vobs_scale=vobs_scale)
+        result = stress_score(variant, q_value, "velocity-scale proxy", {"vObsScale": vobs_scale})
+        if "velocity-scale proxy" not in best_by_kind or result["rmse"] < best_by_kind["velocity-scale proxy"]["rmse"]:
+            best_by_kind["velocity-scale proxy"] = result
+
+    for baryon_scale in BARYON_VELOCITY_SCALE_STRESS_GRID:
+        variant = transformed_curve(curve, baryon_velocity_scale=baryon_scale)
+        result = stress_score(variant, q_value, "baryon-scale", {"baryonVelocityScale": baryon_scale})
+        if "baryon-scale" not in best_by_kind or result["rmse"] < best_by_kind["baryon-scale"]["rmse"]:
+            best_by_kind["baryon-scale"] = result
+
+    best = min(best_by_kind.values(), key=lambda result: result["rmse"])
+    return {
+        "best": best,
+        "ml": best_by_kind["M/L"],
+        "velocity": best_by_kind["velocity-scale proxy"],
+        "baryon": best_by_kind["baryon-scale"],
+    }
+
+
+def classify_systematics(row: dict) -> str:
+    if row["postShapeRmse"] >= RESIDUAL_REPAIR_RMSE and row["weightedPostShapeRmse"] < RESIDUAL_REPAIR_RMSE:
+        return "error-bar dominated"
+    if row["systematicsGainOverPostShape"] >= RESIDUAL_MEANINGFUL_GAIN and row["bestSystematicsRmse"] < RESIDUAL_REPAIR_RMSE:
+        if row["bestSystematicsKind"] == "M/L":
+            return "M/L-sensitive"
+        if row["bestSystematicsKind"] == "velocity-scale proxy":
+            return "velocity-scale-sensitive"
+        if row["bestSystematicsKind"] == "baryon-scale":
+            return "baryon-scale-sensitive"
+    if row["systematicsGainOverPostShape"] >= RESIDUAL_MEANINGFUL_GAIN:
+        return "systematics helps but residual remains"
+    return "not systematics repairable"
+
+
+def systematics_verdict(row: dict) -> str:
+    if row["systematicsClass"] in {"M/L-sensitive", "velocity-scale-sensitive", "baryon-scale-sensitive"}:
+        return "systematics repairable"
+    if row["systematicsClass"] == "error-bar dominated":
+        return "error-bar dominated"
+    if row["positiveSupportImpossible"] and not row["baryonFloorClearedBySystematics"]:
+        return "still baryonic-floor limited"
+    if row["systematicsClass"] == "systematics helps but residual remains":
+        return "systematics helps but residual remains"
+    return "framework/closure-facing"
+
+
 def support_deficit_rows(curves: list[dict]) -> list[dict]:
     rows = []
     for curve in curves:
@@ -1490,6 +1654,7 @@ def support_deficit_rows(curves: list[dict]) -> list[dict]:
         safe_gain_fraction = route_safe_gain / gain if gain > 1e-9 else math.nan
         row = {
             "name": curve["name"],
+            "distanceMpc": curve["distanceMpc"],
             "route": curve["route"],
             "baselineModelRoute": base["candidateRoute"],
             "optimalAmpRoute": opt["candidateRoute"],
@@ -1660,6 +1825,32 @@ def support_deficit_rows(curves: list[dict]) -> list[dict]:
             }
         )
         row["residualProbeClass"] = classify_residual_probe(row)
+        if post_shape_source == "two-kernel" and math.isfinite(two_eta) and math.isfinite(two_q2):
+            weighted_post_shape_rmse = weighted_rmse_with_two_kernel(curve, two_a1, two_a2, q_shape, two_q2, two_eta)
+        else:
+            weighted_post_shape_rmse = weighted_rmse_with_params(curve, q_amp, q_shape)
+        stress = best_systematics_stress(curve, q_shape)
+        best_stress = stress["best"]
+        row.update(
+            {
+                "weightedBaselineRmse": weighted_rmse_with_params(curve, 1.0, Q_DEFAULT),
+                "weightedPostShapeRmse": weighted_post_shape_rmse,
+                "bestSystematicsRmse": best_stress["rmse"],
+                "bestSystematicsKind": best_stress["kind"],
+                "bestSystematicsParams": best_stress["params"],
+                "systematicsGainOverPostShape": post_shape_score["rmse"] - best_stress["rmse"],
+                "mlStressRmse": stress["ml"]["rmse"],
+                "mlStressParams": stress["ml"]["params"],
+                "velocityScaleStressRmse": stress["velocity"]["rmse"],
+                "velocityScaleStressParams": stress["velocity"]["params"],
+                "baryonScaleStressRmse": stress["baryon"]["rmse"],
+                "baryonScaleStressParams": stress["baryon"]["params"],
+                "baryonFloorClearedBySystematics": bool(row["positiveSupportImpossible"] and not best_stress["positiveSupportImpossible"]),
+                "bestSystematicsRoute": best_stress["route"],
+                "bestSystematicsResidualSignature": best_stress["residualSignature"],
+            }
+        )
+        row["systematicsClass"] = classify_systematics(row)
         rows.append(row)
     return rows
 
@@ -1738,6 +1929,14 @@ def grouped_deficit_summary(rows: list[dict], key: str) -> list[dict]:
                 "medianThreeZoneInnerAmp": safe_median(row["threeZoneInnerAmp"] for row in group),
                 "medianThreeZoneMidAmp": safe_median(row["threeZoneMidAmp"] for row in group),
                 "medianThreeZoneOuterAmp": safe_median(row["threeZoneOuterAmp"] for row in group),
+                "weightedBaselineMean": safe_mean(row["weightedBaselineRmse"] for row in group),
+                "weightedPostShapeMean": safe_mean(row["weightedPostShapeRmse"] for row in group),
+                "bestSystematicsMean": safe_mean(row["bestSystematicsRmse"] for row in group),
+                "meanSystematicsGainOverPostShape": safe_mean(row["systematicsGainOverPostShape"] for row in group),
+                "mlStressMean": safe_mean(row["mlStressRmse"] for row in group),
+                "velocityScaleStressMean": safe_mean(row["velocityScaleStressRmse"] for row in group),
+                "baryonScaleStressMean": safe_mean(row["baryonScaleStressRmse"] for row in group),
+                "baryonFloorClearedRate": safe_mean(1.0 if row["baryonFloorClearedBySystematics"] else 0.0 for row in group),
             }
         )
     return summary
@@ -1944,6 +2143,7 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
     residual_mode_summary = capsule["residualModeSummary"]
     residual_probe_summary = capsule["residualProbeSummary"]
     baryon_floor_summary = capsule["baryonFloorSummary"]
+    systematics_summary = capsule["systematicsSummary"]
     correlations = capsule["correlations"]
     proxy = capsule["proxy"]
     top = sorted(deficit_rows, key=lambda row: row["baselineRmse"], reverse=True)[:20]
@@ -2131,6 +2331,125 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             f"| {row['postShapeResidualMode']} | {row['count']} | {row['highRmseCount']} | {fmt(row['postShapeMean'])} | "
             f"{fmt(row['residualProbeTestRate'] * 100)}% | {fmt(row['baryonFloorRate'] * 100)}% | "
             f"{fmt(row['delayedOnsetMean'])} | {fmt(row['threeZoneMean'])} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Systematics Stress Probe",
+            "",
+            "This diagnostic asks whether plausible input assumptions explain the remaining residuals. It is not a promoted law, and the velocity-scale scan is only an inclination-like proxy because this sample pack does not include inclination metadata.",
+            "",
+            "| Systematics class | Count | High RMSE | Post-shape mean | Best stress mean | Gain | Weighted post-shape | Floor cleared |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in systematics_summary:
+        lines.append(
+            f"| {row['systematicsClass']} | {row['count']} | {row['highRmseCount']} | {fmt(row['postShapeMean'])} | "
+            f"{fmt(row['bestSystematicsMean'])} | {fmt(row['meanSystematicsGainOverPostShape'])} | "
+            f"{fmt(row['weightedPostShapeMean'])} | {fmt(row['baryonFloorClearedRate'] * 100)}% |"
+        )
+
+    systematics_test_rows = sorted(
+        [row for row in deficit_rows if row["residualProbeTested"]],
+        key=lambda row: row["mlStressRmse"],
+    )
+    lines.extend(
+        [
+            "",
+            "## M/L Sensitivity",
+            "",
+            "| Galaxy | Post-shape | M/L stress | Params | Class |",
+            "| --- | ---: | ---: | --- | --- |",
+        ]
+    )
+    for row in systematics_test_rows:
+        lines.append(
+            f"| {row['name']} | {fmt(row['postShapeRmse'])} | {fmt(row['mlStressRmse'])} | "
+            f"`{row['mlStressParams']}` | {row['systematicsClass']} |"
+        )
+
+    velocity_rows = sorted(
+        [row for row in deficit_rows if row["residualProbeTested"]],
+        key=lambda row: row["velocityScaleStressRmse"],
+    )
+    lines.extend(
+        [
+            "",
+            "## Velocity-Scale Proxy",
+            "",
+            "This is not a real inclination correction. It rescales observed velocities as a proxy stress because the local ROTMOD pack has no inclination columns.",
+            "",
+            "| Galaxy | Post-shape | Velocity-scale stress | Params | Class |",
+            "| --- | ---: | ---: | --- | --- |",
+        ]
+    )
+    for row in velocity_rows:
+        lines.append(
+            f"| {row['name']} | {fmt(row['postShapeRmse'])} | {fmt(row['velocityScaleStressRmse'])} | "
+            f"`{row['velocityScaleStressParams']}` | {row['systematicsClass']} |"
+        )
+
+    baryon_rows = sorted(
+        [row for row in deficit_rows if row["residualProbeTested"]],
+        key=lambda row: row["baryonScaleStressRmse"],
+    )
+    lines.extend(
+        [
+            "",
+            "## Baryonic Component Scale",
+            "",
+            "| Galaxy | Post-shape | Baryon-scale stress | Params | Floor cleared | Class |",
+            "| --- | ---: | ---: | --- | --- | --- |",
+        ]
+    )
+    for row in baryon_rows:
+        lines.append(
+            f"| {row['name']} | {fmt(row['postShapeRmse'])} | {fmt(row['baryonScaleStressRmse'])} | "
+            f"`{row['baryonScaleStressParams']}` | {row['baryonFloorClearedBySystematics']} | {row['systematicsClass']} |"
+        )
+
+    weighted_rows = sorted(
+        [row for row in deficit_rows if row["residualProbeTested"]],
+        key=lambda row: row["weightedPostShapeRmse"],
+    )
+    lines.extend(
+        [
+            "",
+            "## Error-Weighted Residual Check",
+            "",
+            f"Weighted RMSE uses the available `errV` column with a {fmt(ERR_FLOOR)} km/s error floor.",
+            "",
+            "| Galaxy | Baseline | Weighted baseline | Post-shape | Weighted post-shape | Class |",
+            "| --- | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for row in weighted_rows:
+        lines.append(
+            f"| {row['name']} | {fmt(row['baselineRmse'])} | {fmt(row['weightedBaselineRmse'])} | "
+            f"{fmt(row['postShapeRmse'])} | {fmt(row['weightedPostShapeRmse'])} | {row['systematicsClass']} |"
+        )
+
+    systematics_ledger = sorted(
+        [row for row in deficit_rows if row["residualProbeTested"]],
+        key=lambda row: row["postShapeRmse"],
+        reverse=True,
+    )
+    lines.extend(
+        [
+            "",
+            "## Systematics Verdict Ledger",
+            "",
+            "| Galaxy | Route | Residual mode | Post-shape | Best stress | Kind | Params | Gain | Floor cleared | Verdict |",
+            "| --- | --- | --- | ---: | ---: | --- | --- | ---: | --- | --- |",
+        ]
+    )
+    for row in systematics_ledger:
+        lines.append(
+            f"| {row['name']} | {row['route']} | {row['postShapeResidualMode']} | {fmt(row['postShapeRmse'])} | "
+            f"{fmt(row['bestSystematicsRmse'])} | {row['bestSystematicsKind']} | `{row['bestSystematicsParams']}` | "
+            f"{fmt(row['systematicsGainOverPostShape'])} | {row['baryonFloorClearedBySystematics']} | {systematics_verdict(row)} |"
         )
 
     lines.extend(
@@ -2392,6 +2711,8 @@ def support_deficit_report(capsule: dict, deficit_rows: list[dict], proxy_rows: 
             "",
             "The residual-mode probe separates those leftovers into baryonic-floor limits, delayed-onset repairs, radial-redistribution repairs, and systems that remain outside non-negative radial support reshaping.",
             "",
+            "The systematics stress probe then tests whether those leftovers are sensitive to M/L, a velocity-scale proxy, baryonic normalization, or error weighting before treating them as framework-level failures.",
+            "",
         ]
     )
     return "\n".join(lines)
@@ -2439,7 +2760,7 @@ def write_support_deficit_artifacts(out_dir: Path, curves: list[dict], split: di
 
     capsule = {
         "type": "mts-support-deficit-diagnosis",
-        "version": 4,
+        "version": 5,
         "generatedAt": dt.datetime.now(dt.UTC).isoformat(),
         "sourceScript": "scripts/mts-failure-lab.py",
         "constants": {
@@ -2463,6 +2784,7 @@ def write_support_deficit_artifacts(out_dir: Path, curves: list[dict], split: di
         "residualModeSummary": grouped_deficit_summary(deficit_rows, "postShapeResidualMode"),
         "residualProbeSummary": grouped_deficit_summary(deficit_rows, "residualProbeClass"),
         "baryonFloorSummary": grouped_deficit_summary(deficit_rows, "positiveSupportImpossible"),
+        "systematicsSummary": grouped_deficit_summary(deficit_rows, "systematicsClass"),
         "conflictSummary": conflict_summary,
         "correlations": correlations,
         "proxyModel": {
@@ -3075,6 +3397,23 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
                     fmt(row["threeZoneMean"]),
                     fmt(row["baryonFloorRate"] * 100),
                     fmt(row["residualProbeTestRate"] * 100),
+                ]
+            )
+        )
+    print("SYSTEMATICS STRESS")
+    print("systematics_class\tcount\thigh_rmse\tpost_shape\tbest_stress\tgain\tweighted_post\tfloor_cleared%")
+    for row in capsule["systematicsSummary"]:
+        print(
+            "\t".join(
+                [
+                    row["systematicsClass"],
+                    str(row["count"]),
+                    str(row["highRmseCount"]),
+                    fmt(row["postShapeMean"]),
+                    fmt(row["bestSystematicsMean"]),
+                    fmt(row["meanSystematicsGainOverPostShape"]),
+                    fmt(row["weightedPostShapeMean"]),
+                    fmt(row["baryonFloorClearedRate"] * 100),
                 ]
             )
         )
