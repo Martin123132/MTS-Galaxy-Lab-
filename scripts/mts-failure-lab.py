@@ -117,7 +117,7 @@ DEFAULT_OBSERVED_STATE_RELEASE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-sta
 DEFAULT_OBSERVED_STATE_FAMILY_COMPRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-family-compression-v1"
 DEFAULT_OBSERVED_STATE_ROBUSTNESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-robustness-v1"
 DEFAULT_OBSERVED_STATE_SOFT_GATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-soft-gate-v1"
-DEFAULT_OBSERVED_STATE_SOFT_SAFE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-soft-safe-v9"
+DEFAULT_OBSERVED_STATE_SOFT_SAFE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-soft-safe-v10"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -45877,6 +45877,7 @@ def cmd_observedstaterobustness(args: argparse.Namespace) -> None:
 OBSERVED_STATE_SOFT_NEIGHBOR_SEEDS = list(range(SPLIT_SEED + 1000, SPLIT_SEED + 1011))
 OBSERVED_STATE_SOFT_SCALE_GRID = [0.03, 0.05, 0.08, 0.10]
 OBSERVED_STATE_SOFT_FULL_THRESHOLD_GRID = [1.0 / 12.0, 0.12, 0.16, 0.20, 0.30, 0.40]
+OBSERVED_STATE_ROUTE_TRANSITION_PERSISTENCE_ACTIVATION = 0.65
 
 
 def observed_state_soft_branch_probability(
@@ -46021,6 +46022,61 @@ def observed_state_continuity_fallback_floor(state_curve: dict) -> float | None:
     return None
 
 
+def observed_state_route_transition_persistence_branch(curve: dict, state_curve: dict) -> str:
+    """Keep a real route-state branch alive when only a nearby jittered state drops it."""
+    branch = observed_state_shape_branch(curve)
+    if not branch:
+        return ""
+    if observed_state_branch_locked_route(branch) != state_curve["lockedModelRoute"]:
+        return ""
+    if observed_state_over_support_gate_soft_safe(state_curve):
+        return ""
+    return branch
+
+
+def observed_state_route_transition_support_score(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    branch: str,
+    activation: float,
+    fallback_floor: float | None,
+    continuity_fallback: bool,
+) -> dict:
+    amp = observed_state_amp(state_curve, fit, amp_cap)
+    floor = observed_state_branch_amp_floor_for_curve(branch, state_curve)
+    if floor is not None:
+        amp = max(amp, 1.0 + activation * (floor - 1.0))
+    q_target = observed_state_branch_q_for_curve(branch, state_curve)
+    q_value = Q_DEFAULT + activation * (q_target - Q_DEFAULT)
+    branch_cap = observed_state_branch_amp_cap(branch)
+    if branch_cap is not None:
+        amp = min(amp, 1.0 + activation * (branch_cap - 1.0))
+    safety_cap = observed_state_bulge_safety_cap(state_curve)
+    if safety_cap is not None:
+        amp = min(amp, safety_cap)
+
+    if branch == "low-load compact lowgas disk support":
+        def support(point: dict) -> float:
+            base = 1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))
+            return GAMMA0 * curve["leff"] * base * observed_state_lowload_lowgas_zone_amp(point, activation)
+    else:
+        def support(point: dict) -> float:
+            return GAMMA0 * curve["leff"] * (1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+
+    score = score_curve_with_support(curve, support, amp, q_value)
+    score["observedStateAmp"] = amp
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = branch
+    score["observedStateSoftProbability"] = 0.0
+    score["observedStateSoftActivation"] = activation
+    score["observedStateContinuityFallback"] = continuity_fallback
+    score["observedStateFallbackFloor"] = fallback_floor if fallback_floor is not None else ""
+    score["observedStateRouteTransitionFallback"] = branch
+    return score
+
+
 def observed_state_over_support_gate_soft_safe(curve: dict) -> bool:
     values = observed_state_values(curve)
     if observed_state_over_support_gate(curve):
@@ -46145,6 +46201,18 @@ def observed_state_score_curve_soft_safe(
             if fallback_floor is not None:
                 amp = max(amp, fallback_floor)
                 continuity_fallback = True
+            transition_branch = observed_state_route_transition_persistence_branch(curve, state_curve)
+            if transition_branch:
+                return observed_state_route_transition_support_score(
+                    curve,
+                    state_curve,
+                    fit,
+                    amp_cap,
+                    transition_branch,
+                    OBSERVED_STATE_ROUTE_TRANSITION_PERSISTENCE_ACTIVATION,
+                    fallback_floor,
+                    continuity_fallback,
+                )
         if (
             state_curve["lockedModelRoute"] == "low-load"
             and not branch
@@ -46172,6 +46240,7 @@ def observed_state_score_curve_soft_safe(
     score["observedStateSoftActivation"] = activation
     score["observedStateContinuityFallback"] = continuity_fallback
     score["observedStateFallbackFloor"] = fallback_floor if fallback_floor is not None else ""
+    score["observedStateRouteTransitionFallback"] = ""
     return score
 
 
@@ -46214,6 +46283,7 @@ def observed_state_soft_gate_eval(
             "softActivation": cand.get("observedStateSoftActivation", 0.0),
             "continuityFallback": cand.get("observedStateContinuityFallback", False),
             "fallbackFloor": cand.get("observedStateFallbackFloor", ""),
+            "routeTransitionFallback": cand.get("observedStateRouteTransitionFallback", ""),
             "candidateRoute": cand["candidateRoute"],
             "stillAbove20": cand["rmse"] >= 20.0 if curve["name"] in high_names else "",
             "protectedRegression": cand["rmse"] - base["rmse"] if curve["name"] not in high_names else "",
@@ -46257,6 +46327,7 @@ def observed_state_soft_gate_robustness_eval(
                             "softActivation": cand.get("observedStateSoftActivation", 0.0),
                             "continuityFallback": cand.get("observedStateContinuityFallback", False),
                             "fallbackFloor": cand.get("observedStateFallbackFloor", ""),
+                            "routeTransitionFallback": cand.get("observedStateRouteTransitionFallback", ""),
                             "candidateRmse": cand["rmse"],
                             "gainKmS": base["rmse"] - cand["rmse"],
                             "stillAbove20": cand["rmse"] >= 20.0,
@@ -46425,7 +46496,7 @@ def observed_state_soft_safe_null_rows(
         rows.append(
             summarize(
                 seed,
-                "v17.64-candidate",
+                "v17.65-candidate",
                 holdout,
                 lambda curve: candidate_scores[curve["name"]],
             )
@@ -46524,8 +46595,8 @@ def observed_state_soft_safe_null_rows(
 def observed_state_soft_safe_null_summary(null_rows: list[dict]) -> dict:
     tracks = sorted({row["track"] for row in null_rows})
     med_high = {track: safe_median(parse_float(row["highGainPct"]) for row in null_rows if row["track"] == track) for track in tracks}
-    candidate = med_high.get("v17.64-candidate", math.nan)
-    fair_nulls = [track for track in tracks if track != "v17.64-candidate"]
+    candidate = med_high.get("v17.65-candidate", math.nan)
+    fair_nulls = [track for track in tracks if track != "v17.65-candidate"]
     best_null = max([med_high.get(track, math.nan) for track in fair_nulls if math.isfinite(med_high.get(track, math.nan))] or [math.nan])
     return {
         "medianCandidateHighGainPct": candidate,
@@ -46537,7 +46608,7 @@ def observed_state_soft_safe_null_summary(null_rows: list[dict]) -> dict:
         "maxCandidateProtectedRegression": max(
             parse_float(row["maxProtectedRegression"])
             for row in null_rows
-            if row["track"] == "v17.64-candidate"
+            if row["track"] == "v17.65-candidate"
         ),
         "maxProtectedLookalikeStressRegression": max(
             parse_float(row["maxProtectedRegression"])
@@ -46875,8 +46946,8 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
     write_csv(out_dir / "mts_observed_state_soft_safe_null_controls.csv", null_rows)
 
     formula = {
-        "candidateId": "observed-state-response-v17.64-continuity-fallback",
-        "mechanism": "v17.63 state-neighborhood soft branch activation plus conservative branchless state-continuity support fallback",
+        "candidateId": "observed-state-response-v17.65-route-transition-persistence",
+        "mechanism": "v17.64 state-continuity fallback plus conservative route-transition branch persistence under nearby state uncertainty",
         "softScale": best_row["softScale"],
         "fullActivationThreshold": best_row["fullThreshold"],
         "branchSafetyRules": {
@@ -46896,6 +46967,11 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
             "buffered dense margin": "branchless q-default lift to amp floor 1.50 in dense/high-u buffered margins",
             "buffered gas-rich margin": "branchless q-default lift to amp floor 1.18 in compact gas-rich buffered margins",
         },
+        "routeTransitionPersistence": {
+            "activation": OBSERVED_STATE_ROUTE_TRANSITION_PERSISTENCE_ACTIVATION,
+            "rule": "if a jittered state drops to no branch but the locked curve has a same-route state branch, keep that branch at 65% activation",
+            "purpose": "stabilize high-RMSE route-transition repairs without widening branch thresholds or using galaxy/residual labels",
+        },
         "canonicalMtsChanged": False,
         "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics galaxies"],
     }
@@ -46904,9 +46980,9 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
     )
 
     report = [
-        "# MTS v17.64 State-Continuity Fallback",
+        "# MTS v17.65 Route-Transition Persistence",
         "",
-        "This is a direct repair pass for v17.63: keep state-neighborhood soft activation, and add a conservative branchless support-continuity fallback when a nearby branch drops out under state uncertainty.",
+        "This is a direct repair pass for v17.64: keep the state-continuity fallback, and preserve a same-route branch at 65% activation when nearby state uncertainty drops the branch to blank.",
         "",
         "## Result",
         "",
@@ -46928,7 +47004,8 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
         "",
         "- v17.54 hard gate: worst above-20 `29`, protected failures `5`.",
         "- v17.55 soft gate: worst above-20 `19`, protected failures `7`.",
-        f"- v17.64 continuity fallback: worst above-20 `{best_row['robustMaxAbove20']}`, protected failures `{best_row['robustProtectedFailureCount']}`.",
+        "- v17.64 continuity fallback: worst above-20 `11`, protected failures `0`.",
+        f"- v17.65 route-transition persistence: worst above-20 `{best_row['robustMaxAbove20']}`, protected failures `{best_row['robustProtectedFailureCount']}`.",
         "",
         "## Remaining Protected Regressions",
         "",
@@ -46940,13 +47017,14 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
     (out_dir / "mts_observed_state_soft_safe_report.md").write_text("\n".join(report), encoding="utf-8")
 
     capsule = {
-        "analysisName": "mts-observed-state-soft-safe-v9",
-        "candidateId": "observed-state-response-v17.64-continuity-fallback",
+        "analysisName": "mts-observed-state-soft-safe-v10",
+        "candidateId": "observed-state-response-v17.65-route-transition-persistence",
         "verdict": verdict,
         "bestCandidate": best_row,
         "references": {
             "v17.54HardGate": {"worstAbove20": 29, "protectedFailureCount": 5},
             "v17.55SoftGate": {"worstAbove20": 19, "protectedFailureCount": 7},
+            "v17.64ContinuityFallback": {"worstAbove20": 11, "protectedFailureCount": 0},
         },
         "nullSummary": null_summary,
         "nullHardenedAccepted": null_hardened,
@@ -46972,7 +47050,7 @@ def cmd_observedstatesoftsafe(args: argparse.Namespace) -> None:
     out_dir = DEFAULT_OBSERVED_STATE_SOFT_SAFE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
     capsule = write_observed_state_soft_safe_artifacts(out_dir)
     best = capsule["bestCandidate"]
-    print("MTS observed state-response state-continuity fallback v17.64")
+    print("MTS observed state-response route-transition persistence v17.65")
     print(f"verdict={capsule['verdict']}")
     print(
         "\t".join(
