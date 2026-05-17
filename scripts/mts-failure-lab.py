@@ -118,6 +118,7 @@ DEFAULT_OBSERVED_STATE_FAMILY_COMPRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-st
 DEFAULT_OBSERVED_STATE_ROBUSTNESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-robustness-v1"
 DEFAULT_OBSERVED_STATE_SOFT_GATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-soft-gate-v1"
 DEFAULT_OBSERVED_STATE_SOFT_SAFE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-soft-safe-v11"
+DEFAULT_OBSERVED_STATE_FREEZE_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-freeze-audit-v12"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -47164,6 +47165,436 @@ def cmd_observedstatesoftsafe(args: argparse.Namespace) -> None:
     print(f"Wrote observed state-response protected-safe soft gate to {out_dir.resolve()}")
 
 
+def observed_state_score_curve_soft_safe_disabled(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+    disabled_branches: set[str],
+) -> dict:
+    fallback_floor: float | None = None
+    continuity_fallback = False
+    over_support_persistence = False
+    if observed_state_over_support_gate_soft_safe(state_curve):
+        amp = OBSERVED_STATE_OVER_SUPPORT_AMP
+        q_value = Q_DEFAULT
+        branch = ""
+        activation = 0.0
+        probability = 0.0
+    else:
+        branch, probability, _counts = observed_state_soft_branch_probability(state_curve, soft_scale)
+        if branch in disabled_branches or (branch and not observed_state_soft_branch_safety(branch, state_curve)):
+            branch = ""
+            probability = 0.0
+        activation = observed_state_soft_activation(probability, full_threshold)
+        amp = observed_state_amp(state_curve, fit, amp_cap)
+        if branch and activation > 0.0:
+            floor = observed_state_branch_amp_floor_for_curve(branch, state_curve)
+            if floor is not None:
+                amp = max(amp, 1.0 + activation * (floor - 1.0))
+            q_target = observed_state_branch_q_for_curve(branch, state_curve)
+            q_value = Q_DEFAULT + activation * (q_target - Q_DEFAULT)
+            branch_cap = observed_state_branch_amp_cap(branch)
+            if branch_cap is not None:
+                amp = min(amp, 1.0 + activation * (branch_cap - 1.0))
+        else:
+            q_value = Q_DEFAULT
+        if not branch and activation <= 0.0:
+            fallback_floor = observed_state_continuity_fallback_floor(state_curve)
+            if fallback_floor is not None:
+                amp = max(amp, fallback_floor)
+                continuity_fallback = True
+            transition_branch = observed_state_shape_branch(curve, disabled_branches)
+            if (
+                transition_branch
+                and observed_state_branch_locked_route(transition_branch) == state_curve["lockedModelRoute"]
+                and not observed_state_over_support_gate_soft_safe(state_curve)
+            ):
+                return observed_state_route_transition_support_score(
+                    curve,
+                    state_curve,
+                    fit,
+                    amp_cap,
+                    transition_branch,
+                    OBSERVED_STATE_ROUTE_TRANSITION_PERSISTENCE_ACTIVATION,
+                    fallback_floor,
+                    continuity_fallback,
+                )
+            if (
+                observed_state_over_support_gate_soft_safe(curve)
+                and curve["lockedModelRoute"] == state_curve["lockedModelRoute"] == "low-load"
+            ):
+                amp = OBSERVED_STATE_OVER_SUPPORT_AMP
+                q_value = Q_DEFAULT
+                over_support_persistence = True
+        if (
+            state_curve["lockedModelRoute"] == "low-load"
+            and not branch
+            and fallback_floor is None
+            and not observed_state_over_support_gate_soft_safe(state_curve)
+            and not over_support_persistence
+        ):
+            amp = min(amp, 1.0)
+        safety_cap = observed_state_bulge_safety_cap(state_curve)
+        if safety_cap is not None:
+            amp = min(amp, safety_cap)
+
+    if branch == "low-load compact lowgas disk support" and activation > 0.0:
+        def support(point: dict) -> float:
+            base = 1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))
+            return GAMMA0 * curve["leff"] * base * observed_state_lowload_lowgas_zone_amp(point, activation)
+    else:
+        def support(point: dict) -> float:
+            return GAMMA0 * curve["leff"] * (1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+
+    score = score_curve_with_support(curve, support, amp, q_value)
+    score["observedStateAmp"] = amp
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = branch
+    score["observedStateSoftProbability"] = probability
+    score["observedStateSoftActivation"] = activation
+    score["observedStateContinuityFallback"] = continuity_fallback
+    score["observedStateFallbackFloor"] = fallback_floor if fallback_floor is not None else ""
+    score["observedStateRouteTransitionFallback"] = "over-support-persistence" if over_support_persistence else ""
+    return score
+
+
+def observed_state_freeze_audit_summary_row(
+    metrics: dict,
+    variant_rows: list[dict],
+    protected_rows: list[dict],
+    null_summary: dict,
+) -> dict:
+    robust_max_above20 = max(int(parse_float(row["highStillAbove20"], 0.0)) for row in variant_rows)
+    robust_max_worsened = max(int(parse_float(row["highWorsened"], 0.0)) for row in variant_rows)
+    robust_max_protected = max(parse_float(row["maxProtectedRegression"], 0.0) for row in variant_rows)
+    robust_median_high = safe_median(parse_float(row["highGainPct"]) for row in variant_rows)
+    robust_min_high = min(parse_float(row["highGainPct"]) for row in variant_rows)
+    protected_failure_count = sum(1 for row in protected_rows if row["protectedFailure"])
+    null_margin = parse_float(null_summary.get("bestNullMarginPct"), math.nan)
+    survives = (
+        metrics["highStillAbove20"] == 0
+        and metrics["highWorsened"] == 0
+        and robust_max_above20 == 0
+        and robust_max_worsened == 0
+        and protected_failure_count == 0
+        and robust_max_protected <= 4.0
+        and math.isfinite(null_margin)
+        and null_margin >= 10.0
+    )
+    return {
+        "candidateId": "observed-state-response-v17.66-state-branch-hardening",
+        "formulaChanged": False,
+        "softScale": 0.08,
+        "fullThreshold": 1.0 / 12.0,
+        **metrics,
+        "robustMedianHighGainPct": robust_median_high,
+        "robustMinHighGainPct": robust_min_high,
+        "robustMaxAbove20": robust_max_above20,
+        "robustMaxWorsened": robust_max_worsened,
+        "robustMaxProtectedRegression": robust_max_protected,
+        "robustProtectedFailureCount": protected_failure_count,
+        "medianCandidateHighGainPct": null_summary.get("medianCandidateHighGainPct", math.nan),
+        "bestNullHighGainPct": null_summary.get("bestNullHighGainPct", math.nan),
+        "bestNullMarginPct": null_summary.get("bestNullMarginPct", math.nan),
+        "verdict": "v17.66 freeze survives" if survives else "v17.66 freeze needs revision",
+    }
+
+
+def observed_state_freeze_branch_ablation_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+    frozen_case_rows: list[dict],
+    frozen_summary: dict,
+) -> list[dict]:
+    active_branches = sorted({str(row.get("branch", "")) for row in frozen_case_rows if row.get("branch")})
+    frozen_by_name = {row["galaxy"]: row for row in frozen_case_rows}
+    rows: list[dict] = []
+    for branch in active_branches:
+        def scorer(curve: dict, state_curve: dict, fit_arg: dict, amp_cap_arg: float, soft_scale_arg: float, threshold_arg: float) -> dict:
+            return observed_state_score_curve_soft_safe_disabled(
+                curve,
+                state_curve,
+                fit_arg,
+                amp_cap_arg,
+                soft_scale_arg,
+                threshold_arg,
+                {branch},
+            )
+
+        metrics, case_rows = observed_state_soft_gate_eval(
+            clean_curves,
+            high_names,
+            fit,
+            amp_cap,
+            soft_scale,
+            full_threshold,
+            scorer,
+        )
+        ablated_by_name = {row["galaxy"]: row for row in case_rows}
+        active_high = [
+            row for row in frozen_case_rows if row.get("set") == "clean-high-rmse" and row.get("branch") == branch
+        ]
+        active_protected = [
+            row for row in frozen_case_rows if row.get("set") == "clean-protected" and row.get("branch") == branch
+        ]
+        high_loss_values = [
+            parse_float(ablated_by_name[row["galaxy"]]["candidateRmse"])
+            - parse_float(frozen_by_name[row["galaxy"]]["candidateRmse"])
+            for row in active_high
+            if row["galaxy"] in ablated_by_name
+        ]
+        protected_loss_values = [
+            parse_float(ablated_by_name[row["galaxy"]]["candidateRmse"])
+            - parse_float(frozen_by_name[row["galaxy"]]["candidateRmse"])
+            for row in active_protected
+            if row["galaxy"] in ablated_by_name
+        ]
+        rows.append(
+            {
+                "disabledBranch": branch,
+                "activeCleanHighCount": len(active_high),
+                "activeProtectedCount": len(active_protected),
+                "nominalHighGainPct": metrics["highGainPct"],
+                "highStillAbove20": metrics["highStillAbove20"],
+                "highWorsened": metrics["highWorsened"],
+                "maxProtectedRegression": metrics["maxProtectedRegression"],
+                "protectedRegressionCount": metrics["protectedRegressionCount"],
+                "avgActiveHighRmseLostKmS": safe_mean(high_loss_values),
+                "maxActiveHighRmseLostKmS": max(high_loss_values) if high_loss_values else 0.0,
+                "maxActiveProtectedRmseLostKmS": max(protected_loss_values) if protected_loss_values else 0.0,
+                "highGainLostVsFrozenPct": parse_float(frozen_summary["highGainPct"]) - parse_float(metrics["highGainPct"]),
+                "neededForFreeze": (
+                    metrics["highStillAbove20"] > 0
+                    or safe_mean(high_loss_values) >= 5.0
+                    or parse_float(frozen_summary["highGainPct"]) - parse_float(metrics["highGainPct"]) >= 5.0
+                ),
+            }
+        )
+    return rows
+
+
+def observed_state_freeze_protected_hit_rows(
+    case_rows: list[dict],
+    robust_protected_rows: list[dict],
+) -> list[dict]:
+    rows: list[dict] = []
+    for row in case_rows:
+        if row.get("set") != "clean-protected":
+            continue
+        hit_type = []
+        if row.get("branch"):
+            hit_type.append("state-branch")
+        if row.get("continuityFallback") in (True, "True", "true", "1"):
+            hit_type.append("continuity-fallback")
+        if row.get("routeTransitionFallback"):
+            hit_type.append(str(row.get("routeTransitionFallback")))
+        regression = parse_float(row.get("protectedRegression"), 0.0)
+        if not hit_type and regression <= 0.0:
+            continue
+        rows.append(
+            {
+                "rowType": "exact",
+                "galaxy": row["galaxy"],
+                "lockedRoute": row["lockedRoute"],
+                "hitType": "; ".join(hit_type) if hit_type else "regression-only",
+                "branch": row.get("branch", ""),
+                "routeTransitionFallback": row.get("routeTransitionFallback", ""),
+                "continuityFallback": row.get("continuityFallback", ""),
+                "fallbackFloor": row.get("fallbackFloor", ""),
+                "baselineRmse": row.get("baselineRmse", ""),
+                "candidateRmse": row.get("candidateRmse", ""),
+                "regressionKmS": regression,
+                "robustMaxRegression": "",
+                "regressionTrialCount": "",
+                "protectedFailure": regression > 4.0,
+            }
+        )
+    for row in sorted(robust_protected_rows, key=lambda item: (-parse_float(item["maxRegression"]), item["galaxy"])):
+        rows.append(
+            {
+                "rowType": "robust-max",
+                "galaxy": row["galaxy"],
+                "lockedRoute": row["lockedRoute"],
+                "hitType": "robust regression",
+                "branch": "",
+                "routeTransitionFallback": "",
+                "continuityFallback": "",
+                "fallbackFloor": "",
+                "baselineRmse": "",
+                "candidateRmse": "",
+                "regressionKmS": "",
+                "robustMaxRegression": row["maxRegression"],
+                "regressionTrialCount": row["regressionTrialCount"],
+                "protectedFailure": row["protectedFailure"],
+            }
+        )
+    return rows
+
+
+def write_observed_state_freeze_audit_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+
+    metrics, case_rows = observed_state_soft_gate_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_soft_safe,
+    )
+    variant_rows, trial_rows, protected_rows = observed_state_soft_gate_robustness_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_soft_safe,
+    )
+    null_rows = observed_state_soft_safe_null_rows(clean_curves, high_names, fit, amp_cap, soft_scale, full_threshold)
+    null_summary = observed_state_soft_safe_null_summary(null_rows)
+    summary = observed_state_freeze_audit_summary_row(metrics, variant_rows, protected_rows, null_summary)
+    branch_rows = observed_state_freeze_branch_ablation_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        case_rows,
+        summary,
+    )
+    protected_hit_rows = observed_state_freeze_protected_hit_rows(case_rows, protected_rows)
+
+    write_csv(out_dir / "mts_observed_state_freeze_candidate_scores.csv", [summary])
+    write_csv(out_dir / "mts_observed_state_freeze_case_ledger.csv", case_rows)
+    write_csv(out_dir / "mts_observed_state_freeze_robustness_trials.csv", trial_rows)
+    write_csv(out_dir / "mts_observed_state_freeze_variant_scores.csv", variant_rows)
+    write_csv(out_dir / "mts_observed_state_freeze_protected_hits.csv", protected_hit_rows)
+    write_csv(out_dir / "mts_observed_state_freeze_branch_ablation.csv", branch_rows)
+    write_csv(out_dir / "mts_observed_state_freeze_null_controls.csv", null_rows)
+
+    formula = {
+        "candidateId": "observed-state-response-v17.66-state-branch-hardening",
+        "auditId": "observed-state-freeze-audit-v12",
+        "formulaChanged": False,
+        "mechanism": "exact v17.66 state-branch hardening formula; this audit only ablates and stress-tests it",
+        "softScale": soft_scale,
+        "fullActivationThreshold": full_threshold,
+        "canonicalMtsChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics galaxies"],
+    }
+    (out_dir / "mts_observed_state_freeze_formula.json").write_text(
+        json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+    high_cases = [row for row in case_rows if row["set"] == "clean-high-rmse"]
+    worst_high = sorted(high_cases, key=lambda item: -parse_float(item["candidateRmse"]))[:12]
+    top_protected = sorted(
+        [row for row in protected_hit_rows if row["rowType"] == "robust-max"],
+        key=lambda item: -parse_float(item["robustMaxRegression"]),
+    )[:10]
+    needed_branches = [row for row in branch_rows if row["neededForFreeze"]]
+    report = [
+        "# MTS v17.66 Freeze Audit",
+        "",
+        "No formula changes in this mode. It re-scores the exact v17.66 candidate, then removes branches one at a time and compares against the existing branch/null controls.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{summary['verdict']}`.",
+        f"- Nominal high-RMSE gain: `{fmt(summary['highGainPct'])}%`.",
+        f"- Robust median high-RMSE gain: `{fmt(summary['robustMedianHighGainPct'])}%`.",
+        f"- Robust max high-RMSE cases still above 20: `{summary['robustMaxAbove20']}`.",
+        f"- Robust max protected regression: `{fmt(summary['robustMaxProtectedRegression'])} km/s`.",
+        f"- Robust protected failure count: `{summary['robustProtectedFailureCount']}`.",
+        f"- Best null high-RMSE gain: `{fmt(summary['bestNullHighGainPct'])}%`.",
+        f"- Null margin: `{fmt(summary['bestNullMarginPct'])}` points.",
+        "",
+        "## Branches That Matter",
+        "",
+    ]
+    for row in needed_branches[:20]:
+        report.append(
+            f"- `{row['disabledBranch']}`: active high `{row['activeCleanHighCount']}`, gain lost `{fmt(row['highGainLostVsFrozenPct'])}` points, nominal above-20 after removal `{row['highStillAbove20']}`."
+        )
+    if not needed_branches:
+        report.append("- No single branch removal broke the freeze gates.")
+    report.extend(["", "## Worst High-RMSE Cases After Freeze", ""])
+    for row in worst_high:
+        report.append(
+            f"- `{row['galaxy']}`: baseline `{fmt(row['baselineRmse'])}`, candidate `{fmt(row['candidateRmse'])}`, branch `{row['branch'] or row['routeTransitionFallback'] or 'none'}`."
+        )
+    report.extend(["", "## Protected Regressions", ""])
+    for row in top_protected:
+        report.append(
+            f"- `{row['galaxy']}`: robust max regression `{fmt(row['robustMaxRegression'])} km/s`, trials `{row['regressionTrialCount']}`."
+        )
+    (out_dir / "mts_observed_state_freeze_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-state-freeze-audit-v12",
+        "candidateId": "observed-state-response-v17.66-state-branch-hardening",
+        "formulaChanged": False,
+        "verdict": summary["verdict"],
+        "summary": summary,
+        "nullSummary": null_summary,
+        "neededBranches": needed_branches,
+        "outputFiles": [
+            "mts_observed_state_freeze_candidate_scores.csv",
+            "mts_observed_state_freeze_case_ledger.csv",
+            "mts_observed_state_freeze_robustness_trials.csv",
+            "mts_observed_state_freeze_variant_scores.csv",
+            "mts_observed_state_freeze_protected_hits.csv",
+            "mts_observed_state_freeze_branch_ablation.csv",
+            "mts_observed_state_freeze_null_controls.csv",
+            "mts_observed_state_freeze_formula.json",
+            "mts_observed_state_freeze_report.md",
+            "mts_observed_state_freeze_capsule.json",
+        ],
+    }
+    (out_dir / "mts_observed_state_freeze_capsule.json").write_text(
+        json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8"
+    )
+    return capsule
+
+
+def cmd_observedstatefreezeaudit(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_FREEZE_AUDIT_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_freeze_audit_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v17.66 freeze audit")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"nominal_high={fmt(summary['highGainPct'])}%",
+                f"robust_high={fmt(summary['robustMedianHighGainPct'])}%",
+                f"robust_above20={summary['robustMaxAbove20']}",
+                f"protected_fail={summary['robustProtectedFailureCount']}",
+                f"max_protected={fmt(summary['robustMaxProtectedRegression'])}",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote observed state freeze audit to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -47246,6 +47677,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstaterobustness",
             "observedstatesoftgate",
             "observedstatesoftsafe",
+            "observedstatefreezeaudit",
         ],
         default="baseline",
     )
@@ -47419,6 +47851,8 @@ def main() -> None:
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
         cmd_observedstatesoftsafe(args)
+    elif args.mode == "observedstatefreezeaudit":
+        cmd_observedstatefreezeaudit(args)
 
 
 if __name__ == "__main__":
