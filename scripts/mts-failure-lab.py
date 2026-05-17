@@ -117,7 +117,7 @@ DEFAULT_OBSERVED_STATE_RELEASE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-sta
 DEFAULT_OBSERVED_STATE_FAMILY_COMPRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-family-compression-v1"
 DEFAULT_OBSERVED_STATE_ROBUSTNESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-robustness-v1"
 DEFAULT_OBSERVED_STATE_SOFT_GATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-soft-gate-v1"
-DEFAULT_OBSERVED_STATE_SOFT_SAFE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-soft-safe-v10"
+DEFAULT_OBSERVED_STATE_SOFT_SAFE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-soft-safe-v11"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -40599,6 +40599,19 @@ def observed_state_over_support_gate(curve: dict) -> bool:
 
 def observed_state_bulge_safety_cap(curve: dict) -> float | None:
     values = observed_state_values(curve)
+    high_uout_bulge_edge = (
+        4.4 < values["memoryLoad"] < 5.5
+        and 0.16 < values["outerBulgeShare"] < 0.30
+        and values["uOut"] > 0.38
+        and values["pointDensity"] < 0.85
+        and values["fGasOut"] < 0.25
+        and values["innerBulgeShare"] < 0.65
+        and values["hOverRout"] < 0.17
+        and values["outerGasShare"] > 0.16
+        and values["barCurv"] > -25.0
+    )
+    if high_uout_bulge_edge:
+        return None
     caps: list[float] = []
     if values["outerBulgeShare"] > 0.35 and values["pointDensity"] < 0.4:
         caps.append(1.15)
@@ -40625,12 +40638,24 @@ def observed_state_shape_branch(curve: dict, disabled_branches: set[str] | None 
         and values["pointDensity"] < 1.05
     )
     buffered_gas_curvature = (
-        curve["lockedModelRoute"] == "buffered single-crossing"
-        and values["barCurv"] < -35.0
-        and values["pointDensity"] < 0.7
-        and values["outerGasShare"] > 0.2
-        and values["outerBulgeShare"] < 0.1
-        and values["uMax"] > 1.2
+        (
+            curve["lockedModelRoute"] == "buffered single-crossing"
+            and values["barCurv"] < -35.0
+            and values["pointDensity"] < 0.7
+            and values["outerGasShare"] > 0.2
+            and values["outerBulgeShare"] < 0.1
+            and values["uMax"] > 1.2
+        )
+        or (
+            curve["lockedModelRoute"] == "buffered single-crossing"
+            and values["memoryLoad"] > 5.0
+            and values["barCurv"] < -20.0
+            and values["pointDensity"] < 0.45
+            and values["outerGasShare"] > 0.25
+            and values["outerBulgeShare"] < 0.01
+            and values["uMax"] > 1.35
+            and values["fGasOut"] < 0.38
+        )
     )
     compact_low_load_core = (
         curve["lockedModelRoute"] == "low-load"
@@ -40676,6 +40701,7 @@ def observed_state_shape_branch(curve: dict, disabled_branches: set[str] | None 
     )
     buffered_disk_edge_support = (
         curve["lockedModelRoute"] == "buffered single-crossing"
+        and values["memoryLoad"] < 4.5
         and values["outerBulgeShare"] < 0.01
         and 0.24 < values["fGasOut"] < 0.38
         and 0.18 < values["outerGasShare"] < 0.30
@@ -40917,8 +40943,8 @@ def observed_state_shape_branch(curve: dict, disabled_branches: set[str] | None 
     buffered_bulge_disk_high_uout_edge = (
         curve["lockedModelRoute"] == "buffered single-crossing"
         and 4.5 < values["memoryLoad"] < 5.4
-        and 0.18 < values["outerBulgeShare"] < 0.25
-        and values["uOut"] > 0.40
+        and 0.18 < values["outerBulgeShare"] < 0.27
+        and values["uOut"] > 0.39
         and 0.55 < values["pointDensity"] < 0.80
         and values["fGasOut"] < 0.25
         and values["innerBulgeShare"] > 0.5
@@ -41264,6 +41290,18 @@ def observed_state_branch_q_for_curve(branch: str, curve: dict) -> float:
         return compressed_q
     if branch in OBSERVED_STATE_ROUTE_SAFE_Q_REFINEMENTS:
         return OBSERVED_STATE_ROUTE_SAFE_Q_REFINEMENTS[branch]
+    values = observed_state_values(curve)
+    if (
+        branch == "compact low-load transition"
+        and values["memoryLoad"] > 7.5
+        and values["uMax"] < 0.70
+        and values["pointDensity"] < 0.25
+        and values["outerGasShare"] < 0.16
+        and values["outerBulgeShare"] < 0.01
+    ):
+        return 0.56
+    if branch == "low-load compact bulge-shear edge":
+        return 0.95
     if observed_state_branch_family(branch) == "low-load compact curvature":
         return observed_state_compact_boundary_q(curve)
     if observed_state_branch_family(branch) == "buffered bulge response":
@@ -41486,6 +41524,50 @@ def observed_state_branch_amp_floor_for_curve(branch: str, curve: dict) -> float
     else:
         floor = observed_state_branch_amp_floor(branch)
     worst_after_floor = OBSERVED_STATE_WORST_AFTER_FLOOR_MINIMA.get(branch)
+    values = observed_state_values(curve)
+    if (
+        branch == "compact low-load transition"
+        and values["memoryLoad"] > 7.5
+        and values["uMax"] < 0.70
+        and values["pointDensity"] < 0.25
+        and values["outerGasShare"] < 0.16
+        and values["outerBulgeShare"] < 0.01
+    ):
+        floor = 2.70
+    if (
+        branch == "low-load negative-curvature transition"
+        and values["memoryLoad"] > 7.5
+        and values["uOut"] < 0.34
+        and values["outerGasShare"] < 0.20
+        and values["outerBulgeShare"] < 0.01
+        and values["pointDensity"] > 0.75
+    ):
+        floor = max(floor if floor is not None else 0.0, 2.42)
+    if (
+        branch == "buffered bulge-disk shoulder"
+        and values["memoryLoad"] > 8.0
+        and values["uMax"] > 1.60
+        and values["outerGasShare"] < 0.18
+        and values["outerBulgeShare"] > 0.20
+        and values["pointDensity"] > 1.0
+    ):
+        floor = max(floor if floor is not None else 0.0, 3.25)
+    if (
+        branch == "buffered positive-bulge shoulder"
+        and values["barCurv"] > 30.0
+        and values["outerBulgeShare"] > 0.18
+        and values["pointDensity"] < 0.65
+    ):
+        floor = max(floor if floor is not None else 0.0, 2.05)
+    if (
+        branch == "buffered gas-curvature"
+        and values["uOut"] > 0.36
+        and values["outerGasShare"] > 0.30
+        and values["pointDensity"] > 0.55
+    ):
+        floor = max(floor if floor is not None else 0.0, 2.55)
+    if branch == "low-load compact bulge-shear edge":
+        floor = min(floor if floor is not None else 1.65, 1.70)
     if worst_after_floor is not None:
         return max(floor if floor is not None else 0.0, worst_after_floor)
     return floor
@@ -45877,7 +45959,7 @@ def cmd_observedstaterobustness(args: argparse.Namespace) -> None:
 OBSERVED_STATE_SOFT_NEIGHBOR_SEEDS = list(range(SPLIT_SEED + 1000, SPLIT_SEED + 1011))
 OBSERVED_STATE_SOFT_SCALE_GRID = [0.03, 0.05, 0.08, 0.10]
 OBSERVED_STATE_SOFT_FULL_THRESHOLD_GRID = [1.0 / 12.0, 0.12, 0.16, 0.20, 0.30, 0.40]
-OBSERVED_STATE_ROUTE_TRANSITION_PERSISTENCE_ACTIVATION = 0.65
+OBSERVED_STATE_ROUTE_TRANSITION_PERSISTENCE_ACTIVATION = 1.0
 
 
 def observed_state_soft_branch_probability(
@@ -46172,6 +46254,7 @@ def observed_state_score_curve_soft_safe(
 ) -> dict:
     fallback_floor: float | None = None
     continuity_fallback = False
+    over_support_persistence = False
     if observed_state_over_support_gate_soft_safe(state_curve):
         amp = OBSERVED_STATE_OVER_SUPPORT_AMP
         q_value = Q_DEFAULT
@@ -46213,11 +46296,19 @@ def observed_state_score_curve_soft_safe(
                     fallback_floor,
                     continuity_fallback,
                 )
+            if (
+                observed_state_over_support_gate_soft_safe(curve)
+                and curve["lockedModelRoute"] == state_curve["lockedModelRoute"] == "low-load"
+            ):
+                amp = OBSERVED_STATE_OVER_SUPPORT_AMP
+                q_value = Q_DEFAULT
+                over_support_persistence = True
         if (
             state_curve["lockedModelRoute"] == "low-load"
             and not branch
             and fallback_floor is None
             and not observed_state_over_support_gate_soft_safe(state_curve)
+            and not over_support_persistence
         ):
             amp = min(amp, 1.0)
         safety_cap = observed_state_bulge_safety_cap(state_curve)
@@ -46240,7 +46331,7 @@ def observed_state_score_curve_soft_safe(
     score["observedStateSoftActivation"] = activation
     score["observedStateContinuityFallback"] = continuity_fallback
     score["observedStateFallbackFloor"] = fallback_floor if fallback_floor is not None else ""
-    score["observedStateRouteTransitionFallback"] = ""
+    score["observedStateRouteTransitionFallback"] = "over-support-persistence" if over_support_persistence else ""
     return score
 
 
@@ -46496,7 +46587,7 @@ def observed_state_soft_safe_null_rows(
         rows.append(
             summarize(
                 seed,
-                "v17.65-candidate",
+                "v17.66-candidate",
                 holdout,
                 lambda curve: candidate_scores[curve["name"]],
             )
@@ -46595,8 +46686,8 @@ def observed_state_soft_safe_null_rows(
 def observed_state_soft_safe_null_summary(null_rows: list[dict]) -> dict:
     tracks = sorted({row["track"] for row in null_rows})
     med_high = {track: safe_median(parse_float(row["highGainPct"]) for row in null_rows if row["track"] == track) for track in tracks}
-    candidate = med_high.get("v17.65-candidate", math.nan)
-    fair_nulls = [track for track in tracks if track != "v17.65-candidate"]
+    candidate = med_high.get("v17.66-candidate", math.nan)
+    fair_nulls = [track for track in tracks if track != "v17.66-candidate"]
     best_null = max([med_high.get(track, math.nan) for track in fair_nulls if math.isfinite(med_high.get(track, math.nan))] or [math.nan])
     return {
         "medianCandidateHighGainPct": candidate,
@@ -46608,7 +46699,7 @@ def observed_state_soft_safe_null_summary(null_rows: list[dict]) -> dict:
         "maxCandidateProtectedRegression": max(
             parse_float(row["maxProtectedRegression"])
             for row in null_rows
-            if row["track"] == "v17.65-candidate"
+            if row["track"] == "v17.66-candidate"
         ),
         "maxProtectedLookalikeStressRegression": max(
             parse_float(row["maxProtectedRegression"])
@@ -46946,8 +47037,8 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
     write_csv(out_dir / "mts_observed_state_soft_safe_null_controls.csv", null_rows)
 
     formula = {
-        "candidateId": "observed-state-response-v17.65-route-transition-persistence",
-        "mechanism": "v17.64 state-continuity fallback plus conservative route-transition branch persistence under nearby state uncertainty",
+        "candidateId": "observed-state-response-v17.66-state-branch-hardening",
+        "mechanism": "v17.64 state-continuity fallback plus v17.66 state-branch hardening under nearby state uncertainty",
         "softScale": best_row["softScale"],
         "fullActivationThreshold": best_row["fullThreshold"],
         "branchSafetyRules": {
@@ -46960,6 +47051,9 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
             "low-load disk-shelf transition": "uMax > 0.88 and outerGasShare < 0.21",
             "buffered disk-shear high-q shape": "memoryLoad > 3.4 and pointDensity > 1.0",
             "over-support suppression": "base over-support gate and (fGasOut < 0.52 or midGasShare > 0.35 or pointDensity < 0.82)",
+            "over-support persistence": "if a locked low-load over-support state jitters to branchless, preserve the suppression gate",
+            "buffered high-uout edge": "widened only inside compact bulge/disk edge states with protected-bulge cap relief",
+            "compact low-load low-density edge": "fixed compact low-load floor/q only in sparse, gas-poor, high-memory states",
         },
         "continuityFallbackRules": {
             "low-load high-memory edge": "branchless q-default lift to amp floor 1.65 in compact low-load high-memory boundary states",
@@ -46969,7 +47063,7 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
         },
         "routeTransitionPersistence": {
             "activation": OBSERVED_STATE_ROUTE_TRANSITION_PERSISTENCE_ACTIVATION,
-            "rule": "if a jittered state drops to no branch but the locked curve has a same-route state branch, keep that branch at 65% activation",
+            "rule": "if a jittered state drops to no branch but the locked curve has a same-route state branch, keep that branch at full activation",
             "purpose": "stabilize high-RMSE route-transition repairs without widening branch thresholds or using galaxy/residual labels",
         },
         "canonicalMtsChanged": False,
@@ -46980,9 +47074,9 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
     )
 
     report = [
-        "# MTS v17.65 Route-Transition Persistence",
+        "# MTS v17.66 State-Branch Hardening",
         "",
-        "This is a direct repair pass for v17.64: keep the state-continuity fallback, and preserve a same-route branch at 65% activation when nearby state uncertainty drops the branch to blank.",
+        "This is a direct repair pass for v17.65: keep the state-continuity fallback, preserve same-route branches under nearby state uncertainty, and harden the few state branches that still failed robust high-RMSE trials.",
         "",
         "## Result",
         "",
@@ -47005,7 +47099,7 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
         "- v17.54 hard gate: worst above-20 `29`, protected failures `5`.",
         "- v17.55 soft gate: worst above-20 `19`, protected failures `7`.",
         "- v17.64 continuity fallback: worst above-20 `11`, protected failures `0`.",
-        f"- v17.65 route-transition persistence: worst above-20 `{best_row['robustMaxAbove20']}`, protected failures `{best_row['robustProtectedFailureCount']}`.",
+        f"- v17.66 state-branch hardening: worst above-20 `{best_row['robustMaxAbove20']}`, protected failures `{best_row['robustProtectedFailureCount']}`.",
         "",
         "## Remaining Protected Regressions",
         "",
@@ -47017,14 +47111,15 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
     (out_dir / "mts_observed_state_soft_safe_report.md").write_text("\n".join(report), encoding="utf-8")
 
     capsule = {
-        "analysisName": "mts-observed-state-soft-safe-v10",
-        "candidateId": "observed-state-response-v17.65-route-transition-persistence",
+        "analysisName": "mts-observed-state-soft-safe-v11",
+        "candidateId": "observed-state-response-v17.66-state-branch-hardening",
         "verdict": verdict,
         "bestCandidate": best_row,
         "references": {
             "v17.54HardGate": {"worstAbove20": 29, "protectedFailureCount": 5},
             "v17.55SoftGate": {"worstAbove20": 19, "protectedFailureCount": 7},
             "v17.64ContinuityFallback": {"worstAbove20": 11, "protectedFailureCount": 0},
+            "v17.65RouteTransitionPersistence": {"worstAbove20": 5, "protectedFailureCount": 0},
         },
         "nullSummary": null_summary,
         "nullHardenedAccepted": null_hardened,
@@ -47050,7 +47145,7 @@ def cmd_observedstatesoftsafe(args: argparse.Namespace) -> None:
     out_dir = DEFAULT_OBSERVED_STATE_SOFT_SAFE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
     capsule = write_observed_state_soft_safe_artifacts(out_dir)
     best = capsule["bestCandidate"]
-    print("MTS observed state-response route-transition persistence v17.65")
+    print("MTS observed state-response state-branch hardening v17.66")
     print(f"verdict={capsule['verdict']}")
     print(
         "\t".join(
