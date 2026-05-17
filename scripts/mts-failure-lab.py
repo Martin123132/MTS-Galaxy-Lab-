@@ -45969,6 +45969,58 @@ def observed_state_soft_branch_safety(branch: str, state_curve: dict) -> bool:
     return True
 
 
+def observed_state_continuity_fallback_floor(state_curve: dict) -> float | None:
+    """Conservative support continuity when a nearby state branch drops out under uncertainty."""
+    values = observed_state_values(state_curve)
+    route = state_curve["lockedModelRoute"]
+    if route == "low-load":
+        high_memory_lowload_edge = (
+            values["memoryLoad"] > 5.0
+            and values["hOverRout"] < 0.17
+            and values["fGasOut"] < 0.42
+            and values["uOut"] < 0.43
+            and values["uMax"] < 1.05
+            and values["outerBulgeShare"] < 0.12
+            and 0.06 < values["outerGasShare"] < 0.36
+            and values["pointDensity"] < 1.25
+            and values["barCurv"] < 5.0
+        )
+        if high_memory_lowload_edge:
+            return 1.65
+        gas_disk_edge_margin = (
+            1.7 < values["memoryLoad"] < 2.8
+            and 0.36 < values["fGasOut"] < 0.72
+            and values["outerGasShare"] > 0.35
+            and values["uOut"] > 0.36
+            and values["pointDensity"] > 1.35
+            and values["LgapOverH"] < 0.75
+        )
+        if gas_disk_edge_margin:
+            return 1.18
+    if route == "buffered single-crossing":
+        dense_buffered_margin = (
+            values["memoryLoad"] > 4.0
+            and values["uMax"] > 1.10
+            and values["pointDensity"] > 0.40
+            and values["fGasOut"] < 0.45
+            and values["uOut"] > 0.24
+            and values["outerBulgeShare"] < 0.42
+        )
+        if dense_buffered_margin:
+            return 1.50
+        gas_rich_buffered_margin = (
+            values["memoryLoad"] < 2.1
+            and values["fGasOut"] > 0.50
+            and values["outerGasShare"] > 0.45
+            and values["hOverRout"] > 0.20
+            and values["pointDensity"] < 1.20
+            and values["outerBulgeShare"] < 0.02
+        )
+        if gas_rich_buffered_margin:
+            return 1.18
+    return None
+
+
 def observed_state_over_support_gate_soft_safe(curve: dict) -> bool:
     values = observed_state_values(curve)
     if observed_state_over_support_gate(curve):
@@ -46062,6 +46114,8 @@ def observed_state_score_curve_soft_safe(
     soft_scale: float,
     full_threshold: float,
 ) -> dict:
+    fallback_floor: float | None = None
+    continuity_fallback = False
     if observed_state_over_support_gate_soft_safe(state_curve):
         amp = OBSERVED_STATE_OVER_SUPPORT_AMP
         q_value = Q_DEFAULT
@@ -46086,7 +46140,17 @@ def observed_state_score_curve_soft_safe(
                 amp = min(amp, 1.0 + activation * (branch_cap - 1.0))
         else:
             q_value = Q_DEFAULT
-        if state_curve["lockedModelRoute"] == "low-load" and not branch and not observed_state_over_support_gate_soft_safe(state_curve):
+        if not branch and activation <= 0.0:
+            fallback_floor = observed_state_continuity_fallback_floor(state_curve)
+            if fallback_floor is not None:
+                amp = max(amp, fallback_floor)
+                continuity_fallback = True
+        if (
+            state_curve["lockedModelRoute"] == "low-load"
+            and not branch
+            and fallback_floor is None
+            and not observed_state_over_support_gate_soft_safe(state_curve)
+        ):
             amp = min(amp, 1.0)
         safety_cap = observed_state_bulge_safety_cap(state_curve)
         if safety_cap is not None:
@@ -46106,6 +46170,8 @@ def observed_state_score_curve_soft_safe(
     score["observedStateBranch"] = branch
     score["observedStateSoftProbability"] = probability
     score["observedStateSoftActivation"] = activation
+    score["observedStateContinuityFallback"] = continuity_fallback
+    score["observedStateFallbackFloor"] = fallback_floor if fallback_floor is not None else ""
     return score
 
 
@@ -46146,6 +46212,8 @@ def observed_state_soft_gate_eval(
             "branch": cand.get("observedStateBranch", ""),
             "softProbability": cand.get("observedStateSoftProbability", 0.0),
             "softActivation": cand.get("observedStateSoftActivation", 0.0),
+            "continuityFallback": cand.get("observedStateContinuityFallback", False),
+            "fallbackFloor": cand.get("observedStateFallbackFloor", ""),
             "candidateRoute": cand["candidateRoute"],
             "stillAbove20": cand["rmse"] >= 20.0 if curve["name"] in high_names else "",
             "protectedRegression": cand["rmse"] - base["rmse"] if curve["name"] not in high_names else "",
@@ -46187,6 +46255,8 @@ def observed_state_soft_gate_robustness_eval(
                             "branch": cand.get("observedStateBranch", ""),
                             "softProbability": cand.get("observedStateSoftProbability", 0.0),
                             "softActivation": cand.get("observedStateSoftActivation", 0.0),
+                            "continuityFallback": cand.get("observedStateContinuityFallback", False),
+                            "fallbackFloor": cand.get("observedStateFallbackFloor", ""),
                             "candidateRmse": cand["rmse"],
                             "gainKmS": base["rmse"] - cand["rmse"],
                             "stillAbove20": cand["rmse"] >= 20.0,
@@ -46355,7 +46425,7 @@ def observed_state_soft_safe_null_rows(
         rows.append(
             summarize(
                 seed,
-                "v17.63-candidate",
+                "v17.64-candidate",
                 holdout,
                 lambda curve: candidate_scores[curve["name"]],
             )
@@ -46454,8 +46524,8 @@ def observed_state_soft_safe_null_rows(
 def observed_state_soft_safe_null_summary(null_rows: list[dict]) -> dict:
     tracks = sorted({row["track"] for row in null_rows})
     med_high = {track: safe_median(parse_float(row["highGainPct"]) for row in null_rows if row["track"] == track) for track in tracks}
-    candidate = med_high.get("v17.63-candidate", math.nan)
-    fair_nulls = [track for track in tracks if track != "v17.63-candidate"]
+    candidate = med_high.get("v17.64-candidate", math.nan)
+    fair_nulls = [track for track in tracks if track != "v17.64-candidate"]
     best_null = max([med_high.get(track, math.nan) for track in fair_nulls if math.isfinite(med_high.get(track, math.nan))] or [math.nan])
     return {
         "medianCandidateHighGainPct": candidate,
@@ -46467,7 +46537,7 @@ def observed_state_soft_safe_null_summary(null_rows: list[dict]) -> dict:
         "maxCandidateProtectedRegression": max(
             parse_float(row["maxProtectedRegression"])
             for row in null_rows
-            if row["track"] == "v17.63-candidate"
+            if row["track"] == "v17.64-candidate"
         ),
         "maxProtectedLookalikeStressRegression": max(
             parse_float(row["maxProtectedRegression"])
@@ -46805,8 +46875,8 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
     write_csv(out_dir / "mts_observed_state_soft_safe_null_controls.csv", null_rows)
 
     formula = {
-        "candidateId": "observed-state-response-v17.63-jitter-hardened-soft-gate",
-        "mechanism": "v17.55 state-neighborhood soft branch activation with single-vote activation and protected-lookalike safety predicates",
+        "candidateId": "observed-state-response-v17.64-continuity-fallback",
+        "mechanism": "v17.63 state-neighborhood soft branch activation plus conservative branchless state-continuity support fallback",
         "softScale": best_row["softScale"],
         "fullActivationThreshold": best_row["fullThreshold"],
         "branchSafetyRules": {
@@ -46820,6 +46890,12 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
             "buffered disk-shear high-q shape": "memoryLoad > 3.4 and pointDensity > 1.0",
             "over-support suppression": "base over-support gate and (fGasOut < 0.52 or midGasShare > 0.35 or pointDensity < 0.82)",
         },
+        "continuityFallbackRules": {
+            "low-load high-memory edge": "branchless q-default lift to amp floor 1.65 in compact low-load high-memory boundary states",
+            "low-load gas-disk edge margin": "branchless q-default lift to amp floor 1.18 only in dense gas-disk edge margins",
+            "buffered dense margin": "branchless q-default lift to amp floor 1.50 in dense/high-u buffered margins",
+            "buffered gas-rich margin": "branchless q-default lift to amp floor 1.18 in compact gas-rich buffered margins",
+        },
         "canonicalMtsChanged": False,
         "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics galaxies"],
     }
@@ -46828,9 +46904,9 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
     )
 
     report = [
-        "# MTS v17.63 Jitter-Hardened Soft Gate",
+        "# MTS v17.64 State-Continuity Fallback",
         "",
-        "This is a direct repair pass for v17.61: keep state-neighborhood soft activation, allow one stable neighborhood vote to activate, and block the protected lookalike state regions that caused false releases.",
+        "This is a direct repair pass for v17.63: keep state-neighborhood soft activation, and add a conservative branchless support-continuity fallback when a nearby branch drops out under state uncertainty.",
         "",
         "## Result",
         "",
@@ -46852,7 +46928,7 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
         "",
         "- v17.54 hard gate: worst above-20 `29`, protected failures `5`.",
         "- v17.55 soft gate: worst above-20 `19`, protected failures `7`.",
-        f"- v17.63 jitter-hardened soft gate: worst above-20 `{best_row['robustMaxAbove20']}`, protected failures `{best_row['robustProtectedFailureCount']}`.",
+        f"- v17.64 continuity fallback: worst above-20 `{best_row['robustMaxAbove20']}`, protected failures `{best_row['robustProtectedFailureCount']}`.",
         "",
         "## Remaining Protected Regressions",
         "",
@@ -46865,7 +46941,7 @@ def write_observed_state_soft_safe_artifacts(out_dir: Path) -> dict:
 
     capsule = {
         "analysisName": "mts-observed-state-soft-safe-v9",
-        "candidateId": "observed-state-response-v17.63-jitter-hardened-soft-gate",
+        "candidateId": "observed-state-response-v17.64-continuity-fallback",
         "verdict": verdict,
         "bestCandidate": best_row,
         "references": {
@@ -46896,7 +46972,7 @@ def cmd_observedstatesoftsafe(args: argparse.Namespace) -> None:
     out_dir = DEFAULT_OBSERVED_STATE_SOFT_SAFE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
     capsule = write_observed_state_soft_safe_artifacts(out_dir)
     best = capsule["bestCandidate"]
-    print("MTS observed state-response jitter-hardened soft gate v17.63")
+    print("MTS observed state-response state-continuity fallback v17.64")
     print(f"verdict={capsule['verdict']}")
     print(
         "\t".join(
