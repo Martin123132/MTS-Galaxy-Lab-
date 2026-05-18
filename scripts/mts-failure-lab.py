@@ -135,6 +135,7 @@ DEFAULT_OBSERVED_STATE_BRANCH_SAFETY_OUT = OUTPUT_PACK_ROOT / "mts-observed-stat
 DEFAULT_OBSERVED_STATE_TAIL_POLISH_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-tail-polish-v17-80"
 DEFAULT_OBSERVED_STATE_BRANCH_NULL_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-branch-null-harden-v17-81"
 DEFAULT_OBSERVED_STATE_PROTECTION_CAP_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-protection-cap-v17-82"
+DEFAULT_OBSERVED_STATE_TAIL_LIFT_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-tail-lift-v17-83"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -50693,6 +50694,78 @@ def observed_state_score_curve_protection_cap_law_forced(
     return old
 
 
+def observed_state_v1783_tail_lift_params(branch: str, curve: dict) -> tuple[float, float, str] | None:
+    values = observed_state_values(curve)
+    route = curve["lockedModelRoute"]
+    if branch == "dense-bulge outer":
+        if (
+            route == "buffered single-crossing"
+            and values["fGasOut"] < 0.05
+            and values["outerGasShare"] < 0.04
+            and values["outerBulgeShare"] > 0.30
+            and values["innerBulgeShare"] > 0.70
+            and values["hOverRout"] > 0.20
+            and values["pointDensity"] > 5.0
+        ):
+            return 8.0, 0.50, "v17.83-dense-bulge-tail-lift"
+    if branch == OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_BRANCH:
+        if (
+            route == "low-load"
+            and 0.16 <= values["fGasOut"] <= 0.26
+            and 5.50 <= values["memoryLoad"] <= 7.20
+            and 0.33 <= values["uOut"] <= 0.39
+            and values["outerBulgeShare"] < 0.02
+            and 0.45 <= values["pointDensity"] <= 0.70
+            and values["barCurv"] > -20.0
+        ):
+            return 3.0, 0.85, "v17.83-lowload-disk-q-tail-lift"
+    return None
+
+
+def observed_state_v1783_apply_tail_lift(curve: dict, old_score: dict, branch: str) -> dict:
+    params = observed_state_v1783_tail_lift_params(branch, curve)
+    if params is None:
+        return old_score
+    amp, q_value, response_source = params
+    score = score_curve_with_params(curve, amp, q_value)
+    score["observedStateAmp"] = amp
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = branch
+    score["observedStateFamily"] = observed_state_branch_family(branch)
+    score["observedStateResponseSource"] = response_source
+    score["observedStateSoftProbability"] = old_score.get("observedStateSoftProbability", 1.0)
+    score["observedStateSoftActivation"] = old_score.get("observedStateSoftActivation", 1.0)
+    score["observedStateContinuityFallback"] = False
+    score["observedStateFallbackFloor"] = ""
+    score["observedStateRouteTransitionFallback"] = ""
+    return score
+
+
+def observed_state_score_curve_tail_lift_law(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    old = observed_state_score_curve_protection_cap_law(curve, state_curve, fit, amp_cap, soft_scale, full_threshold)
+    branch = old.get("observedStateBranch", "")
+    return observed_state_v1783_apply_tail_lift(curve, old, branch)
+
+
+def observed_state_score_curve_tail_lift_law_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    old = observed_state_score_curve_protection_cap_law_forced(curve, state_curve, branch, activation)
+    if branch and not observed_state_v1782_final_protection_pass(branch, state_curve):
+        return old
+    return observed_state_v1783_apply_tail_lift(curve, old, branch)
+
+
 def observed_state_law_freeze_case_rows(
     clean_curves: list[dict],
     high_names: set[str],
@@ -54812,6 +54885,306 @@ def write_observed_state_protection_cap_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def write_observed_state_tail_lift_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+
+    metrics, _case_rows_from_eval = observed_state_soft_gate_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_tail_lift_law,
+    )
+    previous_metrics, _previous_case_rows = observed_state_soft_gate_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_protection_cap_law,
+    )
+    case_rows = observed_state_law_freeze_case_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_tail_lift_law,
+    )
+    seed_rows = observed_state_law_freeze_seed_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_tail_lift_law,
+        observed_state_score_curve_tail_lift_law_forced,
+        "v17.83-tail-lift",
+    )
+    branch_rows = observed_state_law_freeze_branch_null_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_tail_lift_law,
+        observed_state_score_curve_tail_lift_law_forced,
+    )
+    ablation_rows = observed_state_law_freeze_ablation_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_tail_lift_law,
+    )
+    protected_stress_rows = observed_state_law_freeze_protected_stress_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_tail_lift_law,
+        observed_state_score_curve_tail_lift_law_forced,
+    )
+    previous_stress_rows = observed_state_law_freeze_protected_stress_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_protection_cap_law,
+        observed_state_score_curve_protection_cap_law_forced,
+    )
+
+    candidate_seed_rows = [row for row in seed_rows if row["track"] == "v17.83-tail-lift"]
+    null_seed_rows = [row for row in seed_rows if row["track"] != "v17.83-tail-lift"]
+    median_candidate_high = safe_median(parse_float(row["highGainPct"]) for row in candidate_seed_rows)
+    median_candidate_clean = safe_median(parse_float(row["cleanGainPct"]) for row in candidate_seed_rows)
+    median_nulls = {
+        track: safe_median(parse_float(row["highGainPct"]) for row in null_seed_rows if row["track"] == track)
+        for track in sorted({row["track"] for row in null_seed_rows})
+    }
+    best_null = max([value for value in median_nulls.values() if math.isfinite(value)] or [math.nan])
+    null_margin = median_candidate_high - best_null if math.isfinite(median_candidate_high) and math.isfinite(best_null) else math.nan
+    max_seed_protected = max([parse_float(row["maxProtectedRegression"], 0.0) for row in candidate_seed_rows] or [0.0])
+    max_seed_branch_protected = max(
+        [parse_float(row["maxProtectedBranchHitRegression"], 0.0) for row in candidate_seed_rows] or [0.0]
+    )
+    max_above20 = max([int(parse_float(row["highStillAbove20"], 0.0)) for row in candidate_seed_rows] or [0])
+    max_worsened = max([int(parse_float(row["highWorsened"], 0.0)) for row in candidate_seed_rows] or [0])
+    max_stress = max([parse_float(row["stressRegressionKmS"], 0.0) for row in protected_stress_rows] or [0.0])
+    previous_max_stress = max([parse_float(row["stressRegressionKmS"], 0.0) for row in previous_stress_rows] or [0.0])
+    stress_delta = max_stress - previous_max_stress
+
+    changed_cases = []
+    for curve in clean_curves:
+        baseline = score_curve(curve)
+        old = observed_state_score_curve_protection_cap_law(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        new = observed_state_score_curve_tail_lift_law(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        delta = new["rmse"] - old["rmse"]
+        if abs(delta) > 1e-9:
+            changed_cases.append(
+                {
+                    "galaxy": curve["name"],
+                    "set": "clean-high-rmse" if curve["name"] in high_names else "clean-protected",
+                    "baselineRmse": baseline["rmse"],
+                    "v1782Rmse": old["rmse"],
+                    "v1783Rmse": new["rmse"],
+                    "deltaVsV1782": delta,
+                    "branch": new.get("observedStateBranch", ""),
+                    "responseSource": new.get("observedStateResponseSource", ""),
+                    "candidateRoute": new.get("candidateRoute", ""),
+                }
+            )
+    changed_high = [row for row in changed_cases if row["set"] == "clean-high-rmse"]
+    changed_protected = [row for row in changed_cases if row["set"] == "clean-protected"]
+    high_improvement = sum(-min(0.0, parse_float(row["deltaVsV1782"])) for row in changed_high)
+    protected_worsening = max([parse_float(row["deltaVsV1782"]) for row in changed_protected] or [0.0])
+
+    tail_lift_branches = [
+        "dense-bulge outer",
+        OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_BRANCH,
+    ]
+    accepted = (
+        metrics["highGainPct"] >= 67.0
+        and metrics["cleanGainPct"] >= 43.0
+        and median_candidate_high >= 66.0
+        and median_candidate_clean >= 43.0
+        and max_seed_protected < 4.0
+        and max_seed_branch_protected < 3.0
+        and max_above20 == 0
+        and max_worsened == 0
+        and math.isfinite(null_margin)
+        and null_margin >= 10.0
+        and max_stress < 4.0
+        and protected_worsening < 1.0
+        and high_improvement >= 10.0
+    )
+    verdict = "v17.83 tail lift accepted" if accepted else "v17.83 tail lift failed gates"
+    summary = {
+        "candidateId": "observed-state-response-v17.83-tail-lift",
+        "formulaChanged": True,
+        "baseCandidate": "observed-state-response-v17.82-protection-cap",
+        "lawChange": "add narrow state-only tail lifts for dense-bulge and disk-dominated low-load q-transition leftovers while preserving v17.82 protection caps",
+        "tailLiftBranchCount": len(tail_lift_branches),
+        **metrics,
+        "previousV1782HighGainPct": previous_metrics["highGainPct"],
+        "previousV1782CleanGainPct": previous_metrics["cleanGainPct"],
+        "medianHoldoutHighGainPct": median_candidate_high,
+        "medianHoldoutCleanGainPct": median_candidate_clean,
+        "bestNullHighGainPct": best_null,
+        "bestNullMarginPct": null_margin,
+        "maxHoldoutProtectedRegression": max_seed_protected,
+        "maxHoldoutProtectedBranchHitRegression": max_seed_branch_protected,
+        "maxProtectedLookalikeStressRegression": max_stress,
+        "previousV1782MaxProtectedLookalikeStressRegression": previous_max_stress,
+        "protectedLookalikeStressDeltaKmS": stress_delta,
+        "maxHoldoutHighStillAbove20": max_above20,
+        "maxHoldoutHighWorsened": max_worsened,
+        "changedCaseCount": len(changed_cases),
+        "changedHighCount": len(changed_high),
+        "changedProtectedCount": len(changed_protected),
+        "tailLiftHighImprovementKmS": high_improvement,
+        "maxDeltaVsV1782OnProtected": protected_worsening,
+        "verdict": verdict,
+    }
+
+    prefix = "mts_observed_state_tail_lift"
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_seed_replay.csv", seed_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_branch_ablation.csv", ablation_rows)
+    write_csv(out_dir / f"{prefix}_branch_nulls.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_protected_lookalike_stress.csv", protected_stress_rows)
+    write_csv(out_dir / f"{prefix}_changed_cases.csv", changed_cases)
+
+    formula = {
+        "candidateId": "observed-state-response-v17.83-tail-lift",
+        "mechanism": "v17.82 protection-capped law plus two narrow state/profile tail lifts",
+        "inherits": "observed-state-response-v17.82-protection-cap",
+        "tailLiftBranches": tail_lift_branches,
+        "tailLiftRules": [
+            {
+                "branch": "dense-bulge outer",
+                "condition": "buffered single-crossing, fGasOut < 0.05, outerGasShare < 0.04, outerBulgeShare > 0.30, innerBulgeShare > 0.70, hOverRout > 0.20, pointDensity > 5.0",
+                "amp": 8.0,
+                "q": 0.50,
+            },
+            {
+                "branch": OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_BRANCH,
+                "condition": "low-load, 0.16 <= fGasOut <= 0.26, 5.50 <= memoryLoad <= 7.20, 0.33 <= uOut <= 0.39, outerBulgeShare < 0.02, 0.45 <= pointDensity <= 0.70, barCurv > -20",
+                "amp": 3.0,
+                "q": 0.85,
+            },
+        ],
+        "tailLiftInputs": [
+            "locked route",
+            "memoryLoad",
+            "uOut",
+            "hOverRout",
+            "fGasOut",
+            "outer/inner gas share",
+            "outer disk share",
+            "outer/inner bulge share",
+            "bar curvature",
+            "point density",
+        ],
+        "softScale": soft_scale,
+        "fullActivationThreshold": full_threshold,
+        "canonicalMtsChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics galaxies"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    worst_high = sorted(
+        [row for row in case_rows if row["set"] == "clean-high-rmse"],
+        key=lambda row: -parse_float(row["candidateRmse"]),
+    )[:12]
+    top_changed = sorted(changed_cases, key=lambda row: parse_float(row["deltaVsV1782"]))[:12]
+    top_stress = sorted(protected_stress_rows, key=lambda row: -parse_float(row["stressRegressionKmS"]))[:12]
+    report = [
+        "# MTS v17.83 Tail Lift",
+        "",
+        "This is a framework candidate scoring pass. It keeps v17.82 protection caps, then adds two narrow state/profile tail lifts for remaining clean high-RMSE leftovers.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Nominal high-RMSE gain: v17.82 `{fmt(previous_metrics['highGainPct'])}%` -> v17.83 `{fmt(summary['highGainPct'])}%`.",
+        f"- Nominal clean-set gain: v17.82 `{fmt(previous_metrics['cleanGainPct'])}%` -> v17.83 `{fmt(summary['cleanGainPct'])}%`.",
+        f"- Median holdout high-RMSE gain: `{fmt(summary['medianHoldoutHighGainPct'])}%`.",
+        f"- Median holdout clean-set gain: `{fmt(summary['medianHoldoutCleanGainPct'])}%`.",
+        f"- Best split null high-RMSE gain: `{fmt(summary['bestNullHighGainPct'])}%`.",
+        f"- Split null margin: `{fmt(summary['bestNullMarginPct'])}` points.",
+        f"- Max protected lookalike stress: v17.82 `{fmt(previous_max_stress)}` -> v17.83 `{fmt(max_stress)}` km/s.",
+        f"- Max holdout protected regression: `{fmt(summary['maxHoldoutProtectedRegression'])} km/s`.",
+        f"- Max protected branch-hit regression: `{fmt(summary['maxHoldoutProtectedBranchHitRegression'])} km/s`.",
+        f"- High-RMSE holdout still above 20: `{summary['maxHoldoutHighStillAbove20']}`.",
+        f"- High-RMSE holdout worsened: `{summary['maxHoldoutHighWorsened']}`.",
+        "",
+        "## Changed Cases vs v17.82",
+        "",
+    ]
+    if top_changed:
+        for row in top_changed:
+            report.append(
+                f"- `{row['galaxy']}`: v17.82 `{fmt(row['v1782Rmse'])}` -> v17.83 `{fmt(row['v1783Rmse'])}` km/s, delta `{fmt(row['deltaVsV1782'])}`, branch `{row['branch']}`, route `{row['candidateRoute']}`."
+            )
+    else:
+        report.append("- No clean curve RMSE changes.")
+    report.extend(["", "## Top Protected-Lookalike Stress After v17.83", ""])
+    for row in top_stress:
+        report.append(
+            f"- `{row['sourceHighGalaxy']}` branch `{row['sourceBranch']}` on `{row['protectedGalaxy']}`: regression `{fmt(row['stressRegressionKmS'])}` km/s."
+        )
+    report.extend(["", "## Worst High-RMSE Cases After v17.83", ""])
+    for row in worst_high:
+        report.append(
+            f"- `{row['galaxy']}`: baseline `{fmt(row['baselineRmse'])}` -> candidate `{fmt(row['candidateRmse'])}` km/s, branch `{row['branch'] or row['routeTransitionFallback'] or 'none'}`."
+        )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-state-tail-lift-v17-83",
+        "candidateId": "observed-state-response-v17.83-tail-lift",
+        "verdict": verdict,
+        "summary": summary,
+        "formula": formula,
+        "medianNulls": median_nulls,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_seed_replay.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_branch_ablation.csv",
+            f"{prefix}_branch_nulls.csv",
+            f"{prefix}_protected_lookalike_stress.csv",
+            f"{prefix}_changed_cases.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def cmd_observedstatelowloadedge(args: argparse.Namespace) -> None:
     out_dir = DEFAULT_OBSERVED_STATE_LOWLOAD_EDGE_LAW_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
     capsule = write_observed_state_lowload_edge_law_artifacts(out_dir)
@@ -55040,6 +55413,29 @@ def cmd_observedstateprotectioncap(args: argparse.Namespace) -> None:
     print(f"Wrote observed state protection-cap law to {out_dir.resolve()}")
 
 
+def cmd_observedstatetaillift(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_TAIL_LIFT_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_tail_lift_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v17.83 tail lift")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                "law_change=v17.82-plus-narrow-state-tail-lifts",
+                f"high={fmt(summary['highGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"holdout_clean={fmt(summary['medianHoldoutCleanGainPct'])}%",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+                f"stress={fmt(summary['previousV1782MaxProtectedLookalikeStressRegression'])}->{fmt(summary['maxProtectedLookalikeStressRegression'])}",
+                f"above20={summary['maxHoldoutHighStillAbove20']}",
+                f"changed_high={summary['changedHighCount']}",
+            ]
+        )
+    )
+    print(f"Wrote observed state tail-lift law to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -55139,6 +55535,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatetailpolish",
             "observedstatebranchnullharden",
             "observedstateprotectioncap",
+            "observedstatetaillift",
         ],
         default="baseline",
     )
@@ -55346,6 +55743,8 @@ def main() -> None:
         cmd_observedstatebranchnullharden(args)
     elif args.mode == "observedstateprotectioncap":
         cmd_observedstateprotectioncap(args)
+    elif args.mode == "observedstatetaillift":
+        cmd_observedstatetaillift(args)
 
 
 if __name__ == "__main__":
