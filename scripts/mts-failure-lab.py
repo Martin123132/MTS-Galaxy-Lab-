@@ -140,6 +140,7 @@ DEFAULT_OBSERVED_STATE_COMPACT_MEMORY_Q_OUT = OUTPUT_PACK_ROOT / "mts-observed-s
 DEFAULT_OBSERVED_STATE_LAW_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-law-harden-v17-85"
 DEFAULT_OBSERVED_STATE_ROUTE_SAFE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-route-safe-v17-87"
 DEFAULT_OBSERVED_STATE_FAMILY_SURFACE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-family-surface-v17-88"
+DEFAULT_OBSERVED_STATE_FAMILY_MERGE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-family-merge-v17-89"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -47042,6 +47043,140 @@ def cmd_observedstatefamilysurface(args: argparse.Namespace) -> None:
     print(f"Wrote observed state family-surface response to {out_dir.resolve()}")
 
 
+OBSERVED_STATE_V1789_BRANCH_ALIASES = {
+    "buffered shelf-curvature edge compressed": "buffered gas-curvature",
+    "buffered gas-rich Lgap transition": "gas-rich buffered disk",
+    "low-load gas-extended saturation": "gas-memory edge compressed",
+    "low-load gas-rich high-shear transition": "gas-memory edge compressed",
+    "low-load midgas-memory transition": "gas-memory edge compressed",
+}
+
+
+def observed_state_with_branch_aliases(aliases: dict[str, str], callback: Callable[[], dict | list[dict]]) -> dict | list[dict]:
+    original_shape_branch = observed_state_shape_branch
+
+    def aliased_shape_branch(curve: dict, disabled_branches: set[str] | None = None) -> str:
+        branch = original_shape_branch(curve, disabled_branches)
+        return aliases.get(branch, branch)
+
+    globals()["observed_state_shape_branch"] = aliased_shape_branch
+    try:
+        return callback()
+    finally:
+        globals()["observed_state_shape_branch"] = original_shape_branch
+
+
+def observed_state_v1789_alias_branch(branch: str) -> str:
+    return OBSERVED_STATE_V1789_BRANCH_ALIASES.get(branch, branch)
+
+
+def observed_state_score_curve_v1789_family_merge(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    return observed_state_with_branch_aliases(
+        OBSERVED_STATE_V1789_BRANCH_ALIASES,
+        lambda: observed_state_score_curve_v1788_family_surface(curve, state_curve, fit, amp_cap, soft_scale, full_threshold),
+    )
+
+
+def observed_state_score_curve_v1789_family_merge_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    return observed_state_with_branch_aliases(
+        OBSERVED_STATE_V1789_BRANCH_ALIASES,
+        lambda: observed_state_score_curve_v1788_family_surface_forced(
+            curve,
+            state_curve,
+            observed_state_v1789_alias_branch(branch),
+            activation,
+        ),
+    )
+
+
+def observed_state_v1789_split_replay_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> list[dict]:
+    rows = observed_state_with_branch_aliases(
+        OBSERVED_STATE_V1789_BRANCH_ALIASES,
+        lambda: observed_state_v1788_split_replay_rows(clean_curves, high_names, fit, amp_cap, soft_scale, full_threshold),
+    )
+    for row in rows:
+        if row["track"] == "v17.88-spine-free-route-safe":
+            row["track"] = "v17.89-family-merged-route-safe"
+    return rows
+
+
+def cmd_observedstatefamilymerge(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_FAMILY_MERGE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = observed_state_with_branch_aliases(
+        OBSERVED_STATE_V1789_BRANCH_ALIASES,
+        lambda: write_observed_state_route_safe_artifacts(
+            out_dir,
+            score_fn=observed_state_score_curve_v1789_family_merge,
+            forced_score_fn=observed_state_score_curve_v1789_family_merge_forced,
+            split_replay_fn=observed_state_v1789_split_replay_rows,
+            prefix="mts_observed_state_family_merge",
+            candidate_id="observed-state-response-v17.89-family-merged-route-safe",
+            tested_candidate="observed-state-response-v17.88-spine-free-route-safe",
+            analysis_name="mts-observed-state-family-merge-v17-89",
+            report_title="# MTS v17.89 Family-Merged Route-Safe Response",
+            mechanism=(
+                "Use the v17.88 spine-free route-safe response, but alias redundant compressed/transition edge labels "
+                "into the nearest accepted physical branch family. The scoring law remains route-safe and keeps canonical "
+                "q=0.77/Gamma0/M-L unchanged outside accepted state branches."
+            ),
+            report_intro=(
+                "This pass tests whether v17.88 can be made less branch-fragmented without losing high-RMSE repair. "
+                "Only same-family state labels that passed the holdout/null scratch screen are merged; failed bulge, shelf, "
+                "and sparse-gas merges are not included."
+            ),
+            extra_formula={
+                "branchAliasCount": len(OBSERVED_STATE_V1789_BRANCH_ALIASES),
+                "branchAliases": OBSERVED_STATE_V1789_BRANCH_ALIASES,
+                "branchSpecificResponseSpineCount": 0,
+                "branchSpecificResponseSpineRemoved": True,
+                "failedAliasFamiliesExcluded": [
+                    "buffered bulge shoulder aliases that revive NGC2955/UGC05253/NGC5033",
+                    "shelf aliases that revive UGC11557",
+                    "low-load sparse-gas alias that revives NGC3953",
+                ],
+            },
+            passed_verdict="v17.89 family-merged route-safe response passed",
+            failed_verdict="v17.89 family-merged route-safe response underpowered",
+        ),
+    )
+    summary = capsule["summary"]
+    print("MTS v17.89 family-merged route-safe response")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['nominalHighGainPct'])}%",
+                f"clean={fmt(summary['nominalCleanGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"route_pres={fmt(summary['medianHoldoutRoutePreservation'], 3)}",
+                f"above20={summary['maxHoldoutHighStillAbove20']}",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+                f"aliases={len(OBSERVED_STATE_V1789_BRANCH_ALIASES)}",
+            ]
+        )
+    )
+    print(f"Wrote observed state family-merge response to {out_dir.resolve()}")
+
+
 OBSERVED_STATE_SOFT_NEIGHBOR_SEEDS = list(range(SPLIT_SEED + 1000, SPLIT_SEED + 1011))
 OBSERVED_STATE_SOFT_SCALE_GRID = [0.03, 0.05, 0.08, 0.10]
 OBSERVED_STATE_SOFT_FULL_THRESHOLD_GRID = [1.0 / 12.0, 0.12, 0.16, 0.20, 0.30, 0.40]
@@ -57561,6 +57696,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstaterobustness",
             "observedstateroutesafe",
             "observedstatefamilysurface",
+            "observedstatefamilymerge",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -57756,6 +57892,8 @@ def main() -> None:
         cmd_observedstateroutesafe(args)
     elif args.mode == "observedstatefamilysurface":
         cmd_observedstatefamilysurface(args)
+    elif args.mode == "observedstatefamilymerge":
+        cmd_observedstatefamilymerge(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
