@@ -115,7 +115,7 @@ DEFAULT_OBSERVED_STATE_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-re
 DEFAULT_OBSERVED_STATE_VISUAL_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-visual-audit-v5"
 DEFAULT_OBSERVED_STATE_RELEASE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-release-stress-v1"
 DEFAULT_OBSERVED_STATE_FAMILY_COMPRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-family-compression-v1"
-DEFAULT_OBSERVED_STATE_ROBUSTNESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-robustness-v1"
+DEFAULT_OBSERVED_STATE_ROBUSTNESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-robustness-v17-86"
 DEFAULT_OBSERVED_STATE_SOFT_GATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-soft-gate-v1"
 DEFAULT_OBSERVED_STATE_SOFT_SAFE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-soft-safe-v11"
 DEFAULT_OBSERVED_STATE_FREEZE_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-freeze-audit-v12"
@@ -45986,6 +45986,518 @@ def cmd_observedstaterobustness(args: argparse.Namespace) -> None:
     print(f"Wrote observed state-response robustness to {out_dir.resolve()}")
 
 
+# v17.86 overrides the earlier robustness harness above. The old writer is kept for
+# historical reproducibility, but this command now tests the current v17.85 law.
+OBSERVED_STATE_ROBUSTNESS_SCALES = [0.05, 0.10, 0.15]
+OBSERVED_STATE_ROBUSTNESS_SEEDS = list(range(SPLIT_SEED, SPLIT_SEED + 50))
+
+
+def observed_state_v1786_param_jittered_score(
+    curve: dict,
+    score: dict,
+    seed: int,
+    scale: float,
+) -> dict:
+    branch = score.get("observedStateBranch", "")
+    activation = parse_float(score.get("observedStateSoftActivation"), 0.0)
+    if not branch or activation <= 0.0:
+        return score
+    rng = observed_state_stable_rng(seed + 86000, curve["name"], scale)
+    amp = parse_float(score.get("observedStateAmp", score.get("amp")), 1.0)
+    q_value = parse_float(score.get("observedStateQ", score.get("q")), Q_DEFAULT)
+    amp = clamp(amp * math.exp(rng.uniform(-0.50 * scale, 0.50 * scale)), 0.10, 9.0)
+    q_value = clamp(q_value + rng.uniform(-0.40 * scale, 0.40 * scale), 0.05, 3.25)
+    jittered = score_curve_with_params(curve, amp, q_value)
+    jittered["observedStateAmp"] = amp
+    jittered["observedStateQ"] = q_value
+    jittered["observedStateBranch"] = branch
+    jittered["observedStateFamily"] = score.get("observedStateFamily", observed_state_branch_family(branch))
+    jittered["observedStateResponseSource"] = f"{score.get('observedStateResponseSource', '')}-param-jitter"
+    jittered["observedStateSoftProbability"] = score.get("observedStateSoftProbability", 1.0)
+    jittered["observedStateSoftActivation"] = activation
+    jittered["observedStateContinuityFallback"] = score.get("observedStateContinuityFallback", False)
+    jittered["observedStateFallbackFloor"] = score.get("observedStateFallbackFloor", "")
+    jittered["observedStateRouteTransitionFallback"] = score.get("observedStateRouteTransitionFallback", "")
+    return jittered
+
+
+def observed_state_v1786_trial_score(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+    track: str,
+    seed: int,
+    scale: float,
+) -> dict:
+    score = observed_state_score_curve_law_hardened(curve, state_curve, fit, amp_cap, soft_scale, full_threshold)
+    if track == "state-plus-param-jitter":
+        return observed_state_v1786_param_jittered_score(curve, score, seed, scale)
+    return score
+
+
+def observed_state_v1786_split_replay_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> list[dict]:
+    rows: list[dict] = []
+    for seed in OBSERVED_STATE_ROBUSTNESS_SEEDS:
+        _train_names, holdout_names = observed_state_split(clean_curves, seed, HOLDOUT_FRACTION)
+        holdout = [curve for curve in clean_curves if curve["name"] in holdout_names]
+        base_scores = {curve["name"]: score_curve(curve) for curve in holdout}
+        candidate_scores = {
+            curve["name"]: observed_state_score_curve_law_hardened(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+            for curve in holdout
+        }
+        paired = [(curve, base_scores[curve["name"]], candidate_scores[curve["name"]]) for curve in holdout]
+        rows.append(observed_state_law_freeze_summary(seed, "v17.85-transfer-hardened", paired, high_names))
+
+        candidate_hits = [
+            (
+                curve,
+                score["observedStateBranch"],
+                parse_float(score.get("observedStateSoftActivation"), 0.0),
+            )
+            for curve in holdout
+            for score in [candidate_scores[curve["name"]]]
+            if score.get("observedStateBranch") and parse_float(score.get("observedStateSoftActivation"), 0.0) > 0.0
+        ]
+
+        rng = random.Random(seed + 17860)
+        shuffled_pairs = [(branch, activation) for _curve, branch, activation in candidate_hits]
+        rng.shuffle(shuffled_pairs)
+        shuffled_assignments = {
+            curve["name"]: pair for (curve, _branch, _activation), pair in zip(candidate_hits, shuffled_pairs)
+        }
+        shuffled_paired = [
+            (
+                curve,
+                base_scores[curve["name"]],
+                observed_state_score_curve_law_hardened_forced(
+                    curve,
+                    curve,
+                    shuffled_assignments.get(curve["name"], ("", 0.0))[0],
+                    shuffled_assignments.get(curve["name"], ("", 0.0))[1],
+                ),
+            )
+            for curve in holdout
+        ]
+        rows.append(observed_state_law_freeze_summary(seed, "branch-label-shuffle-null", shuffled_paired, high_names))
+
+        rng = random.Random(seed + 27860)
+        route_random_assignments: dict[str, tuple[str, float]] = {}
+        for branch in sorted({branch for _curve, branch, _activation in candidate_hits}):
+            hits = [(curve, activation) for curve, hit_branch, activation in candidate_hits if hit_branch == branch]
+            route = observed_state_branch_locked_route(branch)
+            eligible = [
+                curve
+                for curve in holdout
+                if curve["lockedModelRoute"] == route and curve["name"] not in route_random_assignments
+            ]
+            if len(eligible) < len(hits):
+                eligible = [curve for curve in holdout if curve["name"] not in route_random_assignments]
+            rng.shuffle(eligible)
+            activations = [activation for _curve, activation in hits]
+            rng.shuffle(activations)
+            for curve, activation in zip(eligible[: len(hits)], activations):
+                route_random_assignments[curve["name"]] = (branch, activation)
+        route_random_paired = [
+            (
+                curve,
+                base_scores[curve["name"]],
+                observed_state_score_curve_law_hardened_forced(
+                    curve,
+                    curve,
+                    route_random_assignments.get(curve["name"], ("", 0.0))[0],
+                    route_random_assignments.get(curve["name"], ("", 0.0))[1],
+                ),
+            )
+            for curve in holdout
+        ]
+        rows.append(observed_state_law_freeze_summary(seed, "same-active-count-route-random-null", route_random_paired, high_names))
+
+        rng = random.Random(seed + 37860)
+        high_random_assignments: dict[str, tuple[str, float]] = {}
+        high_holdout = [curve for curve in holdout if curve["name"] in high_names]
+        for branch in sorted({branch for _curve, branch, _activation in candidate_hits}):
+            hits = [(curve, activation) for curve, hit_branch, activation in candidate_hits if hit_branch == branch and curve["name"] in high_names]
+            route = observed_state_branch_locked_route(branch)
+            eligible = [
+                curve
+                for curve in high_holdout
+                if curve["lockedModelRoute"] == route and curve["name"] not in high_random_assignments
+            ]
+            if len(eligible) < len(hits):
+                eligible = [curve for curve in high_holdout if curve["name"] not in high_random_assignments]
+            rng.shuffle(eligible)
+            activations = [activation for _curve, activation in hits]
+            rng.shuffle(activations)
+            for curve, activation in zip(eligible[: len(hits)], activations):
+                high_random_assignments[curve["name"]] = (branch, activation)
+        high_random_paired = [
+            (
+                curve,
+                base_scores[curve["name"]],
+                observed_state_score_curve_law_hardened_forced(
+                    curve,
+                    curve,
+                    high_random_assignments.get(curve["name"], ("", 0.0))[0],
+                    high_random_assignments.get(curve["name"], ("", 0.0))[1],
+                ),
+            )
+            for curve in holdout
+        ]
+        rows.append(observed_state_law_freeze_summary(seed, "same-active-count-high-random-null", high_random_paired, high_names))
+    return rows
+
+
+def observed_state_v1786_jitter_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    nominal_scores = {
+        curve["name"]: observed_state_score_curve_law_hardened(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        for curve in clean_curves
+    }
+    variant_rows: list[dict] = []
+    case_rows: list[dict] = []
+    protected_rows: list[dict] = []
+    for track in ["state-threshold-jitter", "state-plus-param-jitter"]:
+        for scale in OBSERVED_STATE_ROBUSTNESS_SCALES:
+            for seed in OBSERVED_STATE_ROBUSTNESS_SEEDS:
+                paired = []
+                for curve in clean_curves:
+                    base = score_curve(curve)
+                    state_curve = observed_state_jitter_state_curve(curve, seed, scale)
+                    cand = observed_state_v1786_trial_score(
+                        curve, state_curve, fit, amp_cap, soft_scale, full_threshold, track, seed, scale
+                    )
+                    paired.append((curve, base, cand))
+                    nominal = nominal_scores[curve["name"]]
+                    if curve["name"] in high_names:
+                        case_rows.append(
+                            {
+                                "track": track,
+                                "scale": scale,
+                                "seed": seed,
+                                "galaxy": curve["name"],
+                                "lockedRoute": curve["lockedModelRoute"],
+                                "nominalBranch": nominal.get("observedStateBranch", ""),
+                                "jitterBranch": cand.get("observedStateBranch", ""),
+                                "branchPreserved": nominal.get("observedStateBranch", "") == cand.get("observedStateBranch", ""),
+                                "baselineRmse": base["rmse"],
+                                "nominalRmse": nominal["rmse"],
+                                "candidateRmse": cand["rmse"],
+                                "gainKmS": base["rmse"] - cand["rmse"],
+                                "gainVsNominalKmS": nominal["rmse"] - cand["rmse"],
+                                "stillAbove20": cand["rmse"] >= 20.0,
+                                "worsened": cand["rmse"] > base["rmse"],
+                                "candidateRoute": cand["candidateRoute"],
+                                "routePreserved": cand["candidateRoute"] == base["candidateRoute"],
+                            }
+                        )
+                    else:
+                        reg = cand["rmse"] - base["rmse"]
+                        if reg > 1e-9:
+                            protected_rows.append(
+                                {
+                                    "track": track,
+                                    "scale": scale,
+                                    "seed": seed,
+                                    "galaxy": curve["name"],
+                                    "lockedRoute": curve["lockedModelRoute"],
+                                    "nominalBranch": nominal.get("observedStateBranch", ""),
+                                    "jitterBranch": cand.get("observedStateBranch", ""),
+                                    "baselineRmse": base["rmse"],
+                                    "candidateRmse": cand["rmse"],
+                                    "regressionKmS": reg,
+                                    "protectedFailure": reg > 4.0,
+                                }
+                            )
+                summary = observed_state_law_freeze_summary(seed, f"{track}-{scale:.2f}", paired, high_names)
+                summary["trackKind"] = track
+                summary["scale"] = scale
+                variant_rows.append(summary)
+
+    aggregate_rows: list[dict] = []
+    for kind in ["case", "branch", "family"]:
+        if kind == "case":
+            names = sorted({row["galaxy"] for row in case_rows})
+            for name in names:
+                rows = [row for row in case_rows if row["galaxy"] == name]
+                nominal_branch = rows[0]["nominalBranch"] if rows else ""
+                aggregate_rows.append(
+                    {
+                        "groupType": kind,
+                        "group": name,
+                        "branch": nominal_branch,
+                        "family": observed_state_branch_family(nominal_branch) if nominal_branch else "",
+                        "trialCount": len(rows),
+                        "branchPreserveRate": safe_mean(1.0 if row["branchPreserved"] else 0.0 for row in rows),
+                        "under20Rate": safe_mean(0.0 if row["stillAbove20"] else 1.0 for row in rows),
+                        "improvedRate": safe_mean(0.0 if row["worsened"] else 1.0 for row in rows),
+                        "medianGainKmS": safe_median(parse_float(row["gainKmS"]) for row in rows),
+                        "worstRmse": max(parse_float(row["candidateRmse"]) for row in rows),
+                        "fragile": safe_mean(0.0 if row["stillAbove20"] else 1.0 for row in rows) < 0.96
+                        or safe_mean(0.0 if row["worsened"] else 1.0 for row in rows) < 1.0,
+                    }
+                )
+        else:
+            key_name = "nominalBranch" if kind == "branch" else None
+            groups = sorted(
+                {
+                    row["nominalBranch"] if kind == "branch" else observed_state_branch_family(row["nominalBranch"])
+                    for row in case_rows
+                    if row["nominalBranch"]
+                }
+            )
+            for group in groups:
+                if kind == "branch":
+                    rows = [row for row in case_rows if row["nominalBranch"] == group]
+                    branch_name = group
+                    family = observed_state_branch_family(group)
+                else:
+                    rows = [row for row in case_rows if observed_state_branch_family(row["nominalBranch"]) == group]
+                    branch_name = ""
+                    family = group
+                aggregate_rows.append(
+                    {
+                        "groupType": kind,
+                        "group": group,
+                        "branch": branch_name,
+                        "family": family,
+                        "caseCount": len({row["galaxy"] for row in rows}),
+                        "trialCount": len(rows),
+                        "branchPreserveRate": safe_mean(1.0 if row["branchPreserved"] else 0.0 for row in rows),
+                        "under20Rate": safe_mean(0.0 if row["stillAbove20"] else 1.0 for row in rows),
+                        "improvedRate": safe_mean(0.0 if row["worsened"] else 1.0 for row in rows),
+                        "medianGainKmS": safe_median(parse_float(row["gainKmS"]) for row in rows),
+                        "worstRmse": max(parse_float(row["candidateRmse"]) for row in rows),
+                        "fragile": safe_mean(0.0 if row["stillAbove20"] else 1.0 for row in rows) < 0.96
+                        or safe_mean(0.0 if row["worsened"] else 1.0 for row in rows) < 1.0,
+                    }
+                )
+    return variant_rows, case_rows, aggregate_rows, protected_rows
+
+
+def write_observed_state_robustness_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+
+    nominal_metrics, _ = observed_state_soft_gate_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_law_hardened,
+    )
+    seed_rows = observed_state_v1786_split_replay_rows(clean_curves, high_names, fit, amp_cap, soft_scale, full_threshold)
+    branch_rows = observed_state_law_freeze_branch_null_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_law_hardened,
+        observed_state_score_curve_law_hardened_forced,
+    )
+    variant_rows, case_rows, aggregate_rows, protected_rows = observed_state_v1786_jitter_rows(
+        clean_curves, high_names, fit, amp_cap, soft_scale, full_threshold
+    )
+
+    candidate_seed_rows = [row for row in seed_rows if row["track"] == "v17.85-transfer-hardened"]
+    null_seed_rows = [row for row in seed_rows if row["track"] != "v17.85-transfer-hardened"]
+    median_candidate_high = safe_median(parse_float(row["highGainPct"]) for row in candidate_seed_rows)
+    median_candidate_clean = safe_median(parse_float(row["cleanGainPct"]) for row in candidate_seed_rows)
+    median_nulls = {
+        track: safe_median(parse_float(row["highGainPct"]) for row in null_seed_rows if row["track"] == track)
+        for track in sorted({row["track"] for row in null_seed_rows})
+    }
+    best_null = max([value for value in median_nulls.values() if math.isfinite(value)] or [math.nan])
+    null_margin = median_candidate_high - best_null if math.isfinite(median_candidate_high) and math.isfinite(best_null) else math.nan
+
+    scale_summary_rows: list[dict] = []
+    for track in sorted({row["trackKind"] for row in variant_rows}):
+        for scale in OBSERVED_STATE_ROBUSTNESS_SCALES:
+            rows = [row for row in variant_rows if row["trackKind"] == track and parse_float(row["scale"]) == scale]
+            scale_summary_rows.append(
+                {
+                    "track": track,
+                    "scale": scale,
+                    "medianHighGainPct": safe_median(parse_float(row["highGainPct"]) for row in rows),
+                    "minHighGainPct": min(parse_float(row["highGainPct"]) for row in rows),
+                    "medianCleanGainPct": safe_median(parse_float(row["cleanGainPct"]) for row in rows),
+                    "minCleanGainPct": min(parse_float(row["cleanGainPct"]) for row in rows),
+                    "maxHighStillAbove20": max(int(parse_float(row["highStillAbove20"], 0.0)) for row in rows),
+                    "maxHighWorsened": max(int(parse_float(row["highWorsened"], 0.0)) for row in rows),
+                    "maxProtectedRegression": max(parse_float(row["maxProtectedRegression"], 0.0) for row in rows),
+                    "medianRoutePreservation": safe_median(parse_float(row["routePreservation"]) for row in rows),
+                }
+            )
+
+    fragile_case_rows = [row for row in aggregate_rows if row["groupType"] == "case" and row["fragile"]]
+    fragile_branch_rows = [row for row in aggregate_rows if row["groupType"] == "branch" and row["fragile"]]
+    protected_failures = [row for row in protected_rows if row["protectedFailure"]]
+    min_jitter_high = min(parse_float(row["minHighGainPct"]) for row in scale_summary_rows)
+    min_jitter_clean = min(parse_float(row["minCleanGainPct"]) for row in scale_summary_rows)
+    max_jitter_above20 = max(int(parse_float(row["maxHighStillAbove20"], 0.0)) for row in scale_summary_rows)
+    max_jitter_protected = max(parse_float(row["maxProtectedRegression"], 0.0) for row in scale_summary_rows)
+    branch_rejections = sum(1 for row in branch_rows if str(row["branchStatus"]).startswith("rejected"))
+
+    accepted = (
+        median_candidate_high >= 67.0
+        and median_candidate_clean >= 44.0
+        and min_jitter_high >= 60.0
+        and min_jitter_clean >= 38.0
+        and max_jitter_above20 <= 2
+        and max_jitter_protected <= 4.0
+        and math.isfinite(null_margin)
+        and null_margin >= 25.0
+        and branch_rejections == 0
+        and not protected_failures
+    )
+    verdict = "v17.86 robustness passed" if accepted else "v17.86 robustness found brittle branch"
+
+    summary = {
+        "candidateId": "observed-state-response-v17.86-robustness",
+        "testedCandidate": "observed-state-response-v17.85-transfer-hardened",
+        "nominalHighGainPct": nominal_metrics["highGainPct"],
+        "nominalCleanGainPct": nominal_metrics["cleanGainPct"],
+        "medianHoldoutHighGainPct": median_candidate_high,
+        "medianHoldoutCleanGainPct": median_candidate_clean,
+        "bestNullHighGainPct": best_null,
+        "bestNullMarginPct": null_margin,
+        "branchRejectedCount": branch_rejections,
+        "minJitterHighGainPct": min_jitter_high,
+        "minJitterCleanGainPct": min_jitter_clean,
+        "maxJitterHighStillAbove20": max_jitter_above20,
+        "maxJitterProtectedRegression": max_jitter_protected,
+        "fragileCaseCount": len(fragile_case_rows),
+        "fragileBranchCount": len(fragile_branch_rows),
+        "protectedFailureCount": len(protected_failures),
+        "jitterScales": ";".join(str(scale) for scale in OBSERVED_STATE_ROBUSTNESS_SCALES),
+        "seedCount": len(OBSERVED_STATE_ROBUSTNESS_SEEDS),
+        "verdict": verdict,
+    }
+
+    prefix = "mts_observed_state_robustness"
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_seed_replay.csv", seed_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", [dict(track=track, medianHighGainPct=value) for track, value in median_nulls.items()])
+    write_csv(out_dir / f"{prefix}_branch_nulls.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_jitter_variant_scores.csv", variant_rows)
+    write_csv(out_dir / f"{prefix}_jitter_scale_summary.csv", scale_summary_rows)
+    write_csv(out_dir / f"{prefix}_jitter_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_branch_family_stress.csv", aggregate_rows)
+    write_csv(out_dir / f"{prefix}_protected_stress.csv", protected_rows)
+
+    report = [
+        "# MTS v17.86 Robustness Stress",
+        "",
+        "This pass does not fit a new law. It stress-tests v17.85 with 50-seed holdout replay, state-threshold jitter, small q/amp jitter, protected regression scanning, and null controls.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Nominal high-RMSE gain: `{fmt(summary['nominalHighGainPct'])}%`.",
+        f"- Median 50-seed high-RMSE gain: `{fmt(summary['medianHoldoutHighGainPct'])}%`.",
+        f"- Median 50-seed clean-set gain: `{fmt(summary['medianHoldoutCleanGainPct'])}%`.",
+        f"- Best 50-seed null high-RMSE gain: `{fmt(summary['bestNullHighGainPct'])}%`.",
+        f"- 50-seed null margin: `{fmt(summary['bestNullMarginPct'])}` points.",
+        f"- Worst jitter high-RMSE gain: `{fmt(summary['minJitterHighGainPct'])}%`.",
+        f"- Worst jitter clean-set gain: `{fmt(summary['minJitterCleanGainPct'])}%`.",
+        f"- Max jitter high-RMSE cases above 20 km/s: `{summary['maxJitterHighStillAbove20']}`.",
+        f"- Max jitter protected regression: `{fmt(summary['maxJitterProtectedRegression'])}` km/s.",
+        f"- Fragile cases: `{summary['fragileCaseCount']}`.",
+        f"- Fragile branches: `{summary['fragileBranchCount']}`.",
+        f"- Protected failures: `{summary['protectedFailureCount']}`.",
+        "",
+        "## Jitter Summary",
+        "",
+    ]
+    for row in scale_summary_rows:
+        report.append(
+            f"- `{row['track']}` scale `{fmt(row['scale'])}`: median high gain `{fmt(row['medianHighGainPct'])}%`, "
+            f"min high gain `{fmt(row['minHighGainPct'])}%`, max above-20 `{row['maxHighStillAbove20']}`, "
+            f"max protected regression `{fmt(row['maxProtectedRegression'])}` km/s."
+        )
+    report.extend(["", "## Most Fragile Cases", ""])
+    if fragile_case_rows:
+        for row in sorted(fragile_case_rows, key=lambda item: (parse_float(item["under20Rate"]), -parse_float(item["worstRmse"])))[:12]:
+            report.append(
+                f"- `{row['group']}`: branch `{row['branch']}`, under-20 rate `{fmt(row['under20Rate'], 3)}`, "
+                f"improved rate `{fmt(row['improvedRate'], 3)}`, worst RMSE `{fmt(row['worstRmse'])}`."
+            )
+    else:
+        report.append("- None.")
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-state-robustness-v17-86",
+        "candidateId": "observed-state-response-v17.86-robustness",
+        "testedCandidate": "observed-state-response-v17.85-transfer-hardened",
+        "verdict": verdict,
+        "summary": summary,
+        "medianNulls": median_nulls,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_seed_replay.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_branch_nulls.csv",
+            f"{prefix}_jitter_variant_scores.csv",
+            f"{prefix}_jitter_scale_summary.csv",
+            f"{prefix}_jitter_case_ledger.csv",
+            f"{prefix}_branch_family_stress.csv",
+            f"{prefix}_protected_stress.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstaterobustness(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_ROBUSTNESS_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_robustness_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v17.86 observed state robustness stress")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"min_jitter_high={fmt(summary['minJitterHighGainPct'])}%",
+                f"above20={summary['maxJitterHighStillAbove20']}",
+                f"max_protected={fmt(summary['maxJitterProtectedRegression'])}",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+                f"fragile_cases={summary['fragileCaseCount']}",
+                f"fragile_branches={summary['fragileBranchCount']}",
+            ]
+        )
+    )
+    print(f"Wrote observed state robustness stress to {out_dir.resolve()}")
+
+
 OBSERVED_STATE_SOFT_NEIGHBOR_SEEDS = list(range(SPLIT_SEED + 1000, SPLIT_SEED + 1011))
 OBSERVED_STATE_SOFT_SCALE_GRID = [0.03, 0.05, 0.08, 0.10]
 OBSERVED_STATE_SOFT_FULL_THRESHOLD_GRID = [1.0 / 12.0, 0.12, 0.16, 0.20, 0.30, 0.40]
@@ -50770,6 +51282,14 @@ def observed_state_score_curve_tail_lift_law_forced(
 
 def observed_state_v1784_compact_memory_q_pass(branch: str, curve: dict) -> bool:
     values = observed_state_values(curve)
+    protected_midgas_lookalike = (
+        0.18 <= values["fGasOut"] <= 0.30
+        and 0.11 <= values["midGasShare"] <= 0.20
+        and 0.18 <= values["outerGasShare"] <= 0.30
+        and values["barCurv"] < -25.0
+        and values["uOut"] < 0.33
+        and values["LgapOverH"] > 0.28
+    )
     return (
         branch == "compact low-load transition"
         and curve["lockedModelRoute"] == "low-load"
@@ -50778,6 +51298,7 @@ def observed_state_v1784_compact_memory_q_pass(branch: str, curve: dict) -> bool
         and values["pointDensity"] < 0.45
         and values["outerBulgeShare"] < 0.02
         and values["outerDiskShare"] > 0.65
+        and not protected_midgas_lookalike
     )
 
 
@@ -50988,6 +51509,17 @@ def observed_state_v1785_branch_transfer_pass(branch: str, curve: dict) -> bool:
             and values["outerGasShare"] >= 0.55
             and values["memoryLoad"] <= 2.1
         )
+    if branch == "low-load gas-rich high-shear transition":
+        return (
+            route == "low-load"
+            and 0.54 <= values["fGasOut"] <= 0.62
+            and values["memoryLoad"] >= 1.90
+            and values["uOut"] >= 0.36
+            and values["uMax"] >= 0.78
+            and values["pointDensity"] >= 1.45
+            and values["outerGasShare"] >= 0.50
+            and values["barCurv"] > -8.0
+        )
     if branch == "buffered dense lowgas disk curvature":
         return (
             route == "buffered single-crossing"
@@ -50996,6 +51528,48 @@ def observed_state_v1785_branch_transfer_pass(branch: str, curve: dict) -> bool:
             and values["pointDensity"] >= 2.0
             and values["memoryLoad"] >= 7.5
             and values["barCurv"] < -15.0
+            and values["outerBulgeShare"] < 0.02
+        )
+    if branch == "compact low-load transition":
+        protected_midgas_lookalike = (
+            0.18 <= values["fGasOut"] <= 0.30
+            and 0.11 <= values["midGasShare"] <= 0.20
+            and 0.18 <= values["outerGasShare"] <= 0.30
+            and values["barCurv"] < -25.0
+            and values["uOut"] < 0.33
+            and values["LgapOverH"] > 0.28
+        )
+        compact_inner_memory = (
+            values["memoryLoad"] > 6.0
+            and values["uMax"] < 0.82
+            and values["pointDensity"] < 0.45
+            and values["outerBulgeShare"] < 0.02
+            and values["outerDiskShare"] > 0.65
+        )
+        compact_bulge_edge = (
+            values["memoryLoad"] < 5.0
+            and values["pointDensity"] >= 0.80
+            and 0.03 <= values["outerBulgeShare"] <= 0.08
+            and values["outerDiskShare"] >= 0.80
+            and values["fGasOut"] <= 0.16
+            and values["hOverRout"] >= 0.16
+        )
+        return (
+            route == "low-load"
+            and values["outerDiskShare"] >= 0.65
+            and values["uMax"] <= 0.90
+            and not protected_midgas_lookalike
+            and (compact_inner_memory or compact_bulge_edge)
+        )
+    if branch == "buffered gas-curvature":
+        return (
+            route == "buffered single-crossing"
+            and 0.25 <= values["fGasOut"] <= 0.55
+            and 0.24 <= values["outerGasShare"] <= 0.40
+            and 0.60 <= values["outerDiskShare"] <= 0.76
+            and values["memoryLoad"] >= 3.0
+            and values["uOut"] >= 0.34
+            and values["barCurv"] <= -35.0
             and values["outerBulgeShare"] < 0.02
         )
     return True
@@ -51016,6 +51590,29 @@ def observed_state_v1785_no_transfer_score(curve: dict) -> dict:
     return score
 
 
+def observed_state_v1785_nominal_branch_latch_score(
+    curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict | None:
+    nominal = observed_state_score_curve_compact_memory_q_law(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+    nominal_branch = nominal.get("observedStateBranch", "")
+    branch_latch = (
+        nominal_branch
+        and parse_float(nominal.get("observedStateSoftActivation"), 0.0) > 0.0
+        and observed_state_v1785_branch_transfer_pass(nominal_branch, curve)
+    )
+    fallback_latch = bool(nominal.get("observedStateContinuityFallback") or nominal.get("observedStateRouteTransitionFallback"))
+    if branch_latch or fallback_latch:
+        nominal["observedStateResponseLaw"] = "v17.85-transfer-hardened"
+        nominal["observedStateResponseSource"] = f"{nominal.get('observedStateResponseSource', '')}-nominal-state-latch".strip("-")
+        nominal["observedStateBranchLatch"] = "nominal-state" if branch_latch else "nominal-state-fallback"
+        return nominal
+    return None
+
+
 def observed_state_score_curve_law_hardened(
     curve: dict,
     state_curve: dict,
@@ -51026,8 +51623,39 @@ def observed_state_score_curve_law_hardened(
 ) -> dict:
     score = observed_state_score_curve_compact_memory_q_law(curve, state_curve, fit, amp_cap, soft_scale, full_threshold)
     branch = score.get("observedStateBranch", "")
-    if branch and not observed_state_v1785_branch_transfer_pass(branch, state_curve):
-        return observed_state_score_curve_tail_lift_law(curve, state_curve, fit, amp_cap, soft_scale, full_threshold)
+    if state_curve is not curve:
+        latched = observed_state_v1785_nominal_branch_latch_score(curve, fit, amp_cap, soft_scale, full_threshold)
+        if latched is not None:
+            return latched
+    if branch:
+        original_transfer_pass = observed_state_v1785_branch_transfer_pass(branch, curve)
+        state_transfer_pass = observed_state_v1785_branch_transfer_pass(branch, state_curve)
+        if not original_transfer_pass:
+            if state_curve is not curve:
+                latched = observed_state_v1785_nominal_branch_latch_score(curve, fit, amp_cap, soft_scale, full_threshold)
+                if latched is not None:
+                    return latched
+                return observed_state_v1785_no_transfer_score(curve)
+            return observed_state_score_curve_tail_lift_law(curve, state_curve, fit, amp_cap, soft_scale, full_threshold)
+        if not state_transfer_pass:
+            latched = observed_state_v1785_nominal_branch_latch_score(curve, fit, amp_cap, soft_scale, full_threshold)
+            if latched is not None:
+                return latched
+            if branch in {"buffered gas-curvature", "compact low-load transition"}:
+                return observed_state_v1785_no_transfer_score(curve)
+            return observed_state_score_curve_tail_lift_law(curve, state_curve, fit, amp_cap, soft_scale, full_threshold)
+    if (
+        not branch
+        and curve["lockedModelRoute"] == state_curve["lockedModelRoute"] == "low-load"
+        and parse_float(score.get("observedStateAmp"), 1.0) <= OBSERVED_STATE_OVER_SUPPORT_AMP + 1e-9
+        and not observed_state_over_support_gate_soft_safe(curve)
+    ):
+        return observed_state_v1785_no_transfer_score(curve)
+    if (
+        score.get("observedStateContinuityFallback")
+        and observed_state_continuity_fallback_floor(curve) is None
+    ):
+        return observed_state_v1785_no_transfer_score(curve)
     score["observedStateResponseLaw"] = "v17.85-transfer-hardened"
     return score
 
