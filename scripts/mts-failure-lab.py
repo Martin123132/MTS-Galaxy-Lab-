@@ -119,6 +119,8 @@ DEFAULT_OBSERVED_STATE_ROBUSTNESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-r
 DEFAULT_OBSERVED_STATE_SOFT_GATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-soft-gate-v1"
 DEFAULT_OBSERVED_STATE_SOFT_SAFE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-soft-safe-v11"
 DEFAULT_OBSERVED_STATE_FREEZE_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-freeze-audit-v12"
+DEFAULT_OBSERVED_STATE_FAMILY_RESPONSE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-family-response-v17-67"
+DEFAULT_OBSERVED_STATE_HYBRID_RESPONSE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-hybrid-response-v17-68"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -47595,6 +47597,1325 @@ def cmd_observedstatefreezeaudit(args: argparse.Namespace) -> None:
     print(f"Wrote observed state freeze audit to {out_dir.resolve()}")
 
 
+def observed_state_v1767_lowload_q(curve: dict) -> float:
+    values = observed_state_values(curve)
+    high_bulge_drive = (
+        max(0.0, values["outerBulgeShare"] - 0.04)
+        / 0.16
+        * max(0.0, values["barCurv"])
+        / 35.0
+    )
+    negative_curvature_drive = max(0.0, -values["barCurv"] - 12.0) / 45.0
+    disk_shelf_drive = (
+        max(0.0, values["uMax"] - 0.84)
+        / 0.18
+        * max(0.0, 0.30 - values["fGasOut"])
+        / 0.30
+        * max(0.0, values["barCurv"] + 25.0)
+        / 35.0
+    )
+    gas_shear_drive = (
+        max(0.0, values["fGasOut"] - 0.42)
+        / 0.25
+        * max(0.0, values["midGasShare"] - 0.22)
+        / 0.25
+        * max(0.0, values["pointDensity"] - 1.0)
+        / 1.2
+    )
+    compact_lowgas_drive = (
+        max(0.0, values["hOverRout"] - 0.24)
+        / 0.12
+        * max(0.0, 0.10 - values["fGasOut"])
+        / 0.10
+        * max(0.0, values["uOut"] - 0.36)
+        / 0.10
+    )
+    return clamp(
+        1.05
+        + 0.55 * clamp(high_bulge_drive, 0.0, 1.0)
+        + 0.30 * clamp(disk_shelf_drive, 0.0, 1.0)
+        + 0.22 * clamp(gas_shear_drive, 0.0, 1.0)
+        + 0.10 * clamp(compact_lowgas_drive, 0.0, 1.0)
+        - 0.48 * clamp(negative_curvature_drive, 0.0, 1.0),
+        0.58,
+        1.70,
+    )
+
+
+def observed_state_v1767_gas_memory_q(curve: dict) -> float:
+    values = observed_state_values(curve)
+    low_load = 1.0 if curve["lockedModelRoute"] == "low-load" else 0.0
+    density_drive = max(0.0, values["pointDensity"] - 1.0) / 1.8
+    gas_edge_drive = (
+        max(0.0, values["fGasOut"] - 0.42)
+        / 0.30
+        * max(0.0, values["midGasShare"] - 0.20)
+        / 0.30
+    )
+    l_gap_drive = max(0.0, values["LgapOverH"] - 0.55) / 2.5
+    return clamp(
+        0.76
+        + 0.30 * low_load
+        + 0.20 * clamp(gas_edge_drive, 0.0, 1.0)
+        + 0.08 * clamp(l_gap_drive, 0.0, 1.0)
+        - 0.10 * clamp(density_drive, 0.0, 1.0),
+        0.70,
+        1.28,
+    )
+
+
+def observed_state_v1767_shelf_q(curve: dict) -> float:
+    values = observed_state_values(curve)
+    disk_shear_drive = (
+        max(0.0, 4.5 - abs(values["memoryLoad"] - 3.8))
+        / 4.5
+        * max(0.0, values["outerDiskShare"] - 0.60)
+        / 0.30
+        * max(0.0, values["pointDensity"] - 0.80)
+        / 0.70
+        * max(0.0, -values["barCurv"] - 8.0)
+        / 30.0
+    )
+    gas_curvature_drive = (
+        max(0.0, -values["barCurv"] - 20.0)
+        / 55.0
+        * max(0.0, values["outerGasShare"] - 0.20)
+        / 0.35
+        * max(0.0, values["uMax"] - 1.10)
+        / 0.60
+    )
+    sparse_shelf_drive = (
+        max(0.0, values["memoryLoad"] - 6.0)
+        / 3.0
+        * max(0.0, 0.14 - values["fGasOut"])
+        / 0.14
+        * max(0.0, 1.05 - values["pointDensity"])
+        / 0.60
+    )
+    return clamp(
+        0.62
+        + 2.05 * clamp(disk_shear_drive, 0.0, 1.0)
+        + 0.42 * clamp(sparse_shelf_drive, 0.0, 1.0)
+        - 0.27 * clamp(gas_curvature_drive, 0.0, 1.0),
+        0.35,
+        2.65,
+    )
+
+
+def observed_state_v1767_q_for_curve(branch: str, curve: dict) -> float:
+    family = observed_state_branch_family(branch)
+    if family == "low-load compact curvature":
+        return observed_state_compact_boundary_q(curve)
+    if family == "low-load q-transition":
+        return observed_state_v1767_lowload_q(curve)
+    if family == "gas-memory response":
+        return observed_state_v1767_gas_memory_q(curve)
+    if family == "buffered bulge response":
+        return observed_state_buffered_bulge_q(curve)
+    if family == "buffered shelf-curvature response":
+        return observed_state_v1767_shelf_q(curve)
+    return Q_DEFAULT
+
+
+def observed_state_v1767_lowload_floor(curve: dict) -> float:
+    values = observed_state_values(curve)
+    base = observed_state_lowload_transition_floor(curve)
+    gas_edge_drive = (
+        max(0.0, values["fGasOut"] - 0.40)
+        / 0.30
+        * max(0.0, values["midGasShare"] - 0.22)
+        / 0.20
+        * max(0.0, 0.85 - values["uMax"])
+        / 0.30
+    )
+    gas_shear_drive = (
+        max(0.0, values["fGasOut"] - 0.44)
+        / 0.24
+        * max(0.0, values["pointDensity"] - 1.2)
+        / 1.0
+        * max(0.0, values["uOut"] - 0.34)
+        / 0.10
+    )
+    compact_lowgas_drive = (
+        max(0.0, values["hOverRout"] - 0.26)
+        / 0.12
+        * max(0.0, 0.10 - values["fGasOut"])
+        / 0.10
+        * max(0.0, values["uOut"] - 0.38)
+        / 0.10
+    )
+    return clamp(
+        max(
+            base,
+            1.78 + 0.42 * clamp(gas_edge_drive, 0.0, 1.0),
+            2.15 + 0.75 * clamp(gas_shear_drive, 0.0, 1.0),
+            1.95 + 0.28 * clamp(compact_lowgas_drive, 0.0, 1.0),
+        ),
+        1.70,
+        3.05,
+    )
+
+
+def observed_state_v1767_bulge_floor(curve: dict) -> float:
+    values = observed_state_values(curve)
+    dense_outer_drive = (
+        max(0.0, values["outerBulgeShare"] - 0.22)
+        / 0.25
+        * max(0.0, values["pointDensity"] - 1.2)
+        / 1.2
+        * max(0.0, 0.16 - values["outerGasShare"])
+        / 0.16
+    )
+    dominant_bulge_drive = (
+        max(0.0, values["outerBulgeShare"] - 0.48)
+        / 0.25
+        * max(0.0, 0.12 - values["fGasOut"])
+        / 0.12
+        * max(0.0, 1.25 - abs(values["uMax"] - 1.15))
+        / 1.25
+    )
+    shoulder_drive = (
+        max(0.0, values["barInnerOuter"] - 1.2)
+        / 1.2
+        * max(0.0, values["uMax"] - 1.35)
+        / 0.80
+        * max(0.0, 0.35 - values["outerBulgeShare"])
+        / 0.25
+    )
+    positive_bulge_drive = (
+        max(0.0, values["barCurv"])
+        / 55.0
+        * max(0.0, values["outerBulgeShare"] - 0.16)
+        / 0.22
+        * max(0.0, 0.75 - values["pointDensity"])
+        / 0.50
+    )
+    extreme_umax_drive = (
+        max(0.0, values["uMax"] - 2.6)
+        / 1.0
+        * max(0.0, values["uOut"] - 0.42)
+        / 0.10
+        * max(0.0, 0.22 - values["outerBulgeShare"])
+        / 0.15
+    )
+    dense_lowgas_drive = (
+        max(0.0, values["pointDensity"] - 2.0)
+        / 1.0
+        * max(0.0, 0.18 - values["fGasOut"])
+        / 0.12
+        * max(0.0, -values["barCurv"] - 12.0)
+        / 30.0
+    )
+    return clamp(
+        1.25
+        + 3.40 * clamp(dense_outer_drive, 0.0, 1.0)
+        + 1.95 * clamp(dominant_bulge_drive, 0.0, 1.0)
+        + 1.55 * clamp(shoulder_drive, 0.0, 1.0)
+        + 0.85 * clamp(positive_bulge_drive, 0.0, 1.0)
+        + 1.65 * clamp(extreme_umax_drive, 0.0, 1.0)
+        + 1.60 * clamp(dense_lowgas_drive, 0.0, 1.0),
+        1.15,
+        5.35,
+    )
+
+
+def observed_state_v1767_floor_for_curve(branch: str, curve: dict) -> float | None:
+    family = observed_state_branch_family(branch)
+    if family == "low-load compact curvature":
+        return observed_state_compact_curvature_floor(curve)
+    if family == "low-load q-transition":
+        return observed_state_v1767_lowload_floor(curve)
+    if family == "gas-memory response":
+        floor = observed_state_buffered_gas_memory_floor(curve)
+        values = observed_state_values(curve)
+        gas_shear_drive = (
+            max(0.0, values["fGasOut"] - 0.44)
+            / 0.24
+            * max(0.0, values["pointDensity"] - 1.2)
+            / 1.0
+            * max(0.0, values["midGasShare"] - 0.30)
+            / 0.25
+        )
+        return clamp(max(floor, 2.20 + 0.75 * clamp(gas_shear_drive, 0.0, 1.0)), 1.70, 3.50)
+    if family == "buffered bulge response":
+        return observed_state_v1767_bulge_floor(curve)
+    if family == "buffered shelf-curvature response":
+        return observed_state_shelf_curvature_floor(curve)
+    return None
+
+
+def observed_state_v1767_amp_cap(branch: str, curve: dict, q_value: float) -> float | None:
+    values = observed_state_values(curve)
+    if observed_state_branch_family(branch) == "buffered shelf-curvature response":
+        if q_value > 1.55:
+            return 0.60
+        if (
+            values["memoryLoad"] < 4.5
+            and 0.18 < values["outerGasShare"] < 0.32
+            and values["barCurv"] < -12.0
+            and values["uOut"] > 0.33
+        ):
+            return 1.55
+    if observed_state_branch_family(branch) == "buffered bulge response":
+        compact_outer_shear = (
+            values["memoryLoad"] > 8.5
+            and values["outerBulgeShare"] > 0.18
+            and values["uOut"] < 0.33
+            and values["hOverRout"] < 0.10
+            and values["barCurv"] > 35.0
+        )
+        if compact_outer_shear:
+            return 1.30
+    return None
+
+
+def observed_state_v1767_support_score(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    branch: str,
+    activation: float,
+    probability: float,
+    fallback_floor: float | None,
+    continuity_fallback: bool,
+    route_transition_fallback: str = "",
+) -> dict:
+    amp = observed_state_amp(state_curve, fit, amp_cap)
+    floor = observed_state_v1767_floor_for_curve(branch, state_curve)
+    if floor is not None:
+        amp = max(amp, 1.0 + activation * (floor - 1.0))
+    q_value = Q_DEFAULT + activation * (observed_state_v1767_q_for_curve(branch, state_curve) - Q_DEFAULT)
+    branch_cap = observed_state_v1767_amp_cap(branch, state_curve, q_value)
+    if branch_cap is not None:
+        amp = min(amp, 1.0 + activation * (branch_cap - 1.0))
+    safety_cap = observed_state_bulge_safety_cap(state_curve)
+    if safety_cap is not None:
+        amp = min(amp, safety_cap)
+
+    if branch == "low-load compact lowgas disk support" and activation > 0.0:
+        def support(point: dict) -> float:
+            base = 1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))
+            return GAMMA0 * curve["leff"] * base * observed_state_lowload_lowgas_zone_amp(point, activation)
+    else:
+        def support(point: dict) -> float:
+            return GAMMA0 * curve["leff"] * (1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+
+    score = score_curve_with_support(curve, support, amp, q_value)
+    score["observedStateAmp"] = amp
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = branch
+    score["observedStateFamily"] = observed_state_branch_family(branch)
+    score["observedStateSoftProbability"] = probability
+    score["observedStateSoftActivation"] = activation
+    score["observedStateContinuityFallback"] = continuity_fallback
+    score["observedStateFallbackFloor"] = fallback_floor if fallback_floor is not None else ""
+    score["observedStateRouteTransitionFallback"] = route_transition_fallback
+    return score
+
+
+def observed_state_score_curve_family_response(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    fallback_floor: float | None = None
+    continuity_fallback = False
+    over_support_persistence = False
+    if observed_state_over_support_gate_soft_safe(state_curve):
+        amp = OBSERVED_STATE_OVER_SUPPORT_AMP
+        q_value = Q_DEFAULT
+        branch = ""
+        probability = 0.0
+        activation = 0.0
+    else:
+        branch, probability, _counts = observed_state_soft_branch_probability(state_curve, soft_scale)
+        if branch and not observed_state_soft_branch_safety(branch, state_curve):
+            branch = ""
+            probability = 0.0
+        activation = observed_state_soft_activation(probability, full_threshold)
+        if branch and activation > 0.0:
+            return observed_state_v1767_support_score(
+                curve,
+                state_curve,
+                fit,
+                amp_cap,
+                branch,
+                activation,
+                probability,
+                fallback_floor,
+                continuity_fallback,
+            )
+        amp = observed_state_amp(state_curve, fit, amp_cap)
+        q_value = Q_DEFAULT
+        fallback_floor = observed_state_continuity_fallback_floor(state_curve)
+        if fallback_floor is not None:
+            amp = max(amp, fallback_floor)
+            continuity_fallback = True
+        transition_branch = observed_state_route_transition_persistence_branch(curve, state_curve)
+        if transition_branch:
+            return observed_state_v1767_support_score(
+                curve,
+                state_curve,
+                fit,
+                amp_cap,
+                transition_branch,
+                OBSERVED_STATE_ROUTE_TRANSITION_PERSISTENCE_ACTIVATION,
+                0.0,
+                fallback_floor,
+                continuity_fallback,
+                transition_branch,
+            )
+        if (
+            observed_state_over_support_gate_soft_safe(curve)
+            and curve["lockedModelRoute"] == state_curve["lockedModelRoute"] == "low-load"
+        ):
+            amp = OBSERVED_STATE_OVER_SUPPORT_AMP
+            q_value = Q_DEFAULT
+            over_support_persistence = True
+        if (
+            state_curve["lockedModelRoute"] == "low-load"
+            and fallback_floor is None
+            and not observed_state_over_support_gate_soft_safe(state_curve)
+            and not over_support_persistence
+        ):
+            amp = min(amp, 1.0)
+        safety_cap = observed_state_bulge_safety_cap(state_curve)
+        if safety_cap is not None:
+            amp = min(amp, safety_cap)
+
+    def support(point: dict) -> float:
+        return GAMMA0 * curve["leff"] * (1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+
+    score = score_curve_with_support(curve, support, amp, q_value)
+    score["observedStateAmp"] = amp
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = branch
+    score["observedStateFamily"] = ""
+    score["observedStateSoftProbability"] = probability
+    score["observedStateSoftActivation"] = activation
+    score["observedStateContinuityFallback"] = continuity_fallback
+    score["observedStateFallbackFloor"] = fallback_floor if fallback_floor is not None else ""
+    score["observedStateRouteTransitionFallback"] = "over-support-persistence" if over_support_persistence else ""
+    return score
+
+
+def observed_state_score_curve_family_response_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    if observed_state_over_support_gate_soft_safe(state_curve):
+        amp = OBSERVED_STATE_OVER_SUPPORT_AMP
+        q_value = Q_DEFAULT
+        branch = ""
+        activation = 0.0
+    elif branch and observed_state_soft_branch_safety(branch, state_curve):
+        return observed_state_v1767_support_score(
+            curve,
+            state_curve,
+            {},
+            4.5,
+            branch,
+            activation,
+            activation,
+            None,
+            False,
+        )
+    else:
+        amp = 1.0
+        q_value = Q_DEFAULT
+        if state_curve["lockedModelRoute"] == "low-load":
+            amp = min(amp, 1.0)
+        safety_cap = observed_state_bulge_safety_cap(state_curve)
+        if safety_cap is not None:
+            amp = min(amp, safety_cap)
+
+    def support(point: dict) -> float:
+        return GAMMA0 * curve["leff"] * (1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+
+    score = score_curve_with_support(curve, support, amp, q_value)
+    score["observedStateAmp"] = amp
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = branch
+    score["observedStateFamily"] = observed_state_branch_family(branch) if branch else ""
+    score["observedStateSoftActivation"] = activation
+    return score
+
+
+def observed_state_family_response_null_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> list[dict]:
+    rows: list[dict] = []
+
+    def summarize(seed: int, track: str, holdout: list[dict], scorer: Callable[[dict], dict]) -> dict:
+        paired = [(curve, score_curve(curve), scorer(curve)) for curve in holdout]
+        high_paired = [row for row in paired if row[0]["name"] in high_names]
+        protected_paired = [row for row in paired if row[0]["name"] not in high_names]
+        protected_regressions = [cand["rmse"] - base["rmse"] for _curve, base, cand in protected_paired]
+        return {
+            "seed": seed,
+            "track": track,
+            "holdoutCount": len(holdout),
+            "highHoldoutCount": len(high_paired),
+            "protectedHoldoutCount": len(protected_paired),
+            "baselineHighRmse": safe_mean(base["rmse"] for _curve, base, _cand in high_paired),
+            "candidateHighRmse": safe_mean(cand["rmse"] for _curve, _base, cand in high_paired),
+            "highGainPct": pct_improvement(
+                safe_mean(base["rmse"] for _curve, base, _cand in high_paired),
+                safe_mean(cand["rmse"] for _curve, _base, cand in high_paired),
+            ),
+            "baselineCleanRmse": safe_mean(base["rmse"] for _curve, base, _cand in paired),
+            "candidateCleanRmse": safe_mean(cand["rmse"] for _curve, _base, cand in paired),
+            "cleanGainPct": pct_improvement(
+                safe_mean(base["rmse"] for _curve, base, _cand in paired),
+                safe_mean(cand["rmse"] for _curve, _base, cand in paired),
+            ),
+            "highStillAbove20": sum(1 for _curve, _base, cand in high_paired if cand["rmse"] >= 20.0),
+            "highWorsened": sum(1 for _curve, base, cand in high_paired if cand["rmse"] > base["rmse"]),
+            "maxProtectedRegression": max(protected_regressions) if protected_regressions else 0.0,
+            "protectedRegressionCount": sum(1 for reg in protected_regressions if reg > 1e-9),
+            "activeBranchCount": sum(1 for _curve, _base, cand in paired if cand.get("observedStateBranch")),
+        }
+
+    for seed in range(SPLIT_SEED, SPLIT_SEED + 9):
+        _train_names, holdout_names = observed_state_split(clean_curves, seed, HOLDOUT_FRACTION)
+        holdout = [curve for curve in clean_curves if curve["name"] in holdout_names]
+        candidate_scores = {
+            curve["name"]: observed_state_score_curve_family_response(
+                curve,
+                curve,
+                fit,
+                amp_cap,
+                soft_scale,
+                full_threshold,
+            )
+            for curve in holdout
+        }
+        candidate_hits = [
+            (
+                curve,
+                score["observedStateBranch"],
+                parse_float(score.get("observedStateSoftActivation"), 0.0),
+            )
+            for curve in holdout
+            for score in [candidate_scores[curve["name"]]]
+            if score.get("observedStateBranch") and parse_float(score.get("observedStateSoftActivation"), 0.0) > 0.0
+        ]
+        rows.append(summarize(seed, "v17.67-family-response-candidate", holdout, lambda curve: candidate_scores[curve["name"]]))
+
+        rng = random.Random(seed + 17670)
+        shuffled_pairs = [(branch, activation) for _curve, branch, activation in candidate_hits]
+        rng.shuffle(shuffled_pairs)
+        shuffled_assignments = {
+            curve["name"]: pair for (curve, _branch, _activation), pair in zip(candidate_hits, shuffled_pairs)
+        }
+        rows.append(
+            summarize(
+                seed,
+                "branch-label-shuffle-null",
+                holdout,
+                lambda curve, assignments=shuffled_assignments: observed_state_score_curve_family_response_forced(
+                    curve,
+                    curve,
+                    assignments.get(curve["name"], ("", 0.0))[0],
+                    assignments.get(curve["name"], ("", 0.0))[1],
+                ),
+            )
+        )
+
+        rng = random.Random(seed + 27670)
+        random_assignments: dict[str, tuple[str, float]] = {}
+        for branch in sorted({branch for _curve, branch, _activation in candidate_hits}):
+            hits = [(curve, activation) for curve, hit_branch, activation in candidate_hits if hit_branch == branch]
+            route = observed_state_branch_locked_route(branch)
+            eligible = [
+                curve
+                for curve in holdout
+                if curve["lockedModelRoute"] == route and curve["name"] not in random_assignments
+            ]
+            if len(eligible) < len(hits):
+                eligible = [curve for curve in holdout if curve["name"] not in random_assignments]
+            rng.shuffle(eligible)
+            activations = [activation for _curve, activation in hits]
+            rng.shuffle(activations)
+            for curve, activation in zip(eligible[: len(hits)], activations):
+                random_assignments[curve["name"]] = (branch, activation)
+        rows.append(
+            summarize(
+                seed,
+                "same-active-count-route-random-null",
+                holdout,
+                lambda curve, assignments=random_assignments: observed_state_score_curve_family_response_forced(
+                    curve,
+                    curve,
+                    assignments.get(curve["name"], ("", 0.0))[0],
+                    assignments.get(curve["name"], ("", 0.0))[1],
+                ),
+            )
+        )
+    return rows
+
+
+def observed_state_family_response_null_summary(null_rows: list[dict]) -> dict:
+    tracks = sorted({row["track"] for row in null_rows})
+    med_high = {track: safe_median(parse_float(row["highGainPct"]) for row in null_rows if row["track"] == track) for track in tracks}
+    candidate = med_high.get("v17.67-family-response-candidate", math.nan)
+    fair_nulls = [track for track in tracks if track != "v17.67-family-response-candidate"]
+    best_null = max([med_high.get(track, math.nan) for track in fair_nulls if math.isfinite(med_high.get(track, math.nan))] or [math.nan])
+    return {
+        "medianCandidateHighGainPct": candidate,
+        "medianBranchLabelShuffleHighGainPct": med_high.get("branch-label-shuffle-null", math.nan),
+        "medianSameActiveRouteRandomHighGainPct": med_high.get("same-active-count-route-random-null", math.nan),
+        "bestNullHighGainPct": best_null,
+        "bestNullMarginPct": candidate - best_null if math.isfinite(candidate) and math.isfinite(best_null) else math.nan,
+        "maxCandidateProtectedRegression": max(
+            parse_float(row["maxProtectedRegression"])
+            for row in null_rows
+            if row["track"] == "v17.67-family-response-candidate"
+        ),
+    }
+
+
+def write_observed_state_family_response_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+
+    metrics, case_rows = observed_state_soft_gate_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_family_response,
+    )
+    variant_rows, trial_rows, protected_rows = observed_state_soft_gate_robustness_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_family_response,
+    )
+    null_rows = observed_state_family_response_null_rows(clean_curves, high_names, fit, amp_cap, soft_scale, full_threshold)
+    null_summary = observed_state_family_response_null_summary(null_rows)
+    robust_max_above20 = max(int(parse_float(row["highStillAbove20"], 0.0)) for row in variant_rows)
+    robust_max_worsened = max(int(parse_float(row["highWorsened"], 0.0)) for row in variant_rows)
+    robust_max_protected = max(parse_float(row["maxProtectedRegression"], 0.0) for row in variant_rows)
+    robust_median_high = safe_median(parse_float(row["highGainPct"]) for row in variant_rows)
+    robust_protected_failure_count = sum(1 for row in protected_rows if row["protectedFailure"])
+    null_margin = parse_float(null_summary.get("bestNullMarginPct"), math.nan)
+    accepted = (
+        metrics["highStillAbove20"] == 0
+        and metrics["highWorsened"] == 0
+        and robust_max_above20 == 0
+        and robust_max_worsened == 0
+        and robust_max_protected <= 4.0
+        and robust_protected_failure_count == 0
+        and math.isfinite(null_margin)
+        and null_margin >= 10.0
+        and metrics["highGainPct"] >= 58.0
+    )
+    verdict = "v17.67 family-response compression accepted" if accepted else "v17.67 family-response compression rejected"
+    summary = {
+        "candidateId": "observed-state-response-v17.67-family-response",
+        "formulaChanged": True,
+        "responseFamilyCount": len(OBSERVED_STATE_BRANCH_FAMILIES),
+        "stateRegionSelectorCount": len({row.get("branch", "") for row in case_rows if row.get("branch")}),
+        **metrics,
+        "robustMedianHighGainPct": robust_median_high,
+        "robustMaxAbove20": robust_max_above20,
+        "robustMaxWorsened": robust_max_worsened,
+        "robustMaxProtectedRegression": robust_max_protected,
+        "robustProtectedFailureCount": robust_protected_failure_count,
+        "medianCandidateHighGainPct": null_summary.get("medianCandidateHighGainPct", math.nan),
+        "bestNullHighGainPct": null_summary.get("bestNullHighGainPct", math.nan),
+        "bestNullMarginPct": null_summary.get("bestNullMarginPct", math.nan),
+        "verdict": verdict,
+    }
+
+    family_rows: list[dict] = []
+    for family, branches in sorted(OBSERVED_STATE_BRANCH_FAMILIES.items()):
+        family_cases = [row for row in case_rows if observed_state_branch_family(row.get("branch", "")) == family]
+        high_cases = [row for row in family_cases if row["set"] == "clean-high-rmse"]
+        protected_cases = [row for row in family_cases if row["set"] == "clean-protected"]
+        family_rows.append(
+            {
+                "family": family,
+                "activeHighCount": len(high_cases),
+                "activeProtectedCount": len(protected_cases),
+                "meanHighGainKmS": safe_mean(parse_float(row["gainKmS"]) for row in high_cases),
+                "maxProtectedRegression": max([parse_float(row.get("protectedRegression"), 0.0) for row in protected_cases] or [0.0]),
+                "branchesHit": "; ".join(sorted({row.get("branch", "") for row in family_cases if row.get("branch")})),
+            }
+        )
+
+    write_csv(out_dir / "mts_observed_state_family_response_scores.csv", [summary])
+    write_csv(out_dir / "mts_observed_state_family_response_case_ledger.csv", case_rows)
+    write_csv(out_dir / "mts_observed_state_family_response_robustness_trials.csv", trial_rows)
+    write_csv(out_dir / "mts_observed_state_family_response_variant_scores.csv", variant_rows)
+    write_csv(out_dir / "mts_observed_state_family_response_protected_regressions.csv", protected_rows)
+    write_csv(out_dir / "mts_observed_state_family_response_null_controls.csv", null_rows)
+    write_csv(out_dir / "mts_observed_state_family_response_family_ledger.csv", family_rows)
+
+    formula = {
+        "candidateId": "observed-state-response-v17.67-family-response",
+        "mechanism": "v17.66 state-region selectors with five family-level q/floor/cap response surfaces",
+        "responseFamilies": sorted(OBSERVED_STATE_BRANCH_FAMILIES),
+        "stateRegionSelectorsRetained": True,
+        "branchSpecificResponseValuesRemoved": True,
+        "softScale": soft_scale,
+        "fullActivationThreshold": full_threshold,
+        "canonicalMtsChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics galaxies"],
+    }
+    (out_dir / "mts_observed_state_family_response_formula.json").write_text(
+        json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8"
+    )
+    worst_high = sorted(
+        [row for row in case_rows if row["set"] == "clean-high-rmse"],
+        key=lambda item: -parse_float(item["candidateRmse"]),
+    )[:12]
+    report = [
+        "# MTS v17.67 Family-Response Compression",
+        "",
+        "This is a real scoring candidate. It keeps the v17.66 state-region selectors, but replaces branch-specific response values with five family-level q/floor/cap surfaces.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Nominal high-RMSE gain: `{fmt(summary['highGainPct'])}%`.",
+        f"- Robust median high-RMSE gain: `{fmt(summary['robustMedianHighGainPct'])}%`.",
+        f"- Robust above-20 count: `{summary['robustMaxAbove20']}`.",
+        f"- Robust max protected regression: `{fmt(summary['robustMaxProtectedRegression'])} km/s`.",
+        f"- Protected failures: `{summary['robustProtectedFailureCount']}`.",
+        f"- Best null high-RMSE gain: `{fmt(summary['bestNullHighGainPct'])}%`.",
+        f"- Null margin: `{fmt(summary['bestNullMarginPct'])}` points.",
+        "",
+        "## Worst High-RMSE Cases",
+        "",
+    ]
+    for row in worst_high:
+        report.append(
+            f"- `{row['galaxy']}`: baseline `{fmt(row['baselineRmse'])}`, candidate `{fmt(row['candidateRmse'])}`, branch `{row['branch'] or row['routeTransitionFallback'] or 'none'}`."
+        )
+    report.extend(["", "## Family Ledger", ""])
+    for row in family_rows:
+        report.append(
+            f"- `{row['family']}`: high hits `{row['activeHighCount']}`, protected hits `{row['activeProtectedCount']}`, mean high gain `{fmt(row['meanHighGainKmS'])} km/s`."
+        )
+    (out_dir / "mts_observed_state_family_response_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-state-family-response-v17-67",
+        "candidateId": "observed-state-response-v17.67-family-response",
+        "verdict": verdict,
+        "summary": summary,
+        "formula": formula,
+        "nullSummary": null_summary,
+        "outputFiles": [
+            "mts_observed_state_family_response_scores.csv",
+            "mts_observed_state_family_response_case_ledger.csv",
+            "mts_observed_state_family_response_robustness_trials.csv",
+            "mts_observed_state_family_response_variant_scores.csv",
+            "mts_observed_state_family_response_protected_regressions.csv",
+            "mts_observed_state_family_response_null_controls.csv",
+            "mts_observed_state_family_response_family_ledger.csv",
+            "mts_observed_state_family_response_formula.json",
+            "mts_observed_state_family_response_report.md",
+            "mts_observed_state_family_response_capsule.json",
+        ],
+    }
+    (out_dir / "mts_observed_state_family_response_capsule.json").write_text(
+        json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8"
+    )
+    return capsule
+
+
+def cmd_observedstatefamilyresponse(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_FAMILY_RESPONSE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_family_response_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v17.67 family-response compression")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"nominal_high={fmt(summary['highGainPct'])}%",
+                f"robust_high={fmt(summary['robustMedianHighGainPct'])}%",
+                f"robust_above20={summary['robustMaxAbove20']}",
+                f"protected_fail={summary['robustProtectedFailureCount']}",
+                f"max_protected={fmt(summary['robustMaxProtectedRegression'])}",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote observed state family response to {out_dir.resolve()}")
+
+
+OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE = {
+    "buffered bulge-disk high-uout edge",
+    "buffered bulge-disk shoulder",
+    "buffered compact lowgas shelf",
+    "buffered dense lowgas disk curvature",
+    "buffered dense-bulge high-umax shoulder",
+    "buffered disk-shear high-q shape",
+    "buffered dominant-bulge lift",
+    "buffered gas-bulge route-safe ridge",
+    "buffered gas-curvature",
+    "buffered positive-bulge shoulder",
+    "buffered sparse-stellar shelf",
+    "compact low-load transition",
+    "dense-bulge outer",
+    "dense positive-bulge buffered",
+    "low-load compact bulge-shear edge",
+    "low-load disk-shelf transition",
+    "low-load gas-envelope support",
+}
+
+
+def observed_state_v1768_q_for_curve(branch: str, curve: dict) -> float:
+    if branch in OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE:
+        return observed_state_branch_q_for_curve(branch, curve)
+    return observed_state_v1767_q_for_curve(branch, curve)
+
+
+def observed_state_v1768_floor_for_curve(branch: str, curve: dict) -> float | None:
+    if branch in OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE:
+        return observed_state_branch_amp_floor_for_curve(branch, curve)
+    return observed_state_v1767_floor_for_curve(branch, curve)
+
+
+def observed_state_v1768_amp_cap(branch: str, curve: dict, q_value: float) -> float | None:
+    if branch in OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE:
+        return observed_state_branch_amp_cap(branch)
+    return observed_state_v1767_amp_cap(branch, curve, q_value)
+
+
+def observed_state_v1768_support_score(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    branch: str,
+    activation: float,
+    probability: float,
+    fallback_floor: float | None,
+    continuity_fallback: bool,
+    route_transition_fallback: str = "",
+) -> dict:
+    amp = observed_state_amp(state_curve, fit, amp_cap)
+    floor = observed_state_v1768_floor_for_curve(branch, state_curve)
+    if floor is not None:
+        amp = max(amp, 1.0 + activation * (floor - 1.0))
+    q_value = Q_DEFAULT + activation * (observed_state_v1768_q_for_curve(branch, state_curve) - Q_DEFAULT)
+    branch_cap = observed_state_v1768_amp_cap(branch, state_curve, q_value)
+    if branch_cap is not None:
+        amp = min(amp, 1.0 + activation * (branch_cap - 1.0))
+    safety_cap = observed_state_bulge_safety_cap(state_curve)
+    if safety_cap is not None:
+        amp = min(amp, safety_cap)
+
+    if branch == "low-load compact lowgas disk support" and activation > 0.0:
+        def support(point: dict) -> float:
+            base = 1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))
+            return GAMMA0 * curve["leff"] * base * observed_state_lowload_lowgas_zone_amp(point, activation)
+    else:
+        def support(point: dict) -> float:
+            return GAMMA0 * curve["leff"] * (1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+
+    score = score_curve_with_support(curve, support, amp, q_value)
+    score["observedStateAmp"] = amp
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = branch
+    score["observedStateFamily"] = observed_state_branch_family(branch)
+    score["observedStateResponseSource"] = "branch-spine" if branch in OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE else "family-surface"
+    score["observedStateSoftProbability"] = probability
+    score["observedStateSoftActivation"] = activation
+    score["observedStateContinuityFallback"] = continuity_fallback
+    score["observedStateFallbackFloor"] = fallback_floor if fallback_floor is not None else ""
+    score["observedStateRouteTransitionFallback"] = route_transition_fallback
+    return score
+
+
+def observed_state_score_curve_hybrid_response(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    fallback_floor: float | None = None
+    continuity_fallback = False
+    over_support_persistence = False
+    if observed_state_over_support_gate_soft_safe(state_curve):
+        amp = OBSERVED_STATE_OVER_SUPPORT_AMP
+        q_value = Q_DEFAULT
+        branch = ""
+        probability = 0.0
+        activation = 0.0
+    else:
+        branch, probability, _counts = observed_state_soft_branch_probability(state_curve, soft_scale)
+        if branch and not observed_state_soft_branch_safety(branch, state_curve):
+            branch = ""
+            probability = 0.0
+        activation = observed_state_soft_activation(probability, full_threshold)
+        if branch and activation > 0.0:
+            return observed_state_v1768_support_score(
+                curve,
+                state_curve,
+                fit,
+                amp_cap,
+                branch,
+                activation,
+                probability,
+                fallback_floor,
+                continuity_fallback,
+            )
+        amp = observed_state_amp(state_curve, fit, amp_cap)
+        q_value = Q_DEFAULT
+        fallback_floor = observed_state_continuity_fallback_floor(state_curve)
+        if fallback_floor is not None:
+            amp = max(amp, fallback_floor)
+            continuity_fallback = True
+        transition_branch = observed_state_route_transition_persistence_branch(curve, state_curve)
+        if transition_branch:
+            return observed_state_v1768_support_score(
+                curve,
+                state_curve,
+                fit,
+                amp_cap,
+                transition_branch,
+                OBSERVED_STATE_ROUTE_TRANSITION_PERSISTENCE_ACTIVATION,
+                0.0,
+                fallback_floor,
+                continuity_fallback,
+                transition_branch,
+            )
+        if (
+            observed_state_over_support_gate_soft_safe(curve)
+            and curve["lockedModelRoute"] == state_curve["lockedModelRoute"] == "low-load"
+        ):
+            amp = OBSERVED_STATE_OVER_SUPPORT_AMP
+            q_value = Q_DEFAULT
+            over_support_persistence = True
+        if (
+            state_curve["lockedModelRoute"] == "low-load"
+            and fallback_floor is None
+            and not observed_state_over_support_gate_soft_safe(state_curve)
+            and not over_support_persistence
+        ):
+            amp = min(amp, 1.0)
+        safety_cap = observed_state_bulge_safety_cap(state_curve)
+        if safety_cap is not None:
+            amp = min(amp, safety_cap)
+
+    def support(point: dict) -> float:
+        return GAMMA0 * curve["leff"] * (1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+
+    score = score_curve_with_support(curve, support, amp, q_value)
+    score["observedStateAmp"] = amp
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = branch
+    score["observedStateFamily"] = ""
+    score["observedStateResponseSource"] = ""
+    score["observedStateSoftProbability"] = probability
+    score["observedStateSoftActivation"] = activation
+    score["observedStateContinuityFallback"] = continuity_fallback
+    score["observedStateFallbackFloor"] = fallback_floor if fallback_floor is not None else ""
+    score["observedStateRouteTransitionFallback"] = "over-support-persistence" if over_support_persistence else ""
+    return score
+
+
+def observed_state_score_curve_hybrid_response_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    if observed_state_over_support_gate_soft_safe(state_curve):
+        amp = OBSERVED_STATE_OVER_SUPPORT_AMP
+        q_value = Q_DEFAULT
+        branch = ""
+        activation = 0.0
+    elif branch and observed_state_soft_branch_safety(branch, state_curve):
+        return observed_state_v1768_support_score(
+            curve,
+            state_curve,
+            {},
+            4.5,
+            branch,
+            activation,
+            activation,
+            None,
+            False,
+        )
+    else:
+        amp = 1.0
+        q_value = Q_DEFAULT
+        if state_curve["lockedModelRoute"] == "low-load":
+            amp = min(amp, 1.0)
+        safety_cap = observed_state_bulge_safety_cap(state_curve)
+        if safety_cap is not None:
+            amp = min(amp, safety_cap)
+
+    def support(point: dict) -> float:
+        return GAMMA0 * curve["leff"] * (1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+
+    score = score_curve_with_support(curve, support, amp, q_value)
+    score["observedStateAmp"] = amp
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = branch
+    score["observedStateFamily"] = observed_state_branch_family(branch) if branch else ""
+    score["observedStateResponseSource"] = "branch-spine" if branch in OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE else "family-surface"
+    score["observedStateSoftActivation"] = activation
+    return score
+
+
+def observed_state_hybrid_response_null_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> list[dict]:
+    rows: list[dict] = []
+
+    def summarize(seed: int, track: str, holdout: list[dict], scorer: Callable[[dict], dict]) -> dict:
+        paired = [(curve, score_curve(curve), scorer(curve)) for curve in holdout]
+        high_paired = [row for row in paired if row[0]["name"] in high_names]
+        protected_paired = [row for row in paired if row[0]["name"] not in high_names]
+        protected_regressions = [cand["rmse"] - base["rmse"] for _curve, base, cand in protected_paired]
+        return {
+            "seed": seed,
+            "track": track,
+            "holdoutCount": len(holdout),
+            "highHoldoutCount": len(high_paired),
+            "protectedHoldoutCount": len(protected_paired),
+            "baselineHighRmse": safe_mean(base["rmse"] for _curve, base, _cand in high_paired),
+            "candidateHighRmse": safe_mean(cand["rmse"] for _curve, _base, cand in high_paired),
+            "highGainPct": pct_improvement(
+                safe_mean(base["rmse"] for _curve, base, _cand in high_paired),
+                safe_mean(cand["rmse"] for _curve, _base, cand in high_paired),
+            ),
+            "baselineCleanRmse": safe_mean(base["rmse"] for _curve, base, _cand in paired),
+            "candidateCleanRmse": safe_mean(cand["rmse"] for _curve, _base, cand in paired),
+            "cleanGainPct": pct_improvement(
+                safe_mean(base["rmse"] for _curve, base, _cand in paired),
+                safe_mean(cand["rmse"] for _curve, _base, cand in paired),
+            ),
+            "highStillAbove20": sum(1 for _curve, _base, cand in high_paired if cand["rmse"] >= 20.0),
+            "highWorsened": sum(1 for _curve, base, cand in high_paired if cand["rmse"] > base["rmse"]),
+            "maxProtectedRegression": max(protected_regressions) if protected_regressions else 0.0,
+            "protectedRegressionCount": sum(1 for reg in protected_regressions if reg > 1e-9),
+            "activeBranchCount": sum(1 for _curve, _base, cand in paired if cand.get("observedStateBranch")),
+        }
+
+    for seed in range(SPLIT_SEED, SPLIT_SEED + 9):
+        _train_names, holdout_names = observed_state_split(clean_curves, seed, HOLDOUT_FRACTION)
+        holdout = [curve for curve in clean_curves if curve["name"] in holdout_names]
+        candidate_scores = {
+            curve["name"]: observed_state_score_curve_hybrid_response(
+                curve,
+                curve,
+                fit,
+                amp_cap,
+                soft_scale,
+                full_threshold,
+            )
+            for curve in holdout
+        }
+        candidate_hits = [
+            (
+                curve,
+                score["observedStateBranch"],
+                parse_float(score.get("observedStateSoftActivation"), 0.0),
+            )
+            for curve in holdout
+            for score in [candidate_scores[curve["name"]]]
+            if score.get("observedStateBranch") and parse_float(score.get("observedStateSoftActivation"), 0.0) > 0.0
+        ]
+        rows.append(summarize(seed, "v17.68-hybrid-response-candidate", holdout, lambda curve: candidate_scores[curve["name"]]))
+
+        rng = random.Random(seed + 17680)
+        shuffled_pairs = [(branch, activation) for _curve, branch, activation in candidate_hits]
+        rng.shuffle(shuffled_pairs)
+        shuffled_assignments = {
+            curve["name"]: pair for (curve, _branch, _activation), pair in zip(candidate_hits, shuffled_pairs)
+        }
+        rows.append(
+            summarize(
+                seed,
+                "branch-label-shuffle-null",
+                holdout,
+                lambda curve, assignments=shuffled_assignments: observed_state_score_curve_hybrid_response_forced(
+                    curve,
+                    curve,
+                    assignments.get(curve["name"], ("", 0.0))[0],
+                    assignments.get(curve["name"], ("", 0.0))[1],
+                ),
+            )
+        )
+
+        rng = random.Random(seed + 27680)
+        random_assignments: dict[str, tuple[str, float]] = {}
+        for branch in sorted({branch for _curve, branch, _activation in candidate_hits}):
+            hits = [(curve, activation) for curve, hit_branch, activation in candidate_hits if hit_branch == branch]
+            route = observed_state_branch_locked_route(branch)
+            eligible = [
+                curve
+                for curve in holdout
+                if curve["lockedModelRoute"] == route and curve["name"] not in random_assignments
+            ]
+            if len(eligible) < len(hits):
+                eligible = [curve for curve in holdout if curve["name"] not in random_assignments]
+            rng.shuffle(eligible)
+            activations = [activation for _curve, activation in hits]
+            rng.shuffle(activations)
+            for curve, activation in zip(eligible[: len(hits)], activations):
+                random_assignments[curve["name"]] = (branch, activation)
+        rows.append(
+            summarize(
+                seed,
+                "same-active-count-route-random-null",
+                holdout,
+                lambda curve, assignments=random_assignments: observed_state_score_curve_hybrid_response_forced(
+                    curve,
+                    curve,
+                    assignments.get(curve["name"], ("", 0.0))[0],
+                    assignments.get(curve["name"], ("", 0.0))[1],
+                ),
+            )
+        )
+    return rows
+
+
+def observed_state_hybrid_response_null_summary(null_rows: list[dict]) -> dict:
+    tracks = sorted({row["track"] for row in null_rows})
+    med_high = {track: safe_median(parse_float(row["highGainPct"]) for row in null_rows if row["track"] == track) for track in tracks}
+    candidate = med_high.get("v17.68-hybrid-response-candidate", math.nan)
+    fair_nulls = [track for track in tracks if track != "v17.68-hybrid-response-candidate"]
+    best_null = max([med_high.get(track, math.nan) for track in fair_nulls if math.isfinite(med_high.get(track, math.nan))] or [math.nan])
+    return {
+        "medianCandidateHighGainPct": candidate,
+        "medianBranchLabelShuffleHighGainPct": med_high.get("branch-label-shuffle-null", math.nan),
+        "medianSameActiveRouteRandomHighGainPct": med_high.get("same-active-count-route-random-null", math.nan),
+        "bestNullHighGainPct": best_null,
+        "bestNullMarginPct": candidate - best_null if math.isfinite(candidate) and math.isfinite(best_null) else math.nan,
+        "maxCandidateProtectedRegression": max(
+            parse_float(row["maxProtectedRegression"])
+            for row in null_rows
+            if row["track"] == "v17.68-hybrid-response-candidate"
+        ),
+    }
+
+
+def write_observed_state_hybrid_response_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+
+    metrics, case_rows = observed_state_soft_gate_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_hybrid_response,
+    )
+    variant_rows, trial_rows, protected_rows = observed_state_soft_gate_robustness_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_hybrid_response,
+    )
+    null_rows = observed_state_hybrid_response_null_rows(clean_curves, high_names, fit, amp_cap, soft_scale, full_threshold)
+    null_summary = observed_state_hybrid_response_null_summary(null_rows)
+    robust_max_above20 = max(int(parse_float(row["highStillAbove20"], 0.0)) for row in variant_rows)
+    robust_max_worsened = max(int(parse_float(row["highWorsened"], 0.0)) for row in variant_rows)
+    robust_max_protected = max(parse_float(row["maxProtectedRegression"], 0.0) for row in variant_rows)
+    robust_median_high = safe_median(parse_float(row["highGainPct"]) for row in variant_rows)
+    robust_protected_failure_count = sum(1 for row in protected_rows if row["protectedFailure"])
+    null_margin = parse_float(null_summary.get("bestNullMarginPct"), math.nan)
+    accepted = (
+        metrics["highStillAbove20"] == 0
+        and metrics["highWorsened"] == 0
+        and robust_max_above20 == 0
+        and robust_max_worsened == 0
+        and robust_max_protected <= 4.0
+        and robust_protected_failure_count == 0
+        and math.isfinite(null_margin)
+        and null_margin >= 10.0
+        and metrics["highGainPct"] >= 60.0
+    )
+    verdict = "v17.68 hybrid-response compression accepted" if accepted else "v17.68 hybrid-response compression rejected"
+    summary = {
+        "candidateId": "observed-state-response-v17.68-hybrid-response",
+        "formulaChanged": True,
+        "branchSpecificResponseCount": len(OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE),
+        "familySurfaceCount": len(OBSERVED_STATE_BRANCH_FAMILIES),
+        "stateRegionSelectorCount": len({row.get("branch", "") for row in case_rows if row.get("branch")}),
+        **metrics,
+        "robustMedianHighGainPct": robust_median_high,
+        "robustMaxAbove20": robust_max_above20,
+        "robustMaxWorsened": robust_max_worsened,
+        "robustMaxProtectedRegression": robust_max_protected,
+        "robustProtectedFailureCount": robust_protected_failure_count,
+        "medianCandidateHighGainPct": null_summary.get("medianCandidateHighGainPct", math.nan),
+        "bestNullHighGainPct": null_summary.get("bestNullHighGainPct", math.nan),
+        "bestNullMarginPct": null_summary.get("bestNullMarginPct", math.nan),
+        "verdict": verdict,
+    }
+
+    family_rows: list[dict] = []
+    for family, branches in sorted(OBSERVED_STATE_BRANCH_FAMILIES.items()):
+        family_cases = [row for row in case_rows if observed_state_branch_family(row.get("branch", "")) == family]
+        high_cases = [row for row in family_cases if row["set"] == "clean-high-rmse"]
+        protected_cases = [row for row in family_cases if row["set"] == "clean-protected"]
+        family_rows.append(
+            {
+                "family": family,
+                "activeHighCount": len(high_cases),
+                "activeProtectedCount": len(protected_cases),
+                "branchSpineHits": sum(1 for row in family_cases if row.get("branch") in OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE),
+                "familySurfaceHits": sum(1 for row in family_cases if row.get("branch") not in OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE),
+                "meanHighGainKmS": safe_mean(parse_float(row["gainKmS"]) for row in high_cases),
+                "maxProtectedRegression": max([parse_float(row.get("protectedRegression"), 0.0) for row in protected_cases] or [0.0]),
+                "branchesHit": "; ".join(sorted({row.get("branch", "") for row in family_cases if row.get("branch")})),
+            }
+        )
+
+    write_csv(out_dir / "mts_observed_state_hybrid_response_scores.csv", [summary])
+    write_csv(out_dir / "mts_observed_state_hybrid_response_case_ledger.csv", case_rows)
+    write_csv(out_dir / "mts_observed_state_hybrid_response_robustness_trials.csv", trial_rows)
+    write_csv(out_dir / "mts_observed_state_hybrid_response_variant_scores.csv", variant_rows)
+    write_csv(out_dir / "mts_observed_state_hybrid_response_protected_regressions.csv", protected_rows)
+    write_csv(out_dir / "mts_observed_state_hybrid_response_null_controls.csv", null_rows)
+    write_csv(out_dir / "mts_observed_state_hybrid_response_family_ledger.csv", family_rows)
+
+    formula = {
+        "candidateId": "observed-state-response-v17.68-hybrid-response",
+        "mechanism": "v17.66 state selectors with branch-specific response retained only for essential spine branches and family surfaces elsewhere",
+        "branchSpecificResponseSpine": sorted(OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE),
+        "familyResponseSurfaces": sorted(OBSERVED_STATE_BRANCH_FAMILIES),
+        "softScale": soft_scale,
+        "fullActivationThreshold": full_threshold,
+        "canonicalMtsChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics galaxies"],
+    }
+    (out_dir / "mts_observed_state_hybrid_response_formula.json").write_text(
+        json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8"
+    )
+    worst_high = sorted(
+        [row for row in case_rows if row["set"] == "clean-high-rmse"],
+        key=lambda item: -parse_float(item["candidateRmse"]),
+    )[:12]
+    report = [
+        "# MTS v17.68 Hybrid-Response Compression",
+        "",
+        "This is a real scoring candidate. It keeps branch-specific response only for the essential v17.66 spine and uses family-level response surfaces for the remaining state regions.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Branch-specific response spine: `{len(OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE)}` branches.",
+        f"- Nominal high-RMSE gain: `{fmt(summary['highGainPct'])}%`.",
+        f"- Robust median high-RMSE gain: `{fmt(summary['robustMedianHighGainPct'])}%`.",
+        f"- Robust above-20 count: `{summary['robustMaxAbove20']}`.",
+        f"- Robust max protected regression: `{fmt(summary['robustMaxProtectedRegression'])} km/s`.",
+        f"- Protected failures: `{summary['robustProtectedFailureCount']}`.",
+        f"- Best null high-RMSE gain: `{fmt(summary['bestNullHighGainPct'])}%`.",
+        f"- Null margin: `{fmt(summary['bestNullMarginPct'])}` points.",
+        "",
+        "## Worst High-RMSE Cases",
+        "",
+    ]
+    for row in worst_high:
+        report.append(
+            f"- `{row['galaxy']}`: baseline `{fmt(row['baselineRmse'])}`, candidate `{fmt(row['candidateRmse'])}`, branch `{row['branch'] or row['routeTransitionFallback'] or 'none'}`."
+        )
+    report.extend(["", "## Family Ledger", ""])
+    for row in family_rows:
+        report.append(
+            f"- `{row['family']}`: high hits `{row['activeHighCount']}`, spine hits `{row['branchSpineHits']}`, family-surface hits `{row['familySurfaceHits']}`, mean high gain `{fmt(row['meanHighGainKmS'])} km/s`."
+        )
+    (out_dir / "mts_observed_state_hybrid_response_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-state-hybrid-response-v17-68",
+        "candidateId": "observed-state-response-v17.68-hybrid-response",
+        "verdict": verdict,
+        "summary": summary,
+        "formula": formula,
+        "nullSummary": null_summary,
+        "outputFiles": [
+            "mts_observed_state_hybrid_response_scores.csv",
+            "mts_observed_state_hybrid_response_case_ledger.csv",
+            "mts_observed_state_hybrid_response_robustness_trials.csv",
+            "mts_observed_state_hybrid_response_variant_scores.csv",
+            "mts_observed_state_hybrid_response_protected_regressions.csv",
+            "mts_observed_state_hybrid_response_null_controls.csv",
+            "mts_observed_state_hybrid_response_family_ledger.csv",
+            "mts_observed_state_hybrid_response_formula.json",
+            "mts_observed_state_hybrid_response_report.md",
+            "mts_observed_state_hybrid_response_capsule.json",
+        ],
+    }
+    (out_dir / "mts_observed_state_hybrid_response_capsule.json").write_text(
+        json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8"
+    )
+    return capsule
+
+
+def cmd_observedstatehybridresponse(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_HYBRID_RESPONSE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_hybrid_response_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v17.68 hybrid-response compression")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"nominal_high={fmt(summary['highGainPct'])}%",
+                f"robust_high={fmt(summary['robustMedianHighGainPct'])}%",
+                f"robust_above20={summary['robustMaxAbove20']}",
+                f"protected_fail={summary['robustProtectedFailureCount']}",
+                f"max_protected={fmt(summary['robustMaxProtectedRegression'])}",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote observed state hybrid response to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -47678,6 +48999,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
+            "observedstatefamilyresponse",
+            "observedstatehybridresponse",
         ],
         default="baseline",
     )
@@ -47853,6 +49176,10 @@ def main() -> None:
         cmd_observedstatesoftsafe(args)
     elif args.mode == "observedstatefreezeaudit":
         cmd_observedstatefreezeaudit(args)
+    elif args.mode == "observedstatefamilyresponse":
+        cmd_observedstatefamilyresponse(args)
+    elif args.mode == "observedstatehybridresponse":
+        cmd_observedstatehybridresponse(args)
 
 
 if __name__ == "__main__":
