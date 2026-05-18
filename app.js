@@ -12,7 +12,7 @@
     qDefault: 0.77
   };
 
-  var V17STATE_EXACT_TOKEN = "__MTS_V17_83_TAIL_LIFT__";
+  var V17STATE_EXACT_TOKEN = "__MTS_V17_84_COMPACT_MEMORY_Q__";
 
   var FRAMEWORK_PRESETS = {
     mts: "gamma0 * leff * (1 - exp(-pow(r / leff, q)))",
@@ -25,7 +25,7 @@
 
   var FRAMEWORK_PRESET_LABELS = {
     mts: "MTS baseline",
-    v17state: "MTS v17.83 tail lift",
+    v17state: "MTS v17.84 compact memory-q",
     baryon: "Baryon only",
     soft: "Soft radial support",
     outer: "Outer gate support",
@@ -1851,7 +1851,7 @@
   }
 
   function v17ExactCacheEntry(curve) {
-    var cache = window.MTS_V17_83_SUPPORT_CACHE;
+    var cache = window.MTS_V17_84_SUPPORT_CACHE;
     if (!cache || !cache.curves || !curve || !curve.name) return null;
     return cache.curves[curve.name] || null;
   }

@@ -136,6 +136,7 @@ DEFAULT_OBSERVED_STATE_TAIL_POLISH_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-
 DEFAULT_OBSERVED_STATE_BRANCH_NULL_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-branch-null-harden-v17-81"
 DEFAULT_OBSERVED_STATE_PROTECTION_CAP_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-protection-cap-v17-82"
 DEFAULT_OBSERVED_STATE_TAIL_LIFT_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-tail-lift-v17-83"
+DEFAULT_OBSERVED_STATE_COMPACT_MEMORY_Q_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-compact-memory-q-v17-84"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -50766,6 +50767,62 @@ def observed_state_score_curve_tail_lift_law_forced(
     return observed_state_v1783_apply_tail_lift(curve, old, branch)
 
 
+def observed_state_v1784_compact_memory_q_pass(branch: str, curve: dict) -> bool:
+    values = observed_state_values(curve)
+    return (
+        branch == "compact low-load transition"
+        and curve["lockedModelRoute"] == "low-load"
+        and values["memoryLoad"] > 6.0
+        and values["uMax"] < 0.82
+        and values["pointDensity"] < 0.45
+        and values["outerBulgeShare"] < 0.02
+        and values["outerDiskShare"] > 0.65
+    )
+
+
+def observed_state_v1784_apply_compact_memory_q(curve: dict, old_score: dict, branch: str) -> dict:
+    if not observed_state_v1784_compact_memory_q_pass(branch, curve):
+        return old_score
+    old_amp = parse_float(old_score.get("observedStateAmp", old_score.get("amp")), 2.0)
+    amp = clamp(old_amp - 0.10, 1.70, 2.70)
+    q_value = 0.10
+    score = score_curve_with_params(curve, amp, q_value)
+    score["observedStateAmp"] = amp
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = branch
+    score["observedStateFamily"] = observed_state_branch_family(branch)
+    score["observedStateResponseSource"] = "v17.84-compact-lowload-inner-memory-q"
+    score["observedStateSoftProbability"] = old_score.get("observedStateSoftProbability", 1.0)
+    score["observedStateSoftActivation"] = old_score.get("observedStateSoftActivation", 1.0)
+    score["observedStateContinuityFallback"] = False
+    score["observedStateFallbackFloor"] = ""
+    score["observedStateRouteTransitionFallback"] = ""
+    return score
+
+
+def observed_state_score_curve_compact_memory_q_law(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    old = observed_state_score_curve_tail_lift_law(curve, state_curve, fit, amp_cap, soft_scale, full_threshold)
+    branch = old.get("observedStateBranch", "")
+    return observed_state_v1784_apply_compact_memory_q(curve, old, branch)
+
+
+def observed_state_score_curve_compact_memory_q_law_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    old = observed_state_score_curve_tail_lift_law_forced(curve, state_curve, branch, activation)
+    return observed_state_v1784_apply_compact_memory_q(curve, old, branch)
+
+
 def observed_state_law_freeze_case_rows(
     clean_curves: list[dict],
     high_names: set[str],
@@ -55185,6 +55242,284 @@ def write_observed_state_tail_lift_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def write_observed_state_compact_memory_q_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+
+    metrics, _case_rows_from_eval = observed_state_soft_gate_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_compact_memory_q_law,
+    )
+    previous_metrics, _previous_case_rows = observed_state_soft_gate_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_tail_lift_law,
+    )
+    case_rows = observed_state_law_freeze_case_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_compact_memory_q_law,
+    )
+    seed_rows = observed_state_law_freeze_seed_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_compact_memory_q_law,
+        observed_state_score_curve_compact_memory_q_law_forced,
+        "v17.84-compact-memory-q",
+    )
+    branch_rows = observed_state_law_freeze_branch_null_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_compact_memory_q_law,
+        observed_state_score_curve_compact_memory_q_law_forced,
+    )
+    ablation_rows = observed_state_law_freeze_ablation_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_compact_memory_q_law,
+    )
+    protected_stress_rows = observed_state_law_freeze_protected_stress_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_compact_memory_q_law,
+        observed_state_score_curve_compact_memory_q_law_forced,
+    )
+    previous_stress_rows = observed_state_law_freeze_protected_stress_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_tail_lift_law,
+        observed_state_score_curve_tail_lift_law_forced,
+    )
+
+    candidate_seed_rows = [row for row in seed_rows if row["track"] == "v17.84-compact-memory-q"]
+    null_seed_rows = [row for row in seed_rows if row["track"] != "v17.84-compact-memory-q"]
+    median_candidate_high = safe_median(parse_float(row["highGainPct"]) for row in candidate_seed_rows)
+    median_candidate_clean = safe_median(parse_float(row["cleanGainPct"]) for row in candidate_seed_rows)
+    median_nulls = {
+        track: safe_median(parse_float(row["highGainPct"]) for row in null_seed_rows if row["track"] == track)
+        for track in sorted({row["track"] for row in null_seed_rows})
+    }
+    best_null = max([value for value in median_nulls.values() if math.isfinite(value)] or [math.nan])
+    null_margin = median_candidate_high - best_null if math.isfinite(median_candidate_high) and math.isfinite(best_null) else math.nan
+    max_seed_protected = max([parse_float(row["maxProtectedRegression"], 0.0) for row in candidate_seed_rows] or [0.0])
+    max_seed_branch_protected = max(
+        [parse_float(row["maxProtectedBranchHitRegression"], 0.0) for row in candidate_seed_rows] or [0.0]
+    )
+    max_above20 = max([int(parse_float(row["highStillAbove20"], 0.0)) for row in candidate_seed_rows] or [0])
+    max_worsened = max([int(parse_float(row["highWorsened"], 0.0)) for row in candidate_seed_rows] or [0])
+    max_stress = max([parse_float(row["stressRegressionKmS"], 0.0) for row in protected_stress_rows] or [0.0])
+    previous_max_stress = max([parse_float(row["stressRegressionKmS"], 0.0) for row in previous_stress_rows] or [0.0])
+    stress_delta = max_stress - previous_max_stress
+
+    changed_cases = []
+    for curve in clean_curves:
+        baseline = score_curve(curve)
+        old = observed_state_score_curve_tail_lift_law(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        new = observed_state_score_curve_compact_memory_q_law(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        delta = new["rmse"] - old["rmse"]
+        if abs(delta) > 1e-9:
+            changed_cases.append(
+                {
+                    "galaxy": curve["name"],
+                    "set": "clean-high-rmse" if curve["name"] in high_names else "clean-protected",
+                    "baselineRmse": baseline["rmse"],
+                    "v1783Rmse": old["rmse"],
+                    "v1784Rmse": new["rmse"],
+                    "deltaVsV1783": delta,
+                    "branch": new.get("observedStateBranch", ""),
+                    "responseSource": new.get("observedStateResponseSource", ""),
+                    "candidateRoute": new.get("candidateRoute", ""),
+                }
+            )
+    changed_high = [row for row in changed_cases if row["set"] == "clean-high-rmse"]
+    changed_protected = [row for row in changed_cases if row["set"] == "clean-protected"]
+    high_improvement = sum(-min(0.0, parse_float(row["deltaVsV1783"])) for row in changed_high)
+    protected_worsening = max([parse_float(row["deltaVsV1783"]) for row in changed_protected] or [0.0])
+
+    accepted = (
+        metrics["highGainPct"] >= 68.0
+        and metrics["cleanGainPct"] >= 43.5
+        and median_candidate_high >= 67.0
+        and median_candidate_clean >= 44.5
+        and max_seed_protected < 4.0
+        and max_seed_branch_protected < 3.0
+        and max_above20 == 0
+        and max_worsened == 0
+        and math.isfinite(null_margin)
+        and null_margin >= 12.0
+        and max_stress < 1.0
+        and protected_worsening < 1.0
+        and high_improvement >= 15.0
+    )
+    verdict = "v17.84 compact memory-q accepted" if accepted else "v17.84 compact memory-q failed gates"
+    summary = {
+        "candidateId": "observed-state-response-v17.84-compact-memory-q",
+        "formulaChanged": True,
+        "baseCandidate": "observed-state-response-v17.83-tail-lift",
+        "lawChange": "add compact low-load inner-memory q surface for low-load route-lock cases with high memoryLoad, low uMax, sparse sampling, and negligible outer bulge",
+        "compactMemoryQBranch": "compact low-load transition",
+        **metrics,
+        "previousV1783HighGainPct": previous_metrics["highGainPct"],
+        "previousV1783CleanGainPct": previous_metrics["cleanGainPct"],
+        "medianHoldoutHighGainPct": median_candidate_high,
+        "medianHoldoutCleanGainPct": median_candidate_clean,
+        "bestNullHighGainPct": best_null,
+        "bestNullMarginPct": null_margin,
+        "maxHoldoutProtectedRegression": max_seed_protected,
+        "maxHoldoutProtectedBranchHitRegression": max_seed_branch_protected,
+        "maxProtectedLookalikeStressRegression": max_stress,
+        "previousV1783MaxProtectedLookalikeStressRegression": previous_max_stress,
+        "protectedLookalikeStressDeltaKmS": stress_delta,
+        "maxHoldoutHighStillAbove20": max_above20,
+        "maxHoldoutHighWorsened": max_worsened,
+        "changedCaseCount": len(changed_cases),
+        "changedHighCount": len(changed_high),
+        "changedProtectedCount": len(changed_protected),
+        "compactMemoryQHighImprovementKmS": high_improvement,
+        "maxDeltaVsV1783OnProtected": protected_worsening,
+        "verdict": verdict,
+    }
+
+    prefix = "mts_observed_state_compact_memory_q"
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_seed_replay.csv", seed_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_branch_ablation.csv", ablation_rows)
+    write_csv(out_dir / f"{prefix}_branch_nulls.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_protected_lookalike_stress.csv", protected_stress_rows)
+    write_csv(out_dir / f"{prefix}_changed_cases.csv", changed_cases)
+
+    formula = {
+        "candidateId": "observed-state-response-v17.84-compact-memory-q",
+        "mechanism": "v17.83 tail-lift law plus compact low-load inner-memory q surface",
+        "inherits": "observed-state-response-v17.83-tail-lift",
+        "compactMemoryQRule": {
+            "branch": "compact low-load transition",
+            "condition": "low-load route, memoryLoad > 6.0, uMax < 0.82, pointDensity < 0.45, outerBulgeShare < 0.02, outerDiskShare > 0.65",
+            "amp": "clamp(previous observedStateAmp - 0.10, 1.70, 2.70)",
+            "q": 0.10,
+        },
+        "inputs": [
+            "locked route",
+            "memoryLoad",
+            "uMax",
+            "pointDensity",
+            "outer bulge share",
+            "outer disk share",
+            "previous state-law amplitude",
+        ],
+        "softScale": soft_scale,
+        "fullActivationThreshold": full_threshold,
+        "canonicalMtsChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics galaxies"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    worst_high = sorted(
+        [row for row in case_rows if row["set"] == "clean-high-rmse"],
+        key=lambda row: -parse_float(row["candidateRmse"]),
+    )[:12]
+    top_changed = sorted(changed_cases, key=lambda row: parse_float(row["deltaVsV1783"]))[:12]
+    report = [
+        "# MTS v17.84 Compact Memory-q",
+        "",
+        "This is a framework candidate scoring pass. It keeps v17.83, then adds a compact low-load inner-memory q surface for high-memory, low-uMax, sparse, disk-dominated low-load systems.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Nominal high-RMSE gain: v17.83 `{fmt(previous_metrics['highGainPct'])}%` -> v17.84 `{fmt(summary['highGainPct'])}%`.",
+        f"- Nominal clean-set gain: v17.83 `{fmt(previous_metrics['cleanGainPct'])}%` -> v17.84 `{fmt(summary['cleanGainPct'])}%`.",
+        f"- Median holdout high-RMSE gain: `{fmt(summary['medianHoldoutHighGainPct'])}%`.",
+        f"- Median holdout clean-set gain: `{fmt(summary['medianHoldoutCleanGainPct'])}%`.",
+        f"- Best split null high-RMSE gain: `{fmt(summary['bestNullHighGainPct'])}%`.",
+        f"- Split null margin: `{fmt(summary['bestNullMarginPct'])}` points.",
+        f"- Max protected lookalike stress: v17.83 `{fmt(previous_max_stress)}` -> v17.84 `{fmt(max_stress)}` km/s.",
+        f"- Max holdout protected regression: `{fmt(summary['maxHoldoutProtectedRegression'])} km/s`.",
+        f"- Max protected branch-hit regression: `{fmt(summary['maxHoldoutProtectedBranchHitRegression'])} km/s`.",
+        f"- High-RMSE holdout still above 20: `{summary['maxHoldoutHighStillAbove20']}`.",
+        f"- High-RMSE holdout worsened: `{summary['maxHoldoutHighWorsened']}`.",
+        "",
+        "## Changed Cases vs v17.83",
+        "",
+    ]
+    if top_changed:
+        for row in top_changed:
+            report.append(
+                f"- `{row['galaxy']}`: v17.83 `{fmt(row['v1783Rmse'])}` -> v17.84 `{fmt(row['v1784Rmse'])}` km/s, delta `{fmt(row['deltaVsV1783'])}`, branch `{row['branch']}`, route `{row['candidateRoute']}`."
+            )
+    else:
+        report.append("- No clean curve RMSE changes.")
+    report.extend(["", "## Worst High-RMSE Cases After v17.84", ""])
+    for row in worst_high:
+        report.append(
+            f"- `{row['galaxy']}`: baseline `{fmt(row['baselineRmse'])}` -> candidate `{fmt(row['candidateRmse'])}` km/s, branch `{row['branch'] or row['routeTransitionFallback'] or 'none'}`."
+        )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-state-compact-memory-q-v17-84",
+        "candidateId": "observed-state-response-v17.84-compact-memory-q",
+        "verdict": verdict,
+        "summary": summary,
+        "formula": formula,
+        "medianNulls": median_nulls,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_seed_replay.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_branch_ablation.csv",
+            f"{prefix}_branch_nulls.csv",
+            f"{prefix}_protected_lookalike_stress.csv",
+            f"{prefix}_changed_cases.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def cmd_observedstatelowloadedge(args: argparse.Namespace) -> None:
     out_dir = DEFAULT_OBSERVED_STATE_LOWLOAD_EDGE_LAW_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
     capsule = write_observed_state_lowload_edge_law_artifacts(out_dir)
@@ -55436,6 +55771,29 @@ def cmd_observedstatetaillift(args: argparse.Namespace) -> None:
     print(f"Wrote observed state tail-lift law to {out_dir.resolve()}")
 
 
+def cmd_observedstatecompactmemoryq(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_COMPACT_MEMORY_Q_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_compact_memory_q_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v17.84 compact memory-q")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                "law_change=v17.83-plus-compact-lowload-inner-memory-q",
+                f"high={fmt(summary['highGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"holdout_clean={fmt(summary['medianHoldoutCleanGainPct'])}%",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+                f"stress={fmt(summary['previousV1783MaxProtectedLookalikeStressRegression'])}->{fmt(summary['maxProtectedLookalikeStressRegression'])}",
+                f"above20={summary['maxHoldoutHighStillAbove20']}",
+                f"changed_high={summary['changedHighCount']}",
+            ]
+        )
+    )
+    print(f"Wrote observed state compact-memory-q law to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -55536,6 +55894,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatebranchnullharden",
             "observedstateprotectioncap",
             "observedstatetaillift",
+            "observedstatecompactmemoryq",
         ],
         default="baseline",
     )
@@ -55745,6 +56104,8 @@ def main() -> None:
         cmd_observedstateprotectioncap(args)
     elif args.mode == "observedstatetaillift":
         cmd_observedstatetaillift(args)
+    elif args.mode == "observedstatecompactmemoryq":
+        cmd_observedstatecompactmemoryq(args)
 
 
 if __name__ == "__main__":
