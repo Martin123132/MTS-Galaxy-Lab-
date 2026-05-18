@@ -123,6 +123,7 @@ DEFAULT_OBSERVED_STATE_FAMILY_RESPONSE_OUT = OUTPUT_PACK_ROOT / "mts-observed-st
 DEFAULT_OBSERVED_STATE_HYBRID_RESPONSE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-hybrid-response-v17-68"
 DEFAULT_OBSERVED_STATE_LAW_FREEZE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-law-freeze-v17-69"
 DEFAULT_OBSERVED_STATE_PRUNED_LAW_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-pruned-law-v17-70"
+DEFAULT_OBSERVED_STATE_FAMILY_EDGE_LAW_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-family-edge-law-v17-71"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -40386,12 +40387,20 @@ OBSERVED_STATE_BRANCH_FAMILIES = {
 
 
 def observed_state_branch_locked_route(branch: str) -> str:
+    if branch == OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_COMPRESSED_BRANCH:
+        return ""
+    if branch == OBSERVED_STATE_V1771_SHELF_EDGE_COMPRESSED_BRANCH:
+        return "buffered single-crossing"
     return "low-load" if branch.startswith("low-load") or branch.startswith("compact low-load") else "buffered single-crossing"
 
 
 def observed_state_branch_family(branch: str) -> str:
     if branch == "low-load q-transition compressed":
         return "low-load q-transition"
+    if branch == "gas-memory edge compressed":
+        return "gas-memory response"
+    if branch == "buffered shelf-curvature edge compressed":
+        return "buffered shelf-curvature response"
     for family, branches in OBSERVED_STATE_BRANCH_FAMILIES.items():
         if branch in branches:
             return family
@@ -48398,6 +48407,22 @@ OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE = {
 OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_BRANCH = "low-load q-transition compressed"
 OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_AMP = 2.10
 OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_Q = 0.85
+OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_BRANCHES = {
+    "buffered gas transition shelf",
+    "buffered midgas disk lane",
+    "low-load gas-disk edge v2",
+    "low-load gas-envelope support",
+}
+OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_COMPRESSED_BRANCH = "gas-memory edge compressed"
+OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_AMP = 2.00
+OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_Q = 0.65
+OBSERVED_STATE_V1771_SHELF_EDGE_BRANCHES = {
+    "buffered disk-edge support",
+    "positive-curvature buffered",
+}
+OBSERVED_STATE_V1771_SHELF_EDGE_COMPRESSED_BRANCH = "buffered shelf-curvature edge compressed"
+OBSERVED_STATE_V1771_SHELF_EDGE_AMP = 2.20
+OBSERVED_STATE_V1771_SHELF_EDGE_Q = 0.65
 
 
 def observed_state_v1768_q_for_curve(branch: str, curve: dict) -> float:
@@ -49113,6 +49138,230 @@ def observed_state_score_curve_pruned_law_forced(
         if observed_state_over_support_gate_soft_safe(state_curve):
             return observed_state_score_curve_hybrid_response_forced(curve, state_curve, "", 0.0)
         return observed_state_v1770_lowload_q_compressed_score(curve, activation, activation)
+    return observed_state_score_curve_hybrid_response_forced(curve, state_curve, branch, activation)
+
+
+def observed_state_v1771_compressed_edge_score(
+    curve: dict,
+    activation: float,
+    probability: float,
+    branch_label: str,
+    family: str,
+    amp_target: float,
+    q_target: float,
+    fallback_floor: float | None = None,
+    continuity_fallback: bool = False,
+    route_transition_fallback: str = "",
+) -> dict:
+    amp = 1.0 + activation * (amp_target - 1.0)
+    q_value = Q_DEFAULT + activation * (q_target - Q_DEFAULT)
+    if fallback_floor is not None:
+        amp = max(amp, fallback_floor)
+
+    def support(point: dict) -> float:
+        return GAMMA0 * curve["leff"] * (1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+
+    score = score_curve_with_support(curve, support, amp, q_value)
+    score["observedStateAmp"] = amp
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = branch_label
+    score["observedStateFamily"] = family
+    score["observedStateResponseSource"] = "family-edge-compressed"
+    score["observedStateSoftProbability"] = probability
+    score["observedStateSoftActivation"] = activation
+    score["observedStateContinuityFallback"] = continuity_fallback
+    score["observedStateFallbackFloor"] = fallback_floor if fallback_floor is not None else ""
+    score["observedStateRouteTransitionFallback"] = route_transition_fallback
+    return score
+
+
+def observed_state_v1771_maybe_compressed_edge_score(
+    curve: dict,
+    branch: str,
+    activation: float,
+    probability: float,
+    fallback_floor: float | None = None,
+    continuity_fallback: bool = False,
+    route_transition_fallback: str = "",
+) -> dict | None:
+    if branch in OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_BRANCHES:
+        return observed_state_v1771_compressed_edge_score(
+            curve,
+            activation,
+            probability,
+            OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_COMPRESSED_BRANCH,
+            "gas-memory response",
+            OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_AMP,
+            OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_Q,
+            fallback_floor,
+            continuity_fallback,
+            route_transition_fallback,
+        )
+    if branch in OBSERVED_STATE_V1771_SHELF_EDGE_BRANCHES:
+        return observed_state_v1771_compressed_edge_score(
+            curve,
+            activation,
+            probability,
+            OBSERVED_STATE_V1771_SHELF_EDGE_COMPRESSED_BRANCH,
+            "buffered shelf-curvature response",
+            OBSERVED_STATE_V1771_SHELF_EDGE_AMP,
+            OBSERVED_STATE_V1771_SHELF_EDGE_Q,
+            fallback_floor,
+            continuity_fallback,
+            route_transition_fallback,
+        )
+    return None
+
+
+def observed_state_score_curve_family_edge_law(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    fallback_floor: float | None = None
+    continuity_fallback = False
+    over_support_persistence = False
+    if observed_state_over_support_gate_soft_safe(state_curve):
+        amp = OBSERVED_STATE_OVER_SUPPORT_AMP
+        q_value = Q_DEFAULT
+        branch = ""
+        probability = 0.0
+        activation = 0.0
+    else:
+        branch, probability, _counts = observed_state_soft_branch_probability(state_curve, soft_scale)
+        if branch and not observed_state_soft_branch_safety(branch, state_curve):
+            branch = ""
+            probability = 0.0
+        activation = observed_state_soft_activation(probability, full_threshold)
+        if branch and activation > 0.0:
+            if observed_state_branch_family(branch) == "low-load q-transition":
+                return observed_state_v1770_lowload_q_compressed_score(curve, activation, probability)
+            compressed = observed_state_v1771_maybe_compressed_edge_score(curve, branch, activation, probability)
+            if compressed is not None:
+                return compressed
+            return observed_state_v1768_support_score(
+                curve,
+                state_curve,
+                fit,
+                amp_cap,
+                branch,
+                activation,
+                probability,
+                fallback_floor,
+                continuity_fallback,
+            )
+        amp = observed_state_amp(state_curve, fit, amp_cap)
+        q_value = Q_DEFAULT
+        fallback_floor = observed_state_continuity_fallback_floor(state_curve)
+        if fallback_floor is not None:
+            amp = max(amp, fallback_floor)
+            continuity_fallback = True
+        transition_branch = observed_state_route_transition_persistence_branch(curve, state_curve)
+        if transition_branch:
+            if observed_state_branch_family(transition_branch) == "low-load q-transition":
+                return observed_state_v1770_lowload_q_compressed_score(
+                    curve,
+                    OBSERVED_STATE_ROUTE_TRANSITION_PERSISTENCE_ACTIVATION,
+                    0.0,
+                    fallback_floor,
+                    continuity_fallback,
+                    transition_branch,
+                )
+            compressed = observed_state_v1771_maybe_compressed_edge_score(
+                curve,
+                transition_branch,
+                OBSERVED_STATE_ROUTE_TRANSITION_PERSISTENCE_ACTIVATION,
+                0.0,
+                fallback_floor,
+                continuity_fallback,
+                transition_branch,
+            )
+            if compressed is not None:
+                return compressed
+            return observed_state_v1768_support_score(
+                curve,
+                state_curve,
+                fit,
+                amp_cap,
+                transition_branch,
+                OBSERVED_STATE_ROUTE_TRANSITION_PERSISTENCE_ACTIVATION,
+                0.0,
+                fallback_floor,
+                continuity_fallback,
+                transition_branch,
+            )
+        if (
+            observed_state_over_support_gate_soft_safe(curve)
+            and curve["lockedModelRoute"] == state_curve["lockedModelRoute"] == "low-load"
+        ):
+            amp = OBSERVED_STATE_OVER_SUPPORT_AMP
+            q_value = Q_DEFAULT
+            over_support_persistence = True
+        if (
+            state_curve["lockedModelRoute"] == "low-load"
+            and fallback_floor is None
+            and not observed_state_over_support_gate_soft_safe(state_curve)
+            and not over_support_persistence
+        ):
+            amp = min(amp, 1.0)
+        safety_cap = observed_state_bulge_safety_cap(state_curve)
+        if safety_cap is not None:
+            amp = min(amp, safety_cap)
+
+    def support(point: dict) -> float:
+        return GAMMA0 * curve["leff"] * (1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+
+    score = score_curve_with_support(curve, support, amp, q_value)
+    score["observedStateAmp"] = amp
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = branch
+    score["observedStateFamily"] = ""
+    score["observedStateResponseSource"] = ""
+    score["observedStateSoftProbability"] = probability
+    score["observedStateSoftActivation"] = activation
+    score["observedStateContinuityFallback"] = continuity_fallback
+    score["observedStateFallbackFloor"] = fallback_floor if fallback_floor is not None else ""
+    score["observedStateRouteTransitionFallback"] = "over-support-persistence" if over_support_persistence else ""
+    return score
+
+
+def observed_state_score_curve_family_edge_law_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    if branch == OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_BRANCH or observed_state_branch_family(branch) == "low-load q-transition":
+        if observed_state_over_support_gate_soft_safe(state_curve):
+            return observed_state_score_curve_hybrid_response_forced(curve, state_curve, "", 0.0)
+        return observed_state_v1770_lowload_q_compressed_score(curve, activation, activation)
+    if branch == OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_COMPRESSED_BRANCH or branch in OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_BRANCHES:
+        if observed_state_over_support_gate_soft_safe(state_curve):
+            return observed_state_score_curve_hybrid_response_forced(curve, state_curve, "", 0.0)
+        return observed_state_v1771_compressed_edge_score(
+            curve,
+            activation,
+            activation,
+            OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_COMPRESSED_BRANCH,
+            "gas-memory response",
+            OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_AMP,
+            OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_Q,
+        )
+    if branch == OBSERVED_STATE_V1771_SHELF_EDGE_COMPRESSED_BRANCH or branch in OBSERVED_STATE_V1771_SHELF_EDGE_BRANCHES:
+        if observed_state_over_support_gate_soft_safe(state_curve):
+            return observed_state_score_curve_hybrid_response_forced(curve, state_curve, "", 0.0)
+        return observed_state_v1771_compressed_edge_score(
+            curve,
+            activation,
+            activation,
+            OBSERVED_STATE_V1771_SHELF_EDGE_COMPRESSED_BRANCH,
+            "buffered shelf-curvature response",
+            OBSERVED_STATE_V1771_SHELF_EDGE_AMP,
+            OBSERVED_STATE_V1771_SHELF_EDGE_Q,
+        )
     return observed_state_score_curve_hybrid_response_forced(curve, state_curve, branch, activation)
 
 
@@ -49980,6 +50229,267 @@ def cmd_observedstateprunedlaw(args: argparse.Namespace) -> None:
     print(f"Wrote observed state pruned law to {out_dir.resolve()}")
 
 
+def write_observed_state_family_edge_law_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+
+    metrics, _case_rows_from_eval = observed_state_soft_gate_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_family_edge_law,
+    )
+    case_rows = observed_state_law_freeze_case_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_family_edge_law,
+    )
+    seed_rows = observed_state_law_freeze_seed_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_family_edge_law,
+        observed_state_score_curve_family_edge_law_forced,
+        "v17.71-family-edge-law",
+    )
+    branch_rows = observed_state_law_freeze_branch_null_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_family_edge_law,
+        observed_state_score_curve_family_edge_law_forced,
+    )
+    ablation_rows = observed_state_law_freeze_ablation_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_family_edge_law,
+    )
+    protected_stress_rows = observed_state_law_freeze_protected_stress_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_family_edge_law,
+        observed_state_score_curve_family_edge_law_forced,
+    )
+
+    candidate_seed_rows = [row for row in seed_rows if row["track"] == "v17.71-family-edge-law"]
+    null_seed_rows = [row for row in seed_rows if row["track"] != "v17.71-family-edge-law"]
+    median_candidate_high = safe_median(parse_float(row["highGainPct"]) for row in candidate_seed_rows)
+    median_candidate_clean = safe_median(parse_float(row["cleanGainPct"]) for row in candidate_seed_rows)
+    median_nulls = {
+        track: safe_median(parse_float(row["highGainPct"]) for row in null_seed_rows if row["track"] == track)
+        for track in sorted({row["track"] for row in null_seed_rows})
+    }
+    best_null = max([value for value in median_nulls.values() if math.isfinite(value)] or [math.nan])
+    rejected_high_branches = [
+        row
+        for row in branch_rows
+        if parse_float(row["heldOutHighHitCount"], 0.0) > 0 and row["branchStatus"] != "accepted"
+    ]
+    max_seed_protected = max([parse_float(row["maxProtectedRegression"], 0.0) for row in candidate_seed_rows] or [0.0])
+    max_seed_branch_protected = max(
+        [parse_float(row["maxProtectedBranchHitRegression"], 0.0) for row in candidate_seed_rows] or [0.0]
+    )
+    max_stress_regression = max([parse_float(row["stressRegressionKmS"], 0.0) for row in protected_stress_rows] or [0.0])
+    max_above20 = max([int(parse_float(row["highStillAbove20"], 0.0)) for row in candidate_seed_rows] or [0])
+    max_worsened = max([int(parse_float(row["highWorsened"], 0.0)) for row in candidate_seed_rows] or [0])
+    null_margin = median_candidate_high - best_null if math.isfinite(median_candidate_high) and math.isfinite(best_null) else math.nan
+    accepted = (
+        metrics["highGainPct"] >= 60.0
+        and median_candidate_high >= 30.0
+        and median_candidate_clean >= 18.0
+        and max_seed_protected < 4.0
+        and max_seed_branch_protected < 3.0
+        and max_above20 == 0
+        and max_worsened == 0
+        and math.isfinite(null_margin)
+        and null_margin >= 10.0
+    )
+    verdict = "v17.71 family-edge law survives" if accepted else "v17.71 family-edge law needs more work"
+    summary = {
+        "candidateId": "observed-state-response-v17.71-family-edge-law",
+        "formulaChanged": True,
+        "baseCandidate": "observed-state-response-v17.70-pruned-lowload-q-family-law",
+        "lawChange": "gas-memory and buffered shelf-curvature rejected branch units compressed to shared family-edge responses; low-load q family remains compressed from v17.70",
+        "compressedLowLoadQFamilyAmp": OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_AMP,
+        "compressedLowLoadQFamilyQ": OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_Q,
+        "compressedGasMemoryEdgeAmp": OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_AMP,
+        "compressedGasMemoryEdgeQ": OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_Q,
+        "compressedShelfCurvatureEdgeAmp": OBSERVED_STATE_V1771_SHELF_EDGE_AMP,
+        "compressedShelfCurvatureEdgeQ": OBSERVED_STATE_V1771_SHELF_EDGE_Q,
+        **metrics,
+        "medianHoldoutHighGainPct": median_candidate_high,
+        "medianHoldoutCleanGainPct": median_candidate_clean,
+        "bestNullHighGainPct": best_null,
+        "bestNullMarginPct": null_margin,
+        "maxHoldoutProtectedRegression": max_seed_protected,
+        "maxHoldoutProtectedBranchHitRegression": max_seed_branch_protected,
+        "maxProtectedLookalikeStressRegression": max_stress_regression,
+        "maxHoldoutHighStillAbove20": max_above20,
+        "maxHoldoutHighWorsened": max_worsened,
+        "heldOutHighBranchRejectedCount": len(rejected_high_branches),
+        "heldOutHighBranchAcceptedCount": sum(
+            1 for row in branch_rows if parse_float(row["heldOutHighHitCount"], 0.0) > 0 and row["branchStatus"] == "accepted"
+        ),
+        "verdict": verdict,
+    }
+
+    write_csv(out_dir / "mts_observed_state_family_edge_law_scores.csv", [summary])
+    write_csv(out_dir / "mts_observed_state_family_edge_law_seed_replay.csv", seed_rows)
+    write_csv(out_dir / "mts_observed_state_family_edge_law_case_ledger.csv", case_rows)
+    write_csv(out_dir / "mts_observed_state_family_edge_law_branch_ablation.csv", ablation_rows)
+    write_csv(out_dir / "mts_observed_state_family_edge_law_branch_nulls.csv", branch_rows)
+    write_csv(out_dir / "mts_observed_state_family_edge_law_protected_lookalike_stress.csv", protected_stress_rows)
+
+    formula = {
+        "candidateId": "observed-state-response-v17.71-family-edge-law",
+        "mechanism": "v17.70 low-load q-family law plus two compressed edge-family responses for gas-memory and buffered shelf-curvature branch units",
+        "compressedLowLoadQFamily": {
+            "branchLabel": OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_BRANCH,
+            "amp": OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_AMP,
+            "q": OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_Q,
+        },
+        "compressedGasMemoryEdge": {
+            "branchLabel": OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_COMPRESSED_BRANCH,
+            "sourceBranches": sorted(OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_BRANCHES),
+            "amp": OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_AMP,
+            "q": OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_Q,
+        },
+        "compressedShelfCurvatureEdge": {
+            "branchLabel": OBSERVED_STATE_V1771_SHELF_EDGE_COMPRESSED_BRANCH,
+            "sourceBranches": sorted(OBSERVED_STATE_V1771_SHELF_EDGE_BRANCHES),
+            "amp": OBSERVED_STATE_V1771_SHELF_EDGE_AMP,
+            "q": OBSERVED_STATE_V1771_SHELF_EDGE_Q,
+        },
+        "unchangedBranchSpecificResponseSpine": sorted(OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE),
+        "familyResponseSurfaces": sorted(OBSERVED_STATE_BRANCH_FAMILIES),
+        "softScale": soft_scale,
+        "fullActivationThreshold": full_threshold,
+        "canonicalMtsChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics galaxies"],
+    }
+    (out_dir / "mts_observed_state_family_edge_law_formula.json").write_text(
+        json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+    worst_high = sorted(
+        [row for row in case_rows if row["set"] == "clean-high-rmse"],
+        key=lambda row: -parse_float(row["candidateRmse"]),
+    )[:12]
+    rejected_lines = sorted(rejected_high_branches, key=lambda row: row["branch"])
+    report = [
+        "# MTS v17.71 Family-Edge Law",
+        "",
+        "This is a framework candidate change. It keeps the v17.70 low-load q-family compression and adds only two shared edge responses that survived the scratch grid without protected damage.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        "- Law change: `gas-memory edge` and `buffered shelf-curvature edge` branch units use shared family-edge responses.",
+        f"- Gas-memory edge response: `amp={OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_AMP}`, `q={OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_Q}`.",
+        f"- Shelf-curvature edge response: `amp={OBSERVED_STATE_V1771_SHELF_EDGE_AMP}`, `q={OBSERVED_STATE_V1771_SHELF_EDGE_Q}`.",
+        f"- Nominal high-RMSE gain: `{fmt(summary['highGainPct'])}%`.",
+        f"- Median holdout high-RMSE gain: `{fmt(summary['medianHoldoutHighGainPct'])}%`.",
+        f"- Median holdout clean-set gain: `{fmt(summary['medianHoldoutCleanGainPct'])}%`.",
+        f"- Best split null high-RMSE gain: `{fmt(summary['bestNullHighGainPct'])}%`.",
+        f"- Split null margin: `{fmt(summary['bestNullMarginPct'])}` points.",
+        f"- Max holdout protected regression: `{fmt(summary['maxHoldoutProtectedRegression'])} km/s`.",
+        f"- Max protected branch-hit regression: `{fmt(summary['maxHoldoutProtectedBranchHitRegression'])} km/s`.",
+        f"- High-RMSE holdout still above 20: `{summary['maxHoldoutHighStillAbove20']}`.",
+        f"- High-RMSE holdout worsened: `{summary['maxHoldoutHighWorsened']}`.",
+        f"- Rejected held-out high branch units after compression: `{summary['heldOutHighBranchRejectedCount']}`.",
+        "",
+        "## Worst High-RMSE Cases After v17.71",
+        "",
+    ]
+    for row in worst_high:
+        report.append(
+            f"- `{row['galaxy']}`: `{fmt(row['baselineRmse'])} -> {fmt(row['candidateRmse'])}` km/s, branch `{row['branch'] or row['routeTransitionFallback'] or 'none'}`."
+        )
+    report.extend(["", "## Remaining Rejected Branch Units", ""])
+    if rejected_lines:
+        for row in rejected_lines:
+            report.append(
+                f"- `{row['branch']}`: `{row['branchStatus']}`, high hits `{row['heldOutHighHitCount']}`, mean high gain `{fmt(row['meanActiveHighGainKmS'])} km/s`, null margin `{fmt(row['medianBranchNullMarginPct'])}` points."
+            )
+    else:
+        report.append("- None.")
+    (out_dir / "mts_observed_state_family_edge_law_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-state-family-edge-law-v17-71",
+        "candidateId": "observed-state-response-v17.71-family-edge-law",
+        "verdict": verdict,
+        "summary": summary,
+        "formula": formula,
+        "medianNulls": median_nulls,
+        "outputFiles": [
+            "mts_observed_state_family_edge_law_scores.csv",
+            "mts_observed_state_family_edge_law_seed_replay.csv",
+            "mts_observed_state_family_edge_law_case_ledger.csv",
+            "mts_observed_state_family_edge_law_branch_ablation.csv",
+            "mts_observed_state_family_edge_law_branch_nulls.csv",
+            "mts_observed_state_family_edge_law_protected_lookalike_stress.csv",
+            "mts_observed_state_family_edge_law_formula.json",
+            "mts_observed_state_family_edge_law_report.md",
+            "mts_observed_state_family_edge_law_capsule.json",
+        ],
+    }
+    (out_dir / "mts_observed_state_family_edge_law_capsule.json").write_text(
+        json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8"
+    )
+    return capsule
+
+
+def cmd_observedstatefamilyedgelaw(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_FAMILY_EDGE_LAW_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_family_edge_law_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v17.71 family-edge law")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                "law_change=gas-memory-and-shelf-edge-compression",
+                f"high={fmt(summary['highGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"holdout_clean={fmt(summary['medianHoldoutCleanGainPct'])}%",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+                f"above20={summary['maxHoldoutHighStillAbove20']}",
+                f"protected_max={fmt(summary['maxHoldoutProtectedRegression'])}",
+                f"rejected_units={summary['heldOutHighBranchRejectedCount']}",
+            ]
+        )
+    )
+    print(f"Wrote observed state family-edge law to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -50067,6 +50577,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatehybridresponse",
             "observedstatelawfreeze",
             "observedstateprunedlaw",
+            "observedstatefamilyedgelaw",
         ],
         default="baseline",
     )
@@ -50250,6 +50761,8 @@ def main() -> None:
         cmd_observedstatelawfreeze(args)
     elif args.mode == "observedstateprunedlaw":
         cmd_observedstateprunedlaw(args)
+    elif args.mode == "observedstatefamilyedgelaw":
+        cmd_observedstatefamilyedgelaw(args)
 
 
 if __name__ == "__main__":
