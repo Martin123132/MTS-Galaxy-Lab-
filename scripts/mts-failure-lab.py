@@ -124,6 +124,7 @@ DEFAULT_OBSERVED_STATE_HYBRID_RESPONSE_OUT = OUTPUT_PACK_ROOT / "mts-observed-st
 DEFAULT_OBSERVED_STATE_LAW_FREEZE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-law-freeze-v17-69"
 DEFAULT_OBSERVED_STATE_PRUNED_LAW_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-pruned-law-v17-70"
 DEFAULT_OBSERVED_STATE_FAMILY_EDGE_LAW_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-family-edge-law-v17-71"
+DEFAULT_OBSERVED_STATE_MINIMAL_LAW_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-minimal-law-v17-72"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -48423,6 +48424,31 @@ OBSERVED_STATE_V1771_SHELF_EDGE_BRANCHES = {
 OBSERVED_STATE_V1771_SHELF_EDGE_COMPRESSED_BRANCH = "buffered shelf-curvature edge compressed"
 OBSERVED_STATE_V1771_SHELF_EDGE_AMP = 2.20
 OBSERVED_STATE_V1771_SHELF_EDGE_Q = 0.65
+OBSERVED_STATE_V1772_MINIMAL_BRANCH_RESPONSE_SPINE = {
+    "buffered bulge-disk high-uout edge",
+    "buffered bulge-disk shoulder",
+    "buffered compact lowgas shelf",
+    "buffered dense lowgas disk curvature",
+    "buffered dense-bulge high-umax shoulder",
+    "buffered disk-shear high-q shape",
+    "buffered dominant-bulge lift",
+    "buffered gas-bulge route-safe ridge",
+    "buffered gas-curvature",
+    "buffered positive-bulge shoulder",
+    "buffered sparse-stellar shelf",
+    "dense positive-bulge buffered",
+}
+
+
+def observed_state_with_branch_response_spine(spine: set[str], fn: Callable[[], object]) -> object:
+    original = set(OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE)
+    OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE.clear()
+    OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE.update(spine)
+    try:
+        return fn()
+    finally:
+        OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE.clear()
+        OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE.update(original)
 
 
 def observed_state_v1768_q_for_curve(branch: str, curve: dict) -> float:
@@ -49363,6 +49389,32 @@ def observed_state_score_curve_family_edge_law_forced(
             OBSERVED_STATE_V1771_SHELF_EDGE_Q,
         )
     return observed_state_score_curve_hybrid_response_forced(curve, state_curve, branch, activation)
+
+
+def observed_state_score_curve_minimal_law(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    return observed_state_with_branch_response_spine(
+        OBSERVED_STATE_V1772_MINIMAL_BRANCH_RESPONSE_SPINE,
+        lambda: observed_state_score_curve_family_edge_law(curve, state_curve, fit, amp_cap, soft_scale, full_threshold),
+    )
+
+
+def observed_state_score_curve_minimal_law_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    return observed_state_with_branch_response_spine(
+        OBSERVED_STATE_V1772_MINIMAL_BRANCH_RESPONSE_SPINE,
+        lambda: observed_state_score_curve_family_edge_law_forced(curve, state_curve, branch, activation),
+    )
 
 
 def observed_state_law_freeze_case_rows(
@@ -50490,6 +50542,272 @@ def cmd_observedstatefamilyedgelaw(args: argparse.Namespace) -> None:
     print(f"Wrote observed state family-edge law to {out_dir.resolve()}")
 
 
+def write_observed_state_minimal_law_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+
+    metrics, _case_rows_from_eval = observed_state_soft_gate_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_minimal_law,
+    )
+    case_rows = observed_state_law_freeze_case_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_minimal_law,
+    )
+    seed_rows = observed_state_law_freeze_seed_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_minimal_law,
+        observed_state_score_curve_minimal_law_forced,
+        "v17.72-minimal-law",
+    )
+    branch_rows = observed_state_law_freeze_branch_null_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_minimal_law,
+        observed_state_score_curve_minimal_law_forced,
+    )
+    ablation_rows = observed_state_law_freeze_ablation_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_minimal_law,
+    )
+    protected_stress_rows = observed_state_law_freeze_protected_stress_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_minimal_law,
+        observed_state_score_curve_minimal_law_forced,
+    )
+
+    candidate_seed_rows = [row for row in seed_rows if row["track"] == "v17.72-minimal-law"]
+    null_seed_rows = [row for row in seed_rows if row["track"] != "v17.72-minimal-law"]
+    median_candidate_high = safe_median(parse_float(row["highGainPct"]) for row in candidate_seed_rows)
+    median_candidate_clean = safe_median(parse_float(row["cleanGainPct"]) for row in candidate_seed_rows)
+    median_nulls = {
+        track: safe_median(parse_float(row["highGainPct"]) for row in null_seed_rows if row["track"] == track)
+        for track in sorted({row["track"] for row in null_seed_rows})
+    }
+    best_null = max([value for value in median_nulls.values() if math.isfinite(value)] or [math.nan])
+    rejected_high_branches = [
+        row
+        for row in branch_rows
+        if parse_float(row["heldOutHighHitCount"], 0.0) > 0 and row["branchStatus"] != "accepted"
+    ]
+    max_seed_protected = max([parse_float(row["maxProtectedRegression"], 0.0) for row in candidate_seed_rows] or [0.0])
+    max_seed_branch_protected = max(
+        [parse_float(row["maxProtectedBranchHitRegression"], 0.0) for row in candidate_seed_rows] or [0.0]
+    )
+    max_stress_regression = max([parse_float(row["stressRegressionKmS"], 0.0) for row in protected_stress_rows] or [0.0])
+    max_above20 = max([int(parse_float(row["highStillAbove20"], 0.0)) for row in candidate_seed_rows] or [0])
+    max_worsened = max([int(parse_float(row["highWorsened"], 0.0)) for row in candidate_seed_rows] or [0])
+    null_margin = median_candidate_high - best_null if math.isfinite(median_candidate_high) and math.isfinite(best_null) else math.nan
+    accepted = (
+        metrics["highGainPct"] >= 60.0
+        and median_candidate_high >= 55.0
+        and median_candidate_clean >= 18.0
+        and max_seed_protected < 4.0
+        and max_seed_branch_protected < 3.0
+        and max_above20 == 0
+        and max_worsened == 0
+        and math.isfinite(null_margin)
+        and null_margin >= 20.0
+    )
+    verdict = "v17.72 minimal law survives" if accepted else "v17.72 minimal law needs more work"
+    removed_spine = sorted(set(OBSERVED_STATE_V1768_BRANCH_RESPONSE_SPINE) - set(OBSERVED_STATE_V1772_MINIMAL_BRANCH_RESPONSE_SPINE))
+    summary = {
+        "candidateId": "observed-state-response-v17.72-minimal-law",
+        "formulaChanged": True,
+        "baseCandidate": "observed-state-response-v17.71-family-edge-law",
+        "lawChange": "branch-response spine reduced to buffered bulge/shelf essentials; compact, low-load-q, gas-memory edge, and dense-bulge outer responses fall back to compressed/family surfaces",
+        "minimalBranchSpecificResponseCount": len(OBSERVED_STATE_V1772_MINIMAL_BRANCH_RESPONSE_SPINE),
+        "removedBranchSpecificResponseCount": len(removed_spine),
+        "compressedLowLoadQFamilyAmp": OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_AMP,
+        "compressedLowLoadQFamilyQ": OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_Q,
+        "compressedGasMemoryEdgeAmp": OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_AMP,
+        "compressedGasMemoryEdgeQ": OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_Q,
+        "compressedShelfCurvatureEdgeAmp": OBSERVED_STATE_V1771_SHELF_EDGE_AMP,
+        "compressedShelfCurvatureEdgeQ": OBSERVED_STATE_V1771_SHELF_EDGE_Q,
+        **metrics,
+        "medianHoldoutHighGainPct": median_candidate_high,
+        "medianHoldoutCleanGainPct": median_candidate_clean,
+        "bestNullHighGainPct": best_null,
+        "bestNullMarginPct": null_margin,
+        "maxHoldoutProtectedRegression": max_seed_protected,
+        "maxHoldoutProtectedBranchHitRegression": max_seed_branch_protected,
+        "maxProtectedLookalikeStressRegression": max_stress_regression,
+        "maxHoldoutHighStillAbove20": max_above20,
+        "maxHoldoutHighWorsened": max_worsened,
+        "heldOutHighBranchRejectedCount": len(rejected_high_branches),
+        "heldOutHighBranchAcceptedCount": sum(
+            1 for row in branch_rows if parse_float(row["heldOutHighHitCount"], 0.0) > 0 and row["branchStatus"] == "accepted"
+        ),
+        "verdict": verdict,
+    }
+
+    write_csv(out_dir / "mts_observed_state_minimal_law_scores.csv", [summary])
+    write_csv(out_dir / "mts_observed_state_minimal_law_seed_replay.csv", seed_rows)
+    write_csv(out_dir / "mts_observed_state_minimal_law_case_ledger.csv", case_rows)
+    write_csv(out_dir / "mts_observed_state_minimal_law_branch_ablation.csv", ablation_rows)
+    write_csv(out_dir / "mts_observed_state_minimal_law_branch_nulls.csv", branch_rows)
+    write_csv(out_dir / "mts_observed_state_minimal_law_protected_lookalike_stress.csv", protected_stress_rows)
+
+    formula = {
+        "candidateId": "observed-state-response-v17.72-minimal-law",
+        "mechanism": "v17.71 family-edge law with branch-specific response spine pruned to the smallest nominal high-RMSE-safe buffered bulge/shelf set that survives split/null gates",
+        "minimalBranchSpecificResponseSpine": sorted(OBSERVED_STATE_V1772_MINIMAL_BRANCH_RESPONSE_SPINE),
+        "removedBranchSpecificResponsesFromV1771": removed_spine,
+        "compressedLowLoadQFamily": {
+            "branchLabel": OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_BRANCH,
+            "amp": OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_AMP,
+            "q": OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_Q,
+        },
+        "compressedGasMemoryEdge": {
+            "branchLabel": OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_COMPRESSED_BRANCH,
+            "sourceBranches": sorted(OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_BRANCHES),
+            "amp": OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_AMP,
+            "q": OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_Q,
+        },
+        "compressedShelfCurvatureEdge": {
+            "branchLabel": OBSERVED_STATE_V1771_SHELF_EDGE_COMPRESSED_BRANCH,
+            "sourceBranches": sorted(OBSERVED_STATE_V1771_SHELF_EDGE_BRANCHES),
+            "amp": OBSERVED_STATE_V1771_SHELF_EDGE_AMP,
+            "q": OBSERVED_STATE_V1771_SHELF_EDGE_Q,
+        },
+        "familyResponseSurfaces": sorted(OBSERVED_STATE_BRANCH_FAMILIES),
+        "softScale": soft_scale,
+        "fullActivationThreshold": full_threshold,
+        "canonicalMtsChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics galaxies"],
+    }
+    (out_dir / "mts_observed_state_minimal_law_formula.json").write_text(
+        json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+    worst_high = sorted(
+        [row for row in case_rows if row["set"] == "clean-high-rmse"],
+        key=lambda row: -parse_float(row["candidateRmse"]),
+    )[:12]
+    rejected_lines = sorted(rejected_high_branches, key=lambda row: row["branch"])
+    report = [
+        "# MTS v17.72 Minimal State Law",
+        "",
+        "This is a framework candidate simplification. It keeps the v17.71 score structure but removes redundant branch-specific response entries, leaving a smaller buffered bulge/shelf spine plus compressed low-load/gas-memory edge families.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Branch-specific response spine: `{len(OBSERVED_STATE_V1772_MINIMAL_BRANCH_RESPONSE_SPINE)}` entries.",
+        f"- Removed branch-specific entries from v17.71: `{len(removed_spine)}`.",
+        f"- Nominal high-RMSE gain: `{fmt(summary['highGainPct'])}%`.",
+        f"- Median holdout high-RMSE gain: `{fmt(summary['medianHoldoutHighGainPct'])}%`.",
+        f"- Median holdout clean-set gain: `{fmt(summary['medianHoldoutCleanGainPct'])}%`.",
+        f"- Best split null high-RMSE gain: `{fmt(summary['bestNullHighGainPct'])}%`.",
+        f"- Split null margin: `{fmt(summary['bestNullMarginPct'])}` points.",
+        f"- Max holdout protected regression: `{fmt(summary['maxHoldoutProtectedRegression'])} km/s`.",
+        f"- Max protected branch-hit regression: `{fmt(summary['maxHoldoutProtectedBranchHitRegression'])} km/s`.",
+        f"- High-RMSE holdout still above 20: `{summary['maxHoldoutHighStillAbove20']}`.",
+        f"- High-RMSE holdout worsened: `{summary['maxHoldoutHighWorsened']}`.",
+        "",
+        "## Worst High-RMSE Cases After v17.72",
+        "",
+    ]
+    for row in worst_high:
+        report.append(
+            f"- `{row['galaxy']}`: `{fmt(row['baselineRmse'])} -> {fmt(row['candidateRmse'])}` km/s, branch `{row['branch'] or row['routeTransitionFallback'] or 'none'}`."
+        )
+    report.extend(["", "## Removed Branch-Specific Entries", ""])
+    for branch in removed_spine:
+        report.append(f"- `{branch}`.")
+    report.extend(["", "## Remaining Rejected Branch Units", ""])
+    if rejected_lines:
+        for row in rejected_lines:
+            report.append(
+                f"- `{row['branch']}`: `{row['branchStatus']}`, high hits `{row['heldOutHighHitCount']}`, mean high gain `{fmt(row['meanActiveHighGainKmS'])} km/s`, null margin `{fmt(row['medianBranchNullMarginPct'])}` points."
+            )
+    else:
+        report.append("- None.")
+    (out_dir / "mts_observed_state_minimal_law_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-state-minimal-law-v17-72",
+        "candidateId": "observed-state-response-v17.72-minimal-law",
+        "verdict": verdict,
+        "summary": summary,
+        "formula": formula,
+        "medianNulls": median_nulls,
+        "outputFiles": [
+            "mts_observed_state_minimal_law_scores.csv",
+            "mts_observed_state_minimal_law_seed_replay.csv",
+            "mts_observed_state_minimal_law_case_ledger.csv",
+            "mts_observed_state_minimal_law_branch_ablation.csv",
+            "mts_observed_state_minimal_law_branch_nulls.csv",
+            "mts_observed_state_minimal_law_protected_lookalike_stress.csv",
+            "mts_observed_state_minimal_law_formula.json",
+            "mts_observed_state_minimal_law_report.md",
+            "mts_observed_state_minimal_law_capsule.json",
+        ],
+    }
+    (out_dir / "mts_observed_state_minimal_law_capsule.json").write_text(
+        json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8"
+    )
+    return capsule
+
+
+def cmd_observedstateminimallaw(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_MINIMAL_LAW_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_minimal_law_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v17.72 minimal state law")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                "law_change=minimal-branch-response-spine",
+                f"spine={summary['minimalBranchSpecificResponseCount']}",
+                f"high={fmt(summary['highGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"holdout_clean={fmt(summary['medianHoldoutCleanGainPct'])}%",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+                f"above20={summary['maxHoldoutHighStillAbove20']}",
+                f"protected_max={fmt(summary['maxHoldoutProtectedRegression'])}",
+            ]
+        )
+    )
+    print(f"Wrote observed state minimal law to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -50578,6 +50896,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatelawfreeze",
             "observedstateprunedlaw",
             "observedstatefamilyedgelaw",
+            "observedstateminimallaw",
         ],
         default="baseline",
     )
@@ -50763,6 +51082,8 @@ def main() -> None:
         cmd_observedstateprunedlaw(args)
     elif args.mode == "observedstatefamilyedgelaw":
         cmd_observedstatefamilyedgelaw(args)
+    elif args.mode == "observedstateminimallaw":
+        cmd_observedstateminimallaw(args)
 
 
 if __name__ == "__main__":
