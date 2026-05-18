@@ -138,6 +138,7 @@ DEFAULT_OBSERVED_STATE_PROTECTION_CAP_OUT = OUTPUT_PACK_ROOT / "mts-observed-sta
 DEFAULT_OBSERVED_STATE_TAIL_LIFT_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-tail-lift-v17-83"
 DEFAULT_OBSERVED_STATE_COMPACT_MEMORY_Q_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-compact-memory-q-v17-84"
 DEFAULT_OBSERVED_STATE_LAW_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-law-harden-v17-85"
+DEFAULT_OBSERVED_STATE_ROUTE_SAFE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-route-safe-v17-87"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -46498,6 +46499,425 @@ def cmd_observedstaterobustness(args: argparse.Namespace) -> None:
     print(f"Wrote observed state robustness stress to {out_dir.resolve()}")
 
 
+OBSERVED_STATE_ROUTE_SAFE_STRENGTH_FLOOR = 0.50
+OBSERVED_STATE_ROUTE_SAFE_PROJECTION_VETO_BRANCHES = {"buffered dominant-bulge lift"}
+
+
+def observed_state_v1787_interpolated_score(curve: dict, source_score: dict, strength: float) -> dict:
+    strength = clamp(strength, 0.0, 1.0)
+    source_amp = parse_float(source_score.get("observedStateAmp", source_score.get("amp")), 1.0)
+    source_q = parse_float(source_score.get("observedStateQ", source_score.get("q")), Q_DEFAULT)
+    amp = 1.0 + strength * (source_amp - 1.0)
+    q_value = Q_DEFAULT + strength * (source_q - Q_DEFAULT)
+    score = score_curve_with_params(curve, amp, q_value)
+    score["observedStateAmp"] = amp
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = source_score.get("observedStateBranch", "")
+    score["observedStateFamily"] = source_score.get(
+        "observedStateFamily", observed_state_branch_family(score["observedStateBranch"])
+    )
+    score["observedStateResponseSource"] = "v17.87-route-safe-projection"
+    score["observedStateSoftProbability"] = source_score.get("observedStateSoftProbability", 0.0)
+    score["observedStateSoftActivation"] = source_score.get("observedStateSoftActivation", 0.0)
+    score["observedStateContinuityFallback"] = source_score.get("observedStateContinuityFallback", False)
+    score["observedStateFallbackFloor"] = source_score.get("observedStateFallbackFloor", "")
+    score["observedStateRouteTransitionFallback"] = source_score.get("observedStateRouteTransitionFallback", "")
+    score["observedStateRouteSafeProjected"] = True
+    score["observedStateRouteSafeStrength"] = strength
+    score["observedStateRouteSafeOriginalRmse"] = source_score["rmse"]
+    score["observedStateRouteSafeOriginalRoute"] = source_score["candidateRoute"]
+    return score
+
+
+def observed_state_v1787_route_safe_strength(curve: dict, source_score: dict, baseline_score: dict) -> float:
+    if source_score["candidateRoute"] == baseline_score["candidateRoute"]:
+        return 1.0
+    lo = 0.0
+    hi = 1.0
+    for _ in range(24):
+        mid = (lo + hi) / 2.0
+        score = observed_state_v1787_interpolated_score(curve, source_score, mid)
+        if score["candidateRoute"] == baseline_score["candidateRoute"]:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def observed_state_v1787_project_if_route_safe(curve: dict, source_score: dict) -> dict:
+    baseline = score_curve(curve)
+    branch = str(source_score.get("observedStateBranch", ""))
+    if branch in OBSERVED_STATE_ROUTE_SAFE_PROJECTION_VETO_BRANCHES:
+        source_score["observedStateRouteSafeProjected"] = False
+        source_score["observedStateRouteSafeProjectionVeto"] = "branch-null-too-close-under-projection"
+        source_score["observedStateRouteSafeStrength"] = 1.0
+        source_score["observedStateRouteSafeOriginalRmse"] = source_score["rmse"]
+        source_score["observedStateRouteSafeOriginalRoute"] = source_score["candidateRoute"]
+        return source_score
+    if source_score["candidateRoute"] == baseline["candidateRoute"]:
+        source_score["observedStateRouteSafeProjected"] = False
+        source_score["observedStateRouteSafeProjectionVeto"] = ""
+        source_score["observedStateRouteSafeStrength"] = 1.0
+        source_score["observedStateRouteSafeOriginalRmse"] = source_score["rmse"]
+        source_score["observedStateRouteSafeOriginalRoute"] = source_score["candidateRoute"]
+        return source_score
+    strength = observed_state_v1787_route_safe_strength(curve, source_score, baseline)
+    if strength >= OBSERVED_STATE_ROUTE_SAFE_STRENGTH_FLOOR:
+        return observed_state_v1787_interpolated_score(curve, source_score, strength)
+    source_score["observedStateRouteSafeProjected"] = False
+    source_score["observedStateRouteSafeProjectionVeto"] = "safe-strength-below-floor"
+    source_score["observedStateRouteSafeStrength"] = strength
+    source_score["observedStateRouteSafeOriginalRmse"] = source_score["rmse"]
+    source_score["observedStateRouteSafeOriginalRoute"] = source_score["candidateRoute"]
+    return source_score
+
+
+def observed_state_score_curve_v1787_route_safe(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    score = observed_state_score_curve_law_hardened(curve, state_curve, fit, amp_cap, soft_scale, full_threshold)
+    return observed_state_v1787_project_if_route_safe(curve, score)
+
+
+def observed_state_score_curve_v1787_route_safe_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    score = observed_state_score_curve_law_hardened_forced(curve, state_curve, branch, activation)
+    return observed_state_v1787_project_if_route_safe(curve, score)
+
+
+def observed_state_v1787_split_replay_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> list[dict]:
+    rows: list[dict] = []
+    for seed in OBSERVED_STATE_ROBUSTNESS_SEEDS:
+        _train_names, holdout_names = observed_state_split(clean_curves, seed, HOLDOUT_FRACTION)
+        holdout = [curve for curve in clean_curves if curve["name"] in holdout_names]
+        base_scores = {curve["name"]: score_curve(curve) for curve in holdout}
+        candidate_scores = {
+            curve["name"]: observed_state_score_curve_v1787_route_safe(
+                curve, curve, fit, amp_cap, soft_scale, full_threshold
+            )
+            for curve in holdout
+        }
+        paired = [(curve, base_scores[curve["name"]], candidate_scores[curve["name"]]) for curve in holdout]
+        rows.append(observed_state_law_freeze_summary(seed, "v17.87-route-safe-projected", paired, high_names))
+
+        candidate_hits = [
+            (
+                curve,
+                score["observedStateBranch"],
+                parse_float(score.get("observedStateSoftActivation"), 0.0),
+            )
+            for curve in holdout
+            for score in [candidate_scores[curve["name"]]]
+            if score.get("observedStateBranch") and parse_float(score.get("observedStateSoftActivation"), 0.0) > 0.0
+        ]
+
+        rng = random.Random(seed + 17870)
+        shuffled_pairs = [(branch, activation) for _curve, branch, activation in candidate_hits]
+        rng.shuffle(shuffled_pairs)
+        shuffled_assignments = {
+            curve["name"]: pair for (curve, _branch, _activation), pair in zip(candidate_hits, shuffled_pairs)
+        }
+        shuffled_paired = [
+            (
+                curve,
+                base_scores[curve["name"]],
+                observed_state_score_curve_v1787_route_safe_forced(
+                    curve,
+                    curve,
+                    shuffled_assignments.get(curve["name"], ("", 0.0))[0],
+                    shuffled_assignments.get(curve["name"], ("", 0.0))[1],
+                ),
+            )
+            for curve in holdout
+        ]
+        rows.append(observed_state_law_freeze_summary(seed, "branch-label-shuffle-null", shuffled_paired, high_names))
+
+        rng = random.Random(seed + 27870)
+        route_random_assignments: dict[str, tuple[str, float]] = {}
+        for branch in sorted({branch for _curve, branch, _activation in candidate_hits}):
+            hits = [(curve, activation) for curve, hit_branch, activation in candidate_hits if hit_branch == branch]
+            route = observed_state_branch_locked_route(branch)
+            eligible = [
+                curve
+                for curve in holdout
+                if curve["lockedModelRoute"] == route and curve["name"] not in route_random_assignments
+            ]
+            if len(eligible) < len(hits):
+                eligible = [curve for curve in holdout if curve["name"] not in route_random_assignments]
+            rng.shuffle(eligible)
+            activations = [activation for _curve, activation in hits]
+            rng.shuffle(activations)
+            for curve, activation in zip(eligible[: len(hits)], activations):
+                route_random_assignments[curve["name"]] = (branch, activation)
+        route_random_paired = [
+            (
+                curve,
+                base_scores[curve["name"]],
+                observed_state_score_curve_v1787_route_safe_forced(
+                    curve,
+                    curve,
+                    route_random_assignments.get(curve["name"], ("", 0.0))[0],
+                    route_random_assignments.get(curve["name"], ("", 0.0))[1],
+                ),
+            )
+            for curve in holdout
+        ]
+        rows.append(observed_state_law_freeze_summary(seed, "same-active-count-route-random-null", route_random_paired, high_names))
+
+        rng = random.Random(seed + 37870)
+        high_random_assignments: dict[str, tuple[str, float]] = {}
+        high_holdout = [curve for curve in holdout if curve["name"] in high_names]
+        for branch in sorted({branch for _curve, branch, _activation in candidate_hits}):
+            hits = [(curve, activation) for curve, hit_branch, activation in candidate_hits if hit_branch == branch and curve["name"] in high_names]
+            route = observed_state_branch_locked_route(branch)
+            eligible = [
+                curve
+                for curve in high_holdout
+                if curve["lockedModelRoute"] == route and curve["name"] not in high_random_assignments
+            ]
+            if len(eligible) < len(hits):
+                eligible = [curve for curve in high_holdout if curve["name"] not in high_random_assignments]
+            rng.shuffle(eligible)
+            activations = [activation for _curve, activation in hits]
+            rng.shuffle(activations)
+            for curve, activation in zip(eligible[: len(hits)], activations):
+                high_random_assignments[curve["name"]] = (branch, activation)
+        high_random_paired = [
+            (
+                curve,
+                base_scores[curve["name"]],
+                observed_state_score_curve_v1787_route_safe_forced(
+                    curve,
+                    curve,
+                    high_random_assignments.get(curve["name"], ("", 0.0))[0],
+                    high_random_assignments.get(curve["name"], ("", 0.0))[1],
+                ),
+            )
+            for curve in holdout
+        ]
+        rows.append(observed_state_law_freeze_summary(seed, "same-active-count-high-random-null", high_random_paired, high_names))
+    return rows
+
+
+def write_observed_state_route_safe_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+
+    nominal_metrics, case_rows = observed_state_soft_gate_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_v1787_route_safe,
+    )
+    seed_rows = observed_state_v1787_split_replay_rows(clean_curves, high_names, fit, amp_cap, soft_scale, full_threshold)
+    branch_rows = observed_state_law_freeze_branch_null_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_v1787_route_safe,
+        observed_state_score_curve_v1787_route_safe_forced,
+    )
+
+    projection_rows: list[dict] = []
+    for curve in clean_curves:
+        baseline = score_curve(curve)
+        raw = observed_state_score_curve_law_hardened(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        projected = observed_state_score_curve_v1787_route_safe(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        if projected.get("observedStateRouteSafeProjected"):
+            projection_rows.append(
+                {
+                    "galaxy": curve["name"],
+                    "set": "clean-high-rmse" if curve["name"] in high_names else "clean-protected",
+                    "lockedRoute": curve["lockedModelRoute"],
+                    "branch": raw.get("observedStateBranch", ""),
+                    "baselineRmse": baseline["rmse"],
+                    "v1786Rmse": raw["rmse"],
+                    "v1787Rmse": projected["rmse"],
+                    "baselineRoute": baseline["candidateRoute"],
+                    "v1786Route": raw["candidateRoute"],
+                    "v1787Route": projected["candidateRoute"],
+                    "safeStrength": projected.get("observedStateRouteSafeStrength", ""),
+                    "amp": projected.get("observedStateAmp", ""),
+                    "q": projected.get("observedStateQ", ""),
+                }
+            )
+
+    candidate_seed_rows = [row for row in seed_rows if row["track"] == "v17.87-route-safe-projected"]
+    null_seed_rows = [row for row in seed_rows if row["track"] != "v17.87-route-safe-projected"]
+    median_candidate_high = safe_median(parse_float(row["highGainPct"]) for row in candidate_seed_rows)
+    median_candidate_clean = safe_median(parse_float(row["cleanGainPct"]) for row in candidate_seed_rows)
+    median_candidate_route = safe_median(parse_float(row["routePreservation"]) for row in candidate_seed_rows)
+    median_nulls = {
+        track: safe_median(parse_float(row["highGainPct"]) for row in null_seed_rows if row["track"] == track)
+        for track in sorted({row["track"] for row in null_seed_rows})
+    }
+    best_null = max([value for value in median_nulls.values() if math.isfinite(value)] or [math.nan])
+    null_margin = median_candidate_high - best_null if math.isfinite(median_candidate_high) and math.isfinite(best_null) else math.nan
+    branch_rejections = sum(1 for row in branch_rows if str(row["branchStatus"]).startswith("rejected"))
+    max_holdout_protected_regression = max(parse_float(row["maxProtectedRegression"], 0.0) for row in candidate_seed_rows)
+    max_holdout_above20 = max(int(parse_float(row["highStillAbove20"], 0.0)) for row in candidate_seed_rows)
+    projected_high_count = sum(1 for row in projection_rows if row["set"] == "clean-high-rmse")
+    projected_protected_count = sum(1 for row in projection_rows if row["set"] == "clean-protected")
+
+    accepted = (
+        nominal_metrics["highStillAbove20"] == 0
+        and nominal_metrics["highGainPct"] >= 67.0
+        and nominal_metrics["cleanGainPct"] >= 43.0
+        and median_candidate_high >= 67.0
+        and median_candidate_clean >= 43.0
+        and median_candidate_route >= 0.80
+        and max_holdout_above20 == 0
+        and max_holdout_protected_regression <= 4.0
+        and math.isfinite(null_margin)
+        and null_margin >= 25.0
+        and branch_rejections == 0
+    )
+    verdict = "v17.87 route-safe projection passed" if accepted else "v17.87 route-safe projection underpowered"
+
+    summary = {
+        "candidateId": "observed-state-response-v17.87-route-safe-projected",
+        "testedCandidate": "observed-state-response-v17.86-robustness-passed",
+        "routeSafeStrengthFloor": OBSERVED_STATE_ROUTE_SAFE_STRENGTH_FLOOR,
+        "nominalHighGainPct": nominal_metrics["highGainPct"],
+        "nominalCleanGainPct": nominal_metrics["cleanGainPct"],
+        "nominalRoutePreservation": nominal_metrics["routePreservation"],
+        "nominalHighStillAbove20": nominal_metrics["highStillAbove20"],
+        "medianHoldoutHighGainPct": median_candidate_high,
+        "medianHoldoutCleanGainPct": median_candidate_clean,
+        "medianHoldoutRoutePreservation": median_candidate_route,
+        "bestNullHighGainPct": best_null,
+        "bestNullMarginPct": null_margin,
+        "maxHoldoutHighStillAbove20": max_holdout_above20,
+        "maxHoldoutProtectedRegression": max_holdout_protected_regression,
+        "branchRejectedCount": branch_rejections,
+        "routeSafeProjectedHighCount": projected_high_count,
+        "routeSafeProjectedProtectedCount": projected_protected_count,
+        "routeSafeProjectionVetoBranches": ";".join(sorted(OBSERVED_STATE_ROUTE_SAFE_PROJECTION_VETO_BRANCHES)),
+        "verdict": verdict,
+    }
+
+    prefix = "mts_observed_state_route_safe"
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_seed_replay.csv", seed_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", [dict(track=track, medianHighGainPct=value) for track, value in median_nulls.items()])
+    write_csv(out_dir / f"{prefix}_branch_nulls.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_projection_ledger.csv", projection_rows)
+
+    formula = {
+        "candidateId": summary["candidateId"],
+        "baseLaw": "observed-state-response-v17.86-robustness-passed",
+        "mechanism": "If a v17.86 branch changes route, compute model-internal safe strength by backing off from branch amp/q toward canonical amp=1,q=0.77 until the locked route is preserved. Apply the projected response only when safe strength >= 0.50; otherwise keep v17.86.",
+        "routeSafeStrengthFloor": OBSERVED_STATE_ROUTE_SAFE_STRENGTH_FLOOR,
+        "projectionVetoBranches": sorted(OBSERVED_STATE_ROUTE_SAFE_PROJECTION_VETO_BRANCHES),
+        "canonicalMtsChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics galaxies"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    report = [
+        "# MTS v17.87 Route-Safe Projection",
+        "",
+        "This pass modifies v17.86 only when model-internal route feedback says a route-preserving version of the same branch is still strong enough. It does not use residuals, RMSE lookup, galaxy names, or weak/systematics galaxies as formula inputs.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Nominal high-RMSE gain: `{fmt(summary['nominalHighGainPct'])}%`.",
+        f"- Nominal clean-set gain: `{fmt(summary['nominalCleanGainPct'])}%`.",
+        f"- Nominal route preservation: `{fmt(summary['nominalRoutePreservation'], 3)}`.",
+        f"- Median holdout high-RMSE gain: `{fmt(summary['medianHoldoutHighGainPct'])}%`.",
+        f"- Median holdout clean-set gain: `{fmt(summary['medianHoldoutCleanGainPct'])}%`.",
+        f"- Median holdout route preservation: `{fmt(summary['medianHoldoutRoutePreservation'], 3)}`.",
+        f"- Best null high-RMSE gain: `{fmt(summary['bestNullHighGainPct'])}%`.",
+        f"- Null margin: `{fmt(summary['bestNullMarginPct'])}` points.",
+        f"- Max holdout high-RMSE cases above 20: `{summary['maxHoldoutHighStillAbove20']}`.",
+        f"- Max holdout protected regression: `{fmt(summary['maxHoldoutProtectedRegression'])}` km/s.",
+        f"- Route-safe projected high cases: `{summary['routeSafeProjectedHighCount']}`.",
+        f"- Route-safe projected protected cases: `{summary['routeSafeProjectedProtectedCount']}`.",
+        "",
+        "## Projected Cases",
+        "",
+    ]
+    for row in projection_rows:
+        report.append(
+            f"- `{row['galaxy']}`: `{row['v1786Route']}` -> `{row['v1787Route']}`, RMSE `{fmt(row['v1786Rmse'])}` -> `{fmt(row['v1787Rmse'])}`, safe strength `{fmt(row['safeStrength'], 3)}`."
+        )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-state-route-safe-v17-87",
+        "candidateId": summary["candidateId"],
+        "testedCandidate": summary["testedCandidate"],
+        "verdict": verdict,
+        "summary": summary,
+        "medianNulls": median_nulls,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_seed_replay.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_branch_nulls.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_projection_ledger.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstateroutesafe(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_ROUTE_SAFE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_route_safe_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v17.87 route-safe projection")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['nominalHighGainPct'])}%",
+                f"clean={fmt(summary['nominalCleanGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"route_pres={fmt(summary['medianHoldoutRoutePreservation'], 3)}",
+                f"above20={summary['maxHoldoutHighStillAbove20']}",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+                f"projected={summary['routeSafeProjectedHighCount']}+{summary['routeSafeProjectedProtectedCount']}",
+            ]
+        )
+    )
+    print(f"Wrote observed state route-safe projection to {out_dir.resolve()}")
+
+
 OBSERVED_STATE_SOFT_NEIGHBOR_SEEDS = list(range(SPLIT_SEED + 1000, SPLIT_SEED + 1011))
 OBSERVED_STATE_SOFT_SCALE_GRID = [0.03, 0.05, 0.08, 0.10]
 OBSERVED_STATE_SOFT_FULL_THRESHOLD_GRID = [1.0 / 12.0, 0.12, 0.16, 0.20, 0.30, 0.40]
@@ -57015,6 +57435,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatereleasestress",
             "observedstatefamilycompress",
             "observedstaterobustness",
+            "observedstateroutesafe",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -57206,6 +57627,8 @@ def main() -> None:
         cmd_observedstatefamilycompress(args)
     elif args.mode == "observedstaterobustness":
         cmd_observedstaterobustness(args)
+    elif args.mode == "observedstateroutesafe":
+        cmd_observedstateroutesafe(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
