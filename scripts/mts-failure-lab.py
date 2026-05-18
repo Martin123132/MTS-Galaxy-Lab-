@@ -127,6 +127,7 @@ DEFAULT_OBSERVED_STATE_FAMILY_EDGE_LAW_OUT = OUTPUT_PACK_ROOT / "mts-observed-st
 DEFAULT_OBSERVED_STATE_MINIMAL_LAW_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-minimal-law-v17-72"
 DEFAULT_OBSERVED_STATE_LOWLOAD_EDGE_LAW_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-lowload-edge-law-v17-73"
 DEFAULT_OBSERVED_STATE_LOWLOAD_EDGE_HARDENED_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-lowload-edge-hardened-v17-74"
+DEFAULT_OBSERVED_STATE_LOWLOAD_Q_SURFACE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-lowload-q-surface-v17-75"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -48445,6 +48446,9 @@ OBSERVED_STATE_V1773_LOWLOAD_EDGE_RESTORED_BRANCHES = {
     "low-load compact bulge-shear edge",
     "low-load sparse-gas transition",
 }
+OBSERVED_STATE_V1775_LOWLOAD_Q_SURFACE_BRANCHES = {
+    "low-load negative-curvature transition",
+}
 
 
 def observed_state_with_branch_response_spine(spine: set[str], fn: Callable[[], object]) -> object:
@@ -49658,6 +49662,104 @@ def observed_state_score_curve_lowload_edge_hardened_law_forced(
             if observed_state_over_support_gate_soft_safe(state_curve):
                 return observed_state_score_curve_hybrid_response_forced(curve, state_curve, "", 0.0)
             return observed_state_v1770_lowload_q_compressed_score(curve, activation, activation)
+        if branch == OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_COMPRESSED_BRANCH or branch in OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_BRANCHES:
+            if observed_state_over_support_gate_soft_safe(state_curve):
+                return observed_state_score_curve_hybrid_response_forced(curve, state_curve, "", 0.0)
+            return observed_state_v1771_compressed_edge_score(
+                curve,
+                activation,
+                activation,
+                OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_COMPRESSED_BRANCH,
+                "gas-memory response",
+                OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_AMP,
+                OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_Q,
+            )
+        if branch == OBSERVED_STATE_V1771_SHELF_EDGE_COMPRESSED_BRANCH or branch in OBSERVED_STATE_V1771_SHELF_EDGE_BRANCHES:
+            if observed_state_over_support_gate_soft_safe(state_curve):
+                return observed_state_score_curve_hybrid_response_forced(curve, state_curve, "", 0.0)
+            return observed_state_v1771_compressed_edge_score(
+                curve,
+                activation,
+                activation,
+                OBSERVED_STATE_V1771_SHELF_EDGE_COMPRESSED_BRANCH,
+                "buffered shelf-curvature response",
+                OBSERVED_STATE_V1771_SHELF_EDGE_AMP,
+                OBSERVED_STATE_V1771_SHELF_EDGE_Q,
+            )
+        return observed_state_v1774_support_score(curve, state_curve, fit={}, amp_cap=4.5, branch=branch, activation=activation, probability=activation)
+
+    return observed_state_with_branch_response_spine(spine, score_with_spine)
+
+
+def observed_state_score_curve_lowload_q_surface_law(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    spine = OBSERVED_STATE_V1772_MINIMAL_BRANCH_RESPONSE_SPINE | OBSERVED_STATE_V1773_LOWLOAD_EDGE_RESTORED_BRANCHES
+
+    def score_with_spine() -> dict:
+        if observed_state_over_support_gate_soft_safe(state_curve):
+            return observed_state_score_curve_family_edge_law(curve, state_curve, fit, amp_cap, soft_scale, full_threshold)
+        branch, probability, _counts = observed_state_soft_branch_probability(state_curve, soft_scale)
+        if branch and not observed_state_soft_branch_safety(branch, state_curve):
+            branch = ""
+            probability = 0.0
+        activation = observed_state_soft_activation(probability, full_threshold)
+        if branch and activation > 0.0:
+            if (
+                observed_state_branch_family(branch) == "low-load q-transition"
+                and branch not in OBSERVED_STATE_V1773_LOWLOAD_EDGE_RESTORED_BRANCHES
+                and branch not in OBSERVED_STATE_V1775_LOWLOAD_Q_SURFACE_BRANCHES
+            ):
+                return observed_state_v1770_lowload_q_compressed_score(curve, activation, probability)
+            compressed = observed_state_v1771_maybe_compressed_edge_score(curve, branch, activation, probability)
+            if compressed is not None:
+                return compressed
+            return observed_state_v1774_support_score(
+                curve,
+                state_curve,
+                fit,
+                amp_cap,
+                branch,
+                activation,
+                probability,
+            )
+        return observed_state_score_curve_family_edge_law(curve, state_curve, fit, amp_cap, soft_scale, full_threshold)
+
+    return observed_state_with_branch_response_spine(spine, score_with_spine)
+
+
+def observed_state_score_curve_lowload_q_surface_law_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    spine = OBSERVED_STATE_V1772_MINIMAL_BRANCH_RESPONSE_SPINE | OBSERVED_STATE_V1773_LOWLOAD_EDGE_RESTORED_BRANCHES
+
+    def score_with_spine() -> dict:
+        if branch == OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_BRANCH:
+            if observed_state_over_support_gate_soft_safe(state_curve):
+                return observed_state_score_curve_hybrid_response_forced(curve, state_curve, "", 0.0)
+            return observed_state_v1770_lowload_q_compressed_score(curve, activation, activation)
+        if observed_state_branch_family(branch) == "low-load q-transition":
+            if observed_state_over_support_gate_soft_safe(state_curve):
+                return observed_state_score_curve_hybrid_response_forced(curve, state_curve, "", 0.0)
+            if branch not in OBSERVED_STATE_V1775_LOWLOAD_Q_SURFACE_BRANCHES:
+                return observed_state_v1770_lowload_q_compressed_score(curve, activation, activation)
+            return observed_state_v1774_support_score(
+                curve,
+                state_curve,
+                fit={},
+                amp_cap=4.5,
+                branch=branch,
+                activation=activation,
+                probability=activation,
+            )
         if branch == OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_COMPRESSED_BRANCH or branch in OBSERVED_STATE_V1771_GAS_MEMORY_EDGE_BRANCHES:
             if observed_state_over_support_gate_soft_safe(state_curve):
                 return observed_state_score_curve_hybrid_response_forced(curve, state_curve, "", 0.0)
@@ -51558,6 +51660,239 @@ def write_observed_state_lowload_edge_hardened_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def write_observed_state_lowload_q_surface_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+
+    metrics, _case_rows_from_eval = observed_state_soft_gate_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_lowload_q_surface_law,
+    )
+    case_rows = observed_state_law_freeze_case_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_lowload_q_surface_law,
+    )
+    seed_rows = observed_state_law_freeze_seed_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_lowload_q_surface_law,
+        observed_state_score_curve_lowload_q_surface_law_forced,
+        "v17.75-negative-curvature-q-surface",
+    )
+    branch_rows = observed_state_law_freeze_branch_null_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_lowload_q_surface_law,
+        observed_state_score_curve_lowload_q_surface_law_forced,
+    )
+    ablation_rows = observed_state_law_freeze_ablation_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_lowload_q_surface_law,
+    )
+    protected_stress_rows = observed_state_law_freeze_protected_stress_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_lowload_q_surface_law,
+        observed_state_score_curve_lowload_q_surface_law_forced,
+    )
+
+    candidate_seed_rows = [row for row in seed_rows if row["track"] == "v17.75-negative-curvature-q-surface"]
+    null_seed_rows = [row for row in seed_rows if row["track"] != "v17.75-negative-curvature-q-surface"]
+    median_candidate_high = safe_median(parse_float(row["highGainPct"]) for row in candidate_seed_rows)
+    median_candidate_clean = safe_median(parse_float(row["cleanGainPct"]) for row in candidate_seed_rows)
+    median_nulls = {
+        track: safe_median(parse_float(row["highGainPct"]) for row in null_seed_rows if row["track"] == track)
+        for track in sorted({row["track"] for row in null_seed_rows})
+    }
+    best_null = max([value for value in median_nulls.values() if math.isfinite(value)] or [math.nan])
+    max_seed_protected = max([parse_float(row["maxProtectedRegression"], 0.0) for row in candidate_seed_rows] or [0.0])
+    max_seed_branch_protected = max(
+        [parse_float(row["maxProtectedBranchHitRegression"], 0.0) for row in candidate_seed_rows] or [0.0]
+    )
+    max_stress_regression = max([parse_float(row["stressRegressionKmS"], 0.0) for row in protected_stress_rows] or [0.0])
+    max_above20 = max([int(parse_float(row["highStillAbove20"], 0.0)) for row in candidate_seed_rows] or [0])
+    max_worsened = max([int(parse_float(row["highWorsened"], 0.0)) for row in candidate_seed_rows] or [0])
+    null_margin = median_candidate_high - best_null if math.isfinite(median_candidate_high) and math.isfinite(best_null) else math.nan
+    accepted = (
+        metrics["highGainPct"] >= 63.0
+        and median_candidate_high >= 62.0
+        and median_candidate_clean >= 40.0
+        and max_seed_protected < 4.0
+        and max_seed_branch_protected < 3.0
+        and max_above20 == 0
+        and max_worsened == 0
+        and math.isfinite(null_margin)
+        and null_margin >= 25.0
+    )
+    verdict = "v17.75 negative-curvature q surface improves high-RMSE repair" if accepted else "v17.75 negative-curvature q surface failed gates"
+    edge_spine = sorted(OBSERVED_STATE_V1772_MINIMAL_BRANCH_RESPONSE_SPINE | OBSERVED_STATE_V1773_LOWLOAD_EDGE_RESTORED_BRANCHES)
+    summary = {
+        "candidateId": "observed-state-response-v17.75-negative-curvature-q-surface",
+        "formulaChanged": True,
+        "baseCandidate": "observed-state-response-v17.74-lowload-edge-equation",
+        "lawChange": "release only the low-load negative-curvature transition from the flat q-compressed response to the state-dependent q surface; keep all other v17.74 responses locked",
+        "lowLoadEdgeEquationBranches": sorted(OBSERVED_STATE_V1773_LOWLOAD_EDGE_RESTORED_BRANCHES),
+        "branchSpecificResponseCount": len(edge_spine),
+        "lowLoadEdgeEquationSurfaceCount": 1,
+        "lowLoadQSurfaceBranches": sorted(OBSERVED_STATE_V1775_LOWLOAD_Q_SURFACE_BRANCHES),
+        **metrics,
+        "medianHoldoutHighGainPct": median_candidate_high,
+        "medianHoldoutCleanGainPct": median_candidate_clean,
+        "bestNullHighGainPct": best_null,
+        "bestNullMarginPct": null_margin,
+        "maxHoldoutProtectedRegression": max_seed_protected,
+        "maxHoldoutProtectedBranchHitRegression": max_seed_branch_protected,
+        "maxProtectedLookalikeStressRegression": max_stress_regression,
+        "maxHoldoutHighStillAbove20": max_above20,
+        "maxHoldoutHighWorsened": max_worsened,
+        "verdict": verdict,
+    }
+
+    write_csv(out_dir / "mts_observed_state_lowload_q_surface_scores.csv", [summary])
+    write_csv(out_dir / "mts_observed_state_lowload_q_surface_seed_replay.csv", seed_rows)
+    write_csv(out_dir / "mts_observed_state_lowload_q_surface_case_ledger.csv", case_rows)
+    write_csv(out_dir / "mts_observed_state_lowload_q_surface_branch_ablation.csv", ablation_rows)
+    write_csv(out_dir / "mts_observed_state_lowload_q_surface_branch_nulls.csv", branch_rows)
+    write_csv(out_dir / "mts_observed_state_lowload_q_surface_protected_lookalike_stress.csv", protected_stress_rows)
+
+    formula = {
+        "candidateId": "observed-state-response-v17.75-negative-curvature-q-surface",
+        "mechanism": "v17.74 low-load edge equation plus a narrow state-dependent q-surface release for low-load negative-curvature transition cases",
+        "lowLoadQSurfaceBranches": sorted(OBSERVED_STATE_V1775_LOWLOAD_Q_SURFACE_BRANCHES),
+        "lowLoadEdgeEquationBranches": sorted(OBSERVED_STATE_V1773_LOWLOAD_EDGE_RESTORED_BRANCHES),
+        "lowLoadEdgeEquation": {
+            "edgeFloor": "max(1 + 1.38*highQOuterBulgeDrive, 1 + 0.70*compactBulgeShearDrive, 1 + 1.55*sparseGasTransitionDrive), clamped [1.0,2.55]",
+            "edgeQ": "max(0.85 + 1.00*highQOuterBulgeDrive, 0.85 + 0.10*compactBulgeShearDrive, 0.85 + 0.40*sparseGasTransitionDrive), clamped [0.85,1.85]",
+        },
+        "nonEdgeLowLoadQSurface": "only low-load negative-curvature transition uses observed_state_v1767/v1768 state-dependent low-load transition floor/q surface; other non-edge low-load q branches stay compressed",
+        "baseMinimalBranchSpecificResponseSpine": sorted(OBSERVED_STATE_V1772_MINIMAL_BRANCH_RESPONSE_SPINE),
+        "effectiveBranchSpecificResponseSpine": edge_spine,
+        "softScale": soft_scale,
+        "fullActivationThreshold": full_threshold,
+        "canonicalMtsChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics galaxies"],
+    }
+    (out_dir / "mts_observed_state_lowload_q_surface_formula.json").write_text(
+        json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+    changed_cases = []
+    for curve in clean_curves:
+        baseline = score_curve(curve)
+        old = observed_state_score_curve_lowload_edge_hardened_law(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        new = observed_state_score_curve_lowload_q_surface_law(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        delta = new["rmse"] - old["rmse"]
+        if abs(delta) > 1e-9:
+            changed_cases.append(
+                {
+                    "galaxy": curve["name"],
+                    "set": "clean-high-rmse" if curve["name"] in high_names else "clean-protected",
+                    "baselineRmse": baseline["rmse"],
+                    "v1774Rmse": old["rmse"],
+                    "v1775Rmse": new["rmse"],
+                    "deltaVsV1774": delta,
+                    "branch": new.get("observedStateBranch", ""),
+                    "responseSource": new.get("observedStateResponseSource", ""),
+                }
+            )
+    write_csv(out_dir / "mts_observed_state_lowload_q_surface_changed_cases.csv", changed_cases)
+
+    worst_high = sorted(
+        [row for row in case_rows if row["set"] == "clean-high-rmse"],
+        key=lambda row: -parse_float(row["candidateRmse"]),
+    )[:12]
+    report = [
+        "# MTS v17.75 Negative-Curvature q Surface",
+        "",
+        "This is a framework candidate change. It keeps v17.74 locked except for the low-load negative-curvature transition, which uses the state-dependent q surface instead of the flat compressed low-load q response.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Law change: `{summary['lawChange']}`.",
+        f"- Nominal high-RMSE gain: `{fmt(summary['highGainPct'])}%`.",
+        f"- Median holdout high-RMSE gain: `{fmt(summary['medianHoldoutHighGainPct'])}%`.",
+        f"- Median holdout clean-set gain: `{fmt(summary['medianHoldoutCleanGainPct'])}%`.",
+        f"- Best split null high-RMSE gain: `{fmt(summary['bestNullHighGainPct'])}%`.",
+        f"- Split null margin: `{fmt(summary['bestNullMarginPct'])}` points.",
+        f"- Max holdout protected regression: `{fmt(summary['maxHoldoutProtectedRegression'])} km/s`.",
+        f"- Max protected branch-hit regression: `{fmt(summary['maxHoldoutProtectedBranchHitRegression'])} km/s`.",
+        f"- High-RMSE holdout still above 20: `{summary['maxHoldoutHighStillAbove20']}`.",
+        f"- High-RMSE holdout worsened: `{summary['maxHoldoutHighWorsened']}`.",
+        "",
+        "## Changed Cases vs v17.74",
+        "",
+    ]
+    for row in sorted(changed_cases, key=lambda item: parse_float(item["deltaVsV1774"])):
+        report.append(
+            f"- `{row['galaxy']}`: v17.74 `{fmt(row['v1774Rmse'])}` -> v17.75 `{fmt(row['v1775Rmse'])}` km/s, branch `{row['branch']}`, source `{row['responseSource']}`."
+        )
+    report.extend(["", "## Worst High-RMSE Cases After v17.75", ""])
+    for row in worst_high:
+        report.append(
+            f"- `{row['galaxy']}`: baseline `{fmt(row['baselineRmse'])}` -> candidate `{fmt(row['candidateRmse'])}` km/s, branch `{row['branch'] or row['routeTransitionFallback'] or 'none'}`."
+        )
+    (out_dir / "mts_observed_state_lowload_q_surface_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-state-lowload-q-surface-v17-75",
+        "candidateId": "observed-state-response-v17.75-negative-curvature-q-surface",
+        "verdict": verdict,
+        "summary": summary,
+        "formula": formula,
+        "medianNulls": median_nulls,
+        "outputFiles": [
+            "mts_observed_state_lowload_q_surface_scores.csv",
+            "mts_observed_state_lowload_q_surface_seed_replay.csv",
+            "mts_observed_state_lowload_q_surface_case_ledger.csv",
+            "mts_observed_state_lowload_q_surface_branch_ablation.csv",
+            "mts_observed_state_lowload_q_surface_branch_nulls.csv",
+            "mts_observed_state_lowload_q_surface_protected_lookalike_stress.csv",
+            "mts_observed_state_lowload_q_surface_changed_cases.csv",
+            "mts_observed_state_lowload_q_surface_formula.json",
+            "mts_observed_state_lowload_q_surface_report.md",
+            "mts_observed_state_lowload_q_surface_capsule.json",
+        ],
+    }
+    (out_dir / "mts_observed_state_lowload_q_surface_capsule.json").write_text(
+        json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8"
+    )
+    return capsule
+
+
 def cmd_observedstatelowloadedge(args: argparse.Namespace) -> None:
     out_dir = DEFAULT_OBSERVED_STATE_LOWLOAD_EDGE_LAW_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
     capsule = write_observed_state_lowload_edge_law_artifacts(out_dir)
@@ -51600,6 +51935,28 @@ def cmd_observedstatelowloadedgehardened(args: argparse.Namespace) -> None:
         )
     )
     print(f"Wrote observed state low-load edge hardened law to {out_dir.resolve()}")
+
+
+def cmd_observedstatelowloadqsurface(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_LOWLOAD_Q_SURFACE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_lowload_q_surface_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v17.75 negative-curvature q surface")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                "law_change=negative-curvature-q-surface",
+                f"high={fmt(summary['highGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"holdout_clean={fmt(summary['medianHoldoutCleanGainPct'])}%",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+                f"above20={summary['maxHoldoutHighStillAbove20']}",
+                f"protected_max={fmt(summary['maxHoldoutProtectedRegression'])}",
+            ]
+        )
+    )
+    print(f"Wrote observed state low-load q surface law to {out_dir.resolve()}")
 
 
 def cmd_list_candidates() -> None:
@@ -51693,6 +52050,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstateminimallaw",
             "observedstatelowloadedge",
             "observedstatelowloadedgehardened",
+            "observedstatelowloadqsurface",
         ],
         default="baseline",
     )
@@ -51884,6 +52242,8 @@ def main() -> None:
         cmd_observedstatelowloadedge(args)
     elif args.mode == "observedstatelowloadedgehardened":
         cmd_observedstatelowloadedgehardened(args)
+    elif args.mode == "observedstatelowloadqsurface":
+        cmd_observedstatelowloadqsurface(args)
 
 
 if __name__ == "__main__":
