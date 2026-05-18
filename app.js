@@ -12,7 +12,7 @@
     qDefault: 0.77
   };
 
-  var V17STATE_EXACT_TOKEN = "__MTS_V17_72_MINIMAL_LAW__";
+  var V17STATE_EXACT_TOKEN = "__MTS_V17_73_LOWLOAD_EDGE_LAW__";
 
   var FRAMEWORK_PRESETS = {
     mts: "gamma0 * leff * (1 - exp(-pow(r / leff, q)))",
@@ -25,7 +25,7 @@
 
   var FRAMEWORK_PRESET_LABELS = {
     mts: "MTS baseline",
-    v17state: "MTS v17.72 minimal state candidate",
+    v17state: "MTS v17.73 low-load edge candidate",
     baryon: "Baryon only",
     soft: "Soft radial support",
     outer: "Outer gate support",
@@ -1851,7 +1851,7 @@
   }
 
   function v17ExactCacheEntry(curve) {
-    var cache = window.MTS_V17_72_SUPPORT_CACHE;
+    var cache = window.MTS_V17_73_SUPPORT_CACHE;
     if (!cache || !cache.curves || !curve || !curve.name) return null;
     return cache.curves[curve.name] || null;
   }
@@ -2854,12 +2854,12 @@
     $("frameworkWins").textContent = batch ? batch.wins + "/" + batch.count : "--";
 
     if (batch) {
-      note.textContent = (state.framework.compiled && state.framework.compiled.kind === "v17state-exact-cache" ? "v17.72 exact cache active. " : "") +
+      note.textContent = (state.framework.compiled && state.framework.compiled.kind === "v17state-exact-cache" ? "v17.73 exact cache active. " : "") +
         "Batch complete: " + batch.wins + " / " + batch.count + " LTGs beat baseline. Median delta " + fmt(batch.medianDelta, 2) + " km/s." +
-        (batch.exactCacheFallbacks ? " v17.72 exact cache fallback used on " + batch.exactCacheFallbacks + " point(s)." : "");
+        (batch.exactCacheFallbacks ? " v17.73 exact cache fallback used on " + batch.exactCacheFallbacks + " point(s)." : "");
     } else if (score) {
       if (score.exactCacheHits) {
-        note.textContent = "v17.72 exact cached candidate active for this built-in curve. " +
+        note.textContent = "v17.73 exact cached candidate active for this built-in curve. " +
           (score.exactCacheFallbacks ? score.exactCacheFallbacks + " point(s) fell back to locked MTS." : "All active points used the tested support cache.");
       } else {
         note.textContent = "Formula ready. " + (score.invalidCount ? score.invalidCount + " invalid points were clamped." : "All active points evaluated.");
@@ -2957,7 +2957,7 @@
       exactCacheFallbacks: exactCacheFallbacks,
       expression: state.framework.expression
     };
-    $("frameworkNote").textContent = (state.framework.compiled && state.framework.compiled.kind === "v17state-exact-cache" ? "v17.72 exact cache active. " : "") +
+    $("frameworkNote").textContent = (state.framework.compiled && state.framework.compiled.kind === "v17state-exact-cache" ? "v17.73 exact cache active. " : "") +
       "Batch complete: " + wins + " / " + valid.length + " LTGs beat the MTS baseline for this formula.";
     updateFrameworkPanel();
   }
