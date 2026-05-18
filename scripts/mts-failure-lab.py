@@ -47044,7 +47044,6 @@ def cmd_observedstatefamilysurface(args: argparse.Namespace) -> None:
 
 
 OBSERVED_STATE_V1789_BRANCH_ALIASES = {
-    "buffered shelf-curvature edge compressed": "buffered gas-curvature",
     "buffered gas-rich Lgap transition": "gas-rich buffered disk",
     "low-load gas-extended saturation": "gas-memory edge compressed",
     "low-load gas-rich high-shear transition": "gas-memory edge compressed",
