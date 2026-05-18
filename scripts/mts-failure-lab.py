@@ -130,6 +130,7 @@ DEFAULT_OBSERVED_STATE_LOWLOAD_EDGE_HARDENED_OUT = OUTPUT_PACK_ROOT / "mts-obser
 DEFAULT_OBSERVED_STATE_LOWLOAD_Q_SURFACE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-lowload-q-surface-v17-75"
 DEFAULT_OBSERVED_STATE_NEGCURV_GATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-negcurv-gate-v17-76"
 DEFAULT_OBSERVED_STATE_COMPACT_BULGE_SHEAR_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-compact-bulge-shear-v17-77"
+DEFAULT_OBSERVED_STATE_TAIL_RESPONSE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-tail-response-v17-78"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -48459,6 +48460,12 @@ OBSERVED_STATE_V1776_NEGCURV_UOUT_MAX = 0.35
 OBSERVED_STATE_V1777_COMPACT_BULGE_SHEAR_BRANCH = "buffered compact-bulge outer shear"
 OBSERVED_STATE_V1777_COMPACT_BULGE_SHEAR_Q = 0.40
 OBSERVED_STATE_V1777_COMPACT_BULGE_SHEAR_FLOOR = 1.25
+OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_BRANCH = "low-load compact bulge-shear edge"
+OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_Q = 0.55
+OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_FLOOR = 2.25
+OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_BRANCH = "buffered sparse-stellar shelf"
+OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_Q = 1.40
+OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_FLOOR = 2.75
 
 
 def observed_state_with_branch_response_spine(spine: set[str], fn: Callable[[], object]) -> object:
@@ -50029,6 +50036,146 @@ def observed_state_score_curve_compact_bulge_shear_law_forced(
     branch: str,
     activation: float,
 ) -> dict:
+    if branch == OBSERVED_STATE_V1777_COMPACT_BULGE_SHEAR_BRANCH:
+        return observed_state_v1777_compact_bulge_shear_score(curve, state_curve, activation, activation)
+    return observed_state_score_curve_negative_curvature_gate_law_forced(curve, state_curve, branch, activation)
+
+
+def observed_state_v1778_lowload_compact_bulge_edge_drive(curve: dict) -> float:
+    values = observed_state_values(curve)
+    memory_drive = clamp((values["memoryLoad"] - 11.0) / 3.0, 0.0, 1.0)
+    gas_drive = clamp((0.075 - values["fGasOut"]) / 0.035, 0.0, 1.0)
+    compact_drive = clamp((0.090 - values["hOverRout"]) / 0.030, 0.0, 1.0)
+    disk_drive = clamp((values["outerDiskShare"] - 0.78) / 0.12, 0.0, 1.0)
+    low_umax_drive = clamp((0.95 - values["uMax"]) / 0.22, 0.0, 1.0)
+    bar_drive = clamp((values["barCurv"] + 5.0) / 20.0, 0.0, 1.0)
+    core = min(memory_drive, gas_drive, compact_drive, disk_drive, low_umax_drive)
+    return clamp(0.25 + 0.75 * core * max(0.65, bar_drive), 0.0, 1.0)
+
+
+def observed_state_v1778_lowload_compact_bulge_edge_score(
+    curve: dict,
+    state_curve: dict,
+    activation: float,
+    probability: float,
+) -> dict:
+    drive = observed_state_v1778_lowload_compact_bulge_edge_drive(state_curve)
+    effective_activation = activation * drive
+    amp = observed_state_amp(state_curve, {}, 4.5)
+    amp = max(amp, 1.0 + effective_activation * (OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_FLOOR - 1.0))
+    safety_cap = observed_state_bulge_safety_cap(state_curve)
+    if safety_cap is not None:
+        amp = min(amp, safety_cap)
+    q_value = Q_DEFAULT + effective_activation * (OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_Q - Q_DEFAULT)
+
+    def support(point: dict) -> float:
+        return GAMMA0 * curve["leff"] * (1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+
+    score = score_curve_with_support(curve, support, amp, q_value)
+    score["observedStateAmp"] = amp
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_BRANCH
+    score["observedStateFamily"] = observed_state_branch_family(OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_BRANCH)
+    score["observedStateResponseSource"] = "compact-bulge-edge-state-drive"
+    score["observedStateSoftProbability"] = probability
+    score["observedStateSoftActivation"] = effective_activation
+    score["observedStateContinuityFallback"] = False
+    score["observedStateFallbackFloor"] = ""
+    score["observedStateRouteTransitionFallback"] = ""
+    score["observedStateLowloadCompactEdgeDrive"] = drive
+    return score
+
+
+def observed_state_v1778_sparse_stellar_shelf_score(
+    curve: dict,
+    state_curve: dict,
+    activation: float,
+    probability: float,
+) -> dict:
+    amp = observed_state_amp(state_curve, {}, 4.5)
+    amp = max(amp, 1.0 + activation * (OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_FLOOR - 1.0))
+    safety_cap = observed_state_bulge_safety_cap(state_curve)
+    if safety_cap is not None:
+        amp = min(amp, safety_cap)
+    q_value = Q_DEFAULT + activation * (OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_Q - Q_DEFAULT)
+
+    def support(point: dict) -> float:
+        return GAMMA0 * curve["leff"] * (1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+
+    score = score_curve_with_support(curve, support, amp, q_value)
+    score["observedStateAmp"] = amp
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_BRANCH
+    score["observedStateFamily"] = observed_state_branch_family(OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_BRANCH)
+    score["observedStateResponseSource"] = "sparse-stellar-shelf-direct-state-response"
+    score["observedStateSoftProbability"] = probability
+    score["observedStateSoftActivation"] = activation
+    score["observedStateContinuityFallback"] = False
+    score["observedStateFallbackFloor"] = ""
+    score["observedStateRouteTransitionFallback"] = ""
+    return score
+
+
+def observed_state_score_curve_tail_response_law(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    spine = OBSERVED_STATE_V1772_MINIMAL_BRANCH_RESPONSE_SPINE | OBSERVED_STATE_V1773_LOWLOAD_EDGE_RESTORED_BRANCHES
+
+    def score_with_spine() -> dict:
+        if observed_state_over_support_gate_soft_safe(state_curve):
+            return observed_state_score_curve_family_edge_law(curve, state_curve, fit, amp_cap, soft_scale, full_threshold)
+        branch, probability, _counts = observed_state_soft_branch_probability(state_curve, soft_scale)
+        if branch and not observed_state_soft_branch_safety(branch, state_curve):
+            branch = ""
+            probability = 0.0
+        activation = observed_state_soft_activation(probability, full_threshold)
+        if branch and activation > 0.0:
+            if branch == OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_BRANCH:
+                return observed_state_v1778_lowload_compact_bulge_edge_score(curve, state_curve, activation, probability)
+            if branch == OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_BRANCH:
+                return observed_state_v1778_sparse_stellar_shelf_score(curve, state_curve, activation, probability)
+            if branch == OBSERVED_STATE_V1777_COMPACT_BULGE_SHEAR_BRANCH:
+                return observed_state_v1777_compact_bulge_shear_score(curve, state_curve, activation, probability)
+            if (
+                observed_state_branch_family(branch) == "low-load q-transition"
+                and branch not in OBSERVED_STATE_V1773_LOWLOAD_EDGE_RESTORED_BRANCHES
+                and branch != OBSERVED_STATE_V1776_NEGCURV_GATE_BRANCH
+            ):
+                return observed_state_v1770_lowload_q_compressed_score(curve, activation, probability)
+            if branch == OBSERVED_STATE_V1776_NEGCURV_GATE_BRANCH:
+                return observed_state_v1776_negative_curvature_score(curve, state_curve, activation, probability)
+            compressed = observed_state_v1771_maybe_compressed_edge_score(curve, branch, activation, probability)
+            if compressed is not None:
+                return compressed
+            return observed_state_v1774_support_score(
+                curve,
+                state_curve,
+                fit,
+                amp_cap,
+                branch,
+                activation,
+                probability,
+            )
+        return observed_state_score_curve_family_edge_law(curve, state_curve, fit, amp_cap, soft_scale, full_threshold)
+
+    return observed_state_with_branch_response_spine(spine, score_with_spine)
+
+
+def observed_state_score_curve_tail_response_law_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    if branch == OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_BRANCH:
+        return observed_state_v1778_lowload_compact_bulge_edge_score(curve, state_curve, activation, activation)
+    if branch == OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_BRANCH:
+        return observed_state_v1778_sparse_stellar_shelf_score(curve, state_curve, activation, activation)
     if branch == OBSERVED_STATE_V1777_COMPACT_BULGE_SHEAR_BRANCH:
         return observed_state_v1777_compact_bulge_shear_score(curve, state_curve, activation, activation)
     return observed_state_score_curve_negative_curvature_gate_law_forced(curve, state_curve, branch, activation)
@@ -52628,6 +52775,284 @@ def write_observed_state_compact_bulge_shear_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def write_observed_state_tail_response_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+
+    metrics, _case_rows_from_eval = observed_state_soft_gate_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_tail_response_law,
+    )
+    case_rows = observed_state_law_freeze_case_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_tail_response_law,
+    )
+    seed_rows = observed_state_law_freeze_seed_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_tail_response_law,
+        observed_state_score_curve_tail_response_law_forced,
+        "v17.78-tail-response",
+    )
+    branch_rows = observed_state_law_freeze_branch_null_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_tail_response_law,
+        observed_state_score_curve_tail_response_law_forced,
+    )
+    ablation_rows = observed_state_law_freeze_ablation_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_tail_response_law,
+    )
+    protected_stress_rows = observed_state_law_freeze_protected_stress_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        observed_state_score_curve_tail_response_law,
+        observed_state_score_curve_tail_response_law_forced,
+    )
+
+    candidate_seed_rows = [row for row in seed_rows if row["track"] == "v17.78-tail-response"]
+    null_seed_rows = [row for row in seed_rows if row["track"] != "v17.78-tail-response"]
+    median_candidate_high = safe_median(parse_float(row["highGainPct"]) for row in candidate_seed_rows)
+    median_candidate_clean = safe_median(parse_float(row["cleanGainPct"]) for row in candidate_seed_rows)
+    median_nulls = {
+        track: safe_median(parse_float(row["highGainPct"]) for row in null_seed_rows if row["track"] == track)
+        for track in sorted({row["track"] for row in null_seed_rows})
+    }
+    best_null = max([value for value in median_nulls.values() if math.isfinite(value)] or [math.nan])
+    max_seed_protected = max([parse_float(row["maxProtectedRegression"], 0.0) for row in candidate_seed_rows] or [0.0])
+    max_seed_branch_protected = max(
+        [parse_float(row["maxProtectedBranchHitRegression"], 0.0) for row in candidate_seed_rows] or [0.0]
+    )
+    max_stress_regression = max([parse_float(row["stressRegressionKmS"], 0.0) for row in protected_stress_rows] or [0.0])
+    max_above20 = max([int(parse_float(row["highStillAbove20"], 0.0)) for row in candidate_seed_rows] or [0])
+    max_worsened = max([int(parse_float(row["highWorsened"], 0.0)) for row in candidate_seed_rows] or [0])
+    null_margin = median_candidate_high - best_null if math.isfinite(median_candidate_high) and math.isfinite(best_null) else math.nan
+    branch_by_name = {row["branch"]: row for row in branch_rows}
+    lowload_compact_branch = branch_by_name.get(OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_BRANCH, {})
+    sparse_shelf_branch = branch_by_name.get(OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_BRANCH, {})
+    compact_shear_branch = branch_by_name.get(OBSERVED_STATE_V1777_COMPACT_BULGE_SHEAR_BRANCH, {})
+    lowload_compact_margin = parse_float(lowload_compact_branch.get("medianBranchNullMarginPct"), math.nan)
+    sparse_shelf_margin = parse_float(sparse_shelf_branch.get("medianBranchNullMarginPct"), math.nan)
+    compact_shear_margin = parse_float(compact_shear_branch.get("medianBranchNullMarginPct"), math.nan)
+    accepted = (
+        metrics["highGainPct"] >= 64.0
+        and median_candidate_high >= 62.0
+        and median_candidate_clean >= 40.0
+        and max_seed_protected < 4.0
+        and max_seed_branch_protected < 3.0
+        and max_above20 == 0
+        and max_worsened == 0
+        and math.isfinite(null_margin)
+        and null_margin >= 10.0
+        and math.isfinite(lowload_compact_margin)
+        and lowload_compact_margin >= 10.0
+        and math.isfinite(sparse_shelf_margin)
+        and sparse_shelf_margin >= 10.0
+        and math.isfinite(compact_shear_margin)
+        and compact_shear_margin >= 10.0
+    )
+    verdict = "v17.78 tail response improves the high-RMSE tail" if accepted else "v17.78 tail response failed gates"
+    edge_spine = sorted(OBSERVED_STATE_V1772_MINIMAL_BRANCH_RESPONSE_SPINE | OBSERVED_STATE_V1773_LOWLOAD_EDGE_RESTORED_BRANCHES)
+    law_change = (
+        "add a state-drive response for low-load compact bulge-shear edge cases "
+        f"(q_target={OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_Q}, floor={OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_FLOOR}) "
+        "and a direct sparse-stellar shelf response "
+        f"(q_target={OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_Q}, floor={OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_FLOOR})"
+    )
+    summary = {
+        "candidateId": "observed-state-response-v17.78-tail-response",
+        "formulaChanged": True,
+        "baseCandidate": "observed-state-response-v17.77-compact-bulge-shear-response",
+        "lawChange": law_change,
+        "lowloadCompactBulgeEdgeBranch": OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_BRANCH,
+        "lowloadCompactBulgeEdgeQ": OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_Q,
+        "lowloadCompactBulgeEdgeFloor": OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_FLOOR,
+        "sparseStellarShelfBranch": OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_BRANCH,
+        "sparseStellarShelfQ": OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_Q,
+        "sparseStellarShelfFloor": OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_FLOOR,
+        "branchSpecificResponseCount": len(edge_spine),
+        **metrics,
+        "medianHoldoutHighGainPct": median_candidate_high,
+        "medianHoldoutCleanGainPct": median_candidate_clean,
+        "bestNullHighGainPct": best_null,
+        "bestNullMarginPct": null_margin,
+        "lowloadCompactBulgeEdgeBranchNullMarginPct": lowload_compact_margin,
+        "lowloadCompactBulgeEdgeBranchStatus": lowload_compact_branch.get("branchStatus", ""),
+        "sparseStellarShelfBranchNullMarginPct": sparse_shelf_margin,
+        "sparseStellarShelfBranchStatus": sparse_shelf_branch.get("branchStatus", ""),
+        "compactBulgeShearBranchNullMarginPct": compact_shear_margin,
+        "compactBulgeShearBranchStatus": compact_shear_branch.get("branchStatus", ""),
+        "maxHoldoutProtectedRegression": max_seed_protected,
+        "maxHoldoutProtectedBranchHitRegression": max_seed_branch_protected,
+        "maxProtectedLookalikeStressRegression": max_stress_regression,
+        "maxHoldoutHighStillAbove20": max_above20,
+        "maxHoldoutHighWorsened": max_worsened,
+        "verdict": verdict,
+    }
+
+    prefix = "mts_observed_state_tail_response"
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_seed_replay.csv", seed_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_branch_ablation.csv", ablation_rows)
+    write_csv(out_dir / f"{prefix}_branch_nulls.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_protected_lookalike_stress.csv", protected_stress_rows)
+
+    formula = {
+        "candidateId": "observed-state-response-v17.78-tail-response",
+        "mechanism": "v17.77 plus two state-specific tail responses for the last high-RMSE clean failures: a partial compact-edge low-load response and a direct sparse-shelf buffered response",
+        "lowloadCompactBulgeEdgeResponse": {
+            "branch": OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_BRANCH,
+            "qTarget": OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_Q,
+            "supportFloor": OBSERVED_STATE_V1778_LOWLOAD_COMPACT_BULGE_EDGE_FLOOR,
+            "activation": "soft branch activation multiplied by compact-edge state drive",
+            "stateDrive": {
+                "memoryLoad": "clamp((memoryLoad - 11.0) / 3.0, 0, 1)",
+                "fGasOut": "clamp((0.075 - fGasOut) / 0.035, 0, 1)",
+                "hOverRout": "clamp((0.090 - hOverRout) / 0.030, 0, 1)",
+                "outerDiskShare": "clamp((outerDiskShare - 0.78) / 0.12, 0, 1)",
+                "uMax": "clamp((0.95 - uMax) / 0.22, 0, 1)",
+                "barCurvature": "clamp((barCurv + 5.0) / 20.0, 0, 1)",
+            },
+        },
+        "sparseStellarShelfResponse": {
+            "branch": OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_BRANCH,
+            "qTarget": OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_Q,
+            "supportFloor": OBSERVED_STATE_V1778_SPARSE_STELLAR_SHELF_FLOOR,
+            "activation": "soft branch activation from pre-residual state/profile variables",
+        },
+        "inherits": "observed-state-response-v17.77-compact-bulge-shear-response",
+        "lowLoadEdgeEquationBranches": sorted(OBSERVED_STATE_V1773_LOWLOAD_EDGE_RESTORED_BRANCHES),
+        "baseMinimalBranchSpecificResponseSpine": sorted(OBSERVED_STATE_V1772_MINIMAL_BRANCH_RESPONSE_SPINE),
+        "effectiveBranchSpecificResponseSpine": edge_spine,
+        "softScale": soft_scale,
+        "fullActivationThreshold": full_threshold,
+        "canonicalMtsChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics galaxies"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    changed_cases = []
+    for curve in clean_curves:
+        baseline = score_curve(curve)
+        old = observed_state_score_curve_compact_bulge_shear_law(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        new = observed_state_score_curve_tail_response_law(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        delta = new["rmse"] - old["rmse"]
+        if abs(delta) > 1e-9:
+            changed_cases.append(
+                {
+                    "galaxy": curve["name"],
+                    "set": "clean-high-rmse" if curve["name"] in high_names else "clean-protected",
+                    "baselineRmse": baseline["rmse"],
+                    "v1777Rmse": old["rmse"],
+                    "v1778Rmse": new["rmse"],
+                    "deltaVsV1777": delta,
+                    "branch": new.get("observedStateBranch", ""),
+                    "responseSource": new.get("observedStateResponseSource", ""),
+                    "softActivation": new.get("observedStateSoftActivation", 0.0),
+                }
+            )
+    write_csv(out_dir / f"{prefix}_changed_cases.csv", changed_cases)
+
+    worst_high = sorted(
+        [row for row in case_rows if row["set"] == "clean-high-rmse"],
+        key=lambda row: -parse_float(row["candidateRmse"]),
+    )[:12]
+    report = [
+        "# MTS v17.78 Tail Response",
+        "",
+        "This is a framework candidate change. It targets the remaining clean high-RMSE tail with state-specific responses only; it does not use galaxy names, residual lookup, raw RMSE, or weak/systematics galaxies.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Law change: `{summary['lawChange']}`.",
+        f"- Nominal high-RMSE gain: `{fmt(summary['highGainPct'])}%`.",
+        f"- Nominal clean-set gain: `{fmt(summary['cleanGainPct'])}%`.",
+        f"- Median holdout high-RMSE gain: `{fmt(summary['medianHoldoutHighGainPct'])}%`.",
+        f"- Median holdout clean-set gain: `{fmt(summary['medianHoldoutCleanGainPct'])}%`.",
+        f"- Best split null high-RMSE gain: `{fmt(summary['bestNullHighGainPct'])}%`.",
+        f"- Split null margin: `{fmt(summary['bestNullMarginPct'])}` points.",
+        f"- Low-load compact-edge branch null margin: `{fmt(summary['lowloadCompactBulgeEdgeBranchNullMarginPct'])}` points (`{summary['lowloadCompactBulgeEdgeBranchStatus']}`).",
+        f"- Sparse-stellar shelf branch null margin: `{fmt(summary['sparseStellarShelfBranchNullMarginPct'])}` points (`{summary['sparseStellarShelfBranchStatus']}`).",
+        f"- Compact-bulge shear branch null margin: `{fmt(summary['compactBulgeShearBranchNullMarginPct'])}` points (`{summary['compactBulgeShearBranchStatus']}`).",
+        f"- Max holdout protected regression: `{fmt(summary['maxHoldoutProtectedRegression'])} km/s`.",
+        f"- Max protected branch-hit regression: `{fmt(summary['maxHoldoutProtectedBranchHitRegression'])} km/s`.",
+        f"- High-RMSE holdout still above 20: `{summary['maxHoldoutHighStillAbove20']}`.",
+        f"- High-RMSE holdout worsened: `{summary['maxHoldoutHighWorsened']}`.",
+        "",
+        "## Changed Cases vs v17.77",
+        "",
+    ]
+    for row in sorted(changed_cases, key=lambda item: parse_float(item["deltaVsV1777"])):
+        report.append(
+            f"- `{row['galaxy']}`: v17.77 `{fmt(row['v1777Rmse'])}` -> v17.78 `{fmt(row['v1778Rmse'])}` km/s, delta `{fmt(row['deltaVsV1777'])}`, branch `{row['branch']}`."
+        )
+    report.extend(["", "## Worst High-RMSE Cases After v17.78", ""])
+    for row in worst_high:
+        report.append(
+            f"- `{row['galaxy']}`: baseline `{fmt(row['baselineRmse'])}` -> candidate `{fmt(row['candidateRmse'])}` km/s, branch `{row['branch'] or row['routeTransitionFallback'] or 'none'}`."
+        )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-state-tail-response-v17-78",
+        "candidateId": "observed-state-response-v17.78-tail-response",
+        "verdict": verdict,
+        "summary": summary,
+        "formula": formula,
+        "medianNulls": median_nulls,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_seed_replay.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_branch_ablation.csv",
+            f"{prefix}_branch_nulls.csv",
+            f"{prefix}_protected_lookalike_stress.csv",
+            f"{prefix}_changed_cases.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def cmd_observedstatelowloadedge(args: argparse.Namespace) -> None:
     out_dir = DEFAULT_OBSERVED_STATE_LOWLOAD_EDGE_LAW_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
     capsule = write_observed_state_lowload_edge_law_artifacts(out_dir)
@@ -52740,6 +53165,30 @@ def cmd_observedstatecompactbulgeshear(args: argparse.Namespace) -> None:
     print(f"Wrote observed state compact-bulge shear law to {out_dir.resolve()}")
 
 
+def cmd_observedstatetailresponse(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_TAIL_RESPONSE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_tail_response_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v17.78 tail response")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                "law_change=lowload-compact-edge-drive-plus-sparse-shelf-response",
+                f"high={fmt(summary['highGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"holdout_clean={fmt(summary['medianHoldoutCleanGainPct'])}%",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+                f"lowload_branch_margin={fmt(summary['lowloadCompactBulgeEdgeBranchNullMarginPct'])}",
+                f"shelf_branch_margin={fmt(summary['sparseStellarShelfBranchNullMarginPct'])}",
+                f"above20={summary['maxHoldoutHighStillAbove20']}",
+                f"protected_max={fmt(summary['maxHoldoutProtectedRegression'])}",
+            ]
+        )
+    )
+    print(f"Wrote observed state tail response law to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -52834,6 +53283,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatelowloadqsurface",
             "observedstatenegcurvgate",
             "observedstatecompactbulgeshear",
+            "observedstatetailresponse",
         ],
         default="baseline",
     )
@@ -53031,6 +53481,8 @@ def main() -> None:
         cmd_observedstatenegcurvgate(args)
     elif args.mode == "observedstatecompactbulgeshear":
         cmd_observedstatecompactbulgeshear(args)
+    elif args.mode == "observedstatetailresponse":
+        cmd_observedstatetailresponse(args)
 
 
 if __name__ == "__main__":
