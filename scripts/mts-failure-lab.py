@@ -139,6 +139,7 @@ DEFAULT_OBSERVED_STATE_TAIL_LIFT_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-ta
 DEFAULT_OBSERVED_STATE_COMPACT_MEMORY_Q_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-compact-memory-q-v17-84"
 DEFAULT_OBSERVED_STATE_LAW_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-law-harden-v17-85"
 DEFAULT_OBSERVED_STATE_ROUTE_SAFE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-route-safe-v17-87"
+DEFAULT_OBSERVED_STATE_FAMILY_SURFACE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-family-surface-v17-88"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -46715,7 +46716,23 @@ def observed_state_v1787_split_replay_rows(
     return rows
 
 
-def write_observed_state_route_safe_artifacts(out_dir: Path) -> dict:
+def write_observed_state_route_safe_artifacts(
+    out_dir: Path,
+    *,
+    score_fn: Callable[[dict, dict, dict, float, float, float], dict] = observed_state_score_curve_v1787_route_safe,
+    forced_score_fn: Callable[[dict, dict, str, float], dict] = observed_state_score_curve_v1787_route_safe_forced,
+    split_replay_fn: Callable[[list[dict], set[str], dict, float, float, float], list[dict]] = observed_state_v1787_split_replay_rows,
+    prefix: str = "mts_observed_state_route_safe",
+    candidate_id: str = "observed-state-response-v17.87-route-safe-projected",
+    tested_candidate: str = "observed-state-response-v17.86-robustness-passed",
+    analysis_name: str = "mts-observed-state-route-safe-v17-87",
+    report_title: str = "# MTS v17.87 Route-Safe Projection",
+    mechanism: str = "If a v17.86 branch changes route, compute model-internal safe strength by backing off from branch amp/q toward canonical amp=1,q=0.77 until the locked route is preserved. Apply the projected response only when safe strength >= 0.50; otherwise keep v17.86.",
+    report_intro: str = "This pass modifies v17.86 only when model-internal route feedback says a route-preserving version of the same branch is still strong enough. It does not use residuals, RMSE lookup, galaxy names, or weak/systematics galaxies as formula inputs.",
+    extra_formula: dict | None = None,
+    passed_verdict: str = "v17.87 route-safe projection passed",
+    failed_verdict: str = "v17.87 route-safe projection underpowered",
+) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     context = observed_state_candidate_context()
     clean_curves = context["cleanCurves"]
@@ -46732,9 +46749,9 @@ def write_observed_state_route_safe_artifacts(out_dir: Path) -> dict:
         amp_cap,
         soft_scale,
         full_threshold,
-        observed_state_score_curve_v1787_route_safe,
+        score_fn,
     )
-    seed_rows = observed_state_v1787_split_replay_rows(clean_curves, high_names, fit, amp_cap, soft_scale, full_threshold)
+    seed_rows = split_replay_fn(clean_curves, high_names, fit, amp_cap, soft_scale, full_threshold)
     branch_rows = observed_state_law_freeze_branch_null_rows(
         clean_curves,
         high_names,
@@ -46742,15 +46759,15 @@ def write_observed_state_route_safe_artifacts(out_dir: Path) -> dict:
         amp_cap,
         soft_scale,
         full_threshold,
-        observed_state_score_curve_v1787_route_safe,
-        observed_state_score_curve_v1787_route_safe_forced,
+        score_fn,
+        forced_score_fn,
     )
 
     projection_rows: list[dict] = []
     for curve in clean_curves:
         baseline = score_curve(curve)
         raw = observed_state_score_curve_law_hardened(curve, curve, fit, amp_cap, soft_scale, full_threshold)
-        projected = observed_state_score_curve_v1787_route_safe(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        projected = score_fn(curve, curve, fit, amp_cap, soft_scale, full_threshold)
         if projected.get("observedStateRouteSafeProjected"):
             projection_rows.append(
                 {
@@ -46770,8 +46787,16 @@ def write_observed_state_route_safe_artifacts(out_dir: Path) -> dict:
                 }
             )
 
-    candidate_seed_rows = [row for row in seed_rows if row["track"] == "v17.87-route-safe-projected"]
-    null_seed_rows = [row for row in seed_rows if row["track"] != "v17.87-route-safe-projected"]
+    candidate_track = candidate_id.split("observed-state-response-")[-1]
+    candidate_seed_rows = [row for row in seed_rows if row["track"] == candidate_track]
+    null_seed_rows = [row for row in seed_rows if row["track"] != candidate_track]
+    if not candidate_seed_rows:
+        candidate_seed_rows = [row for row in seed_rows if row["track"] not in {
+            "branch-label-shuffle-null",
+            "same-active-count-route-random-null",
+            "same-active-count-high-random-null",
+        }]
+        null_seed_rows = [row for row in seed_rows if row not in candidate_seed_rows]
     median_candidate_high = safe_median(parse_float(row["highGainPct"]) for row in candidate_seed_rows)
     median_candidate_clean = safe_median(parse_float(row["cleanGainPct"]) for row in candidate_seed_rows)
     median_candidate_route = safe_median(parse_float(row["routePreservation"]) for row in candidate_seed_rows)
@@ -46800,11 +46825,11 @@ def write_observed_state_route_safe_artifacts(out_dir: Path) -> dict:
         and null_margin >= 25.0
         and branch_rejections == 0
     )
-    verdict = "v17.87 route-safe projection passed" if accepted else "v17.87 route-safe projection underpowered"
+    verdict = passed_verdict if accepted else failed_verdict
 
     summary = {
-        "candidateId": "observed-state-response-v17.87-route-safe-projected",
-        "testedCandidate": "observed-state-response-v17.86-robustness-passed",
+        "candidateId": candidate_id,
+        "testedCandidate": tested_candidate,
         "routeSafeStrengthFloor": OBSERVED_STATE_ROUTE_SAFE_STRENGTH_FLOOR,
         "nominalHighGainPct": nominal_metrics["highGainPct"],
         "nominalCleanGainPct": nominal_metrics["cleanGainPct"],
@@ -46824,7 +46849,6 @@ def write_observed_state_route_safe_artifacts(out_dir: Path) -> dict:
         "verdict": verdict,
     }
 
-    prefix = "mts_observed_state_route_safe"
     write_csv(out_dir / f"{prefix}_scores.csv", [summary])
     write_csv(out_dir / f"{prefix}_seed_replay.csv", seed_rows)
     write_csv(out_dir / f"{prefix}_null_controls.csv", [dict(track=track, medianHighGainPct=value) for track, value in median_nulls.items()])
@@ -46834,19 +46858,21 @@ def write_observed_state_route_safe_artifacts(out_dir: Path) -> dict:
 
     formula = {
         "candidateId": summary["candidateId"],
-        "baseLaw": "observed-state-response-v17.86-robustness-passed",
-        "mechanism": "If a v17.86 branch changes route, compute model-internal safe strength by backing off from branch amp/q toward canonical amp=1,q=0.77 until the locked route is preserved. Apply the projected response only when safe strength >= 0.50; otherwise keep v17.86.",
+        "baseLaw": tested_candidate,
+        "mechanism": mechanism,
         "routeSafeStrengthFloor": OBSERVED_STATE_ROUTE_SAFE_STRENGTH_FLOOR,
         "projectionVetoBranches": sorted(OBSERVED_STATE_ROUTE_SAFE_PROJECTION_VETO_BRANCHES),
         "canonicalMtsChanged": False,
         "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics galaxies"],
     }
+    if extra_formula:
+        formula.update(extra_formula)
     (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
 
     report = [
-        "# MTS v17.87 Route-Safe Projection",
+        report_title,
         "",
-        "This pass modifies v17.86 only when model-internal route feedback says a route-preserving version of the same branch is still strong enough. It does not use residuals, RMSE lookup, galaxy names, or weak/systematics galaxies as formula inputs.",
+        report_intro,
         "",
         "## Result",
         "",
@@ -46874,7 +46900,7 @@ def write_observed_state_route_safe_artifacts(out_dir: Path) -> dict:
     (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
 
     capsule = {
-        "analysisName": "mts-observed-state-route-safe-v17-87",
+        "analysisName": analysis_name,
         "candidateId": summary["candidateId"],
         "testedCandidate": summary["testedCandidate"],
         "verdict": verdict,
@@ -46916,6 +46942,104 @@ def cmd_observedstateroutesafe(args: argparse.Namespace) -> None:
         )
     )
     print(f"Wrote observed state route-safe projection to {out_dir.resolve()}")
+
+
+OBSERVED_STATE_V1788_BRANCH_RESPONSE_SPINE: set[str] = set()
+
+
+def observed_state_score_curve_v1788_family_surface(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    return observed_state_with_branch_response_spine(
+        OBSERVED_STATE_V1788_BRANCH_RESPONSE_SPINE,
+        lambda: observed_state_score_curve_v1787_route_safe(curve, state_curve, fit, amp_cap, soft_scale, full_threshold),
+    )
+
+
+def observed_state_score_curve_v1788_family_surface_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    return observed_state_with_branch_response_spine(
+        OBSERVED_STATE_V1788_BRANCH_RESPONSE_SPINE,
+        lambda: observed_state_score_curve_v1787_route_safe_forced(curve, state_curve, branch, activation),
+    )
+
+
+def observed_state_v1788_split_replay_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> list[dict]:
+    rows = observed_state_with_branch_response_spine(
+        OBSERVED_STATE_V1788_BRANCH_RESPONSE_SPINE,
+        lambda: observed_state_v1787_split_replay_rows(clean_curves, high_names, fit, amp_cap, soft_scale, full_threshold),
+    )
+    for row in rows:
+        if row["track"] == "v17.87-route-safe-projected":
+            row["track"] = "v17.88-spine-free-route-safe"
+    return rows
+
+
+def cmd_observedstatefamilysurface(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_FAMILY_SURFACE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = observed_state_with_branch_response_spine(
+        OBSERVED_STATE_V1788_BRANCH_RESPONSE_SPINE,
+        lambda: write_observed_state_route_safe_artifacts(
+            out_dir,
+            score_fn=observed_state_score_curve_v1788_family_surface,
+            forced_score_fn=observed_state_score_curve_v1788_family_surface_forced,
+            split_replay_fn=observed_state_v1788_split_replay_rows,
+            prefix="mts_observed_state_family_surface",
+            candidate_id="observed-state-response-v17.88-spine-free-route-safe",
+            tested_candidate="observed-state-response-v17.87-route-safe-projected",
+            analysis_name="mts-observed-state-family-surface-v17-88",
+            report_title="# MTS v17.88 Spine-Free Route-Safe Response",
+            mechanism=(
+                "Use the v17.87 route-safe projection, but remove the old branch-specific response spine. "
+                "The validated route-safe q/floor refinements remain; the removed spine no longer changes any scores."
+            ),
+            report_intro=(
+                "This pass tests whether v17.87 still needs the old branch-specific response spine. It keeps the state gates, route-safe projection, "
+                "and validated route-safe q/floor refinements, but forces the legacy response-spine set to zero entries."
+            ),
+            extra_formula={
+                "branchSpecificResponseSpineCount": 0,
+                "branchSpecificResponseSpine": [],
+                "branchSpecificResponseSpineRemoved": True,
+                "routeSafeBranchRefinementsRetained": True,
+            },
+            passed_verdict="v17.88 spine-free route-safe response passed",
+            failed_verdict="v17.88 spine-free route-safe response underpowered",
+        ),
+    )
+    summary = capsule["summary"]
+    print("MTS v17.88 spine-free route-safe response")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['nominalHighGainPct'])}%",
+                f"clean={fmt(summary['nominalCleanGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"route_pres={fmt(summary['medianHoldoutRoutePreservation'], 3)}",
+                f"above20={summary['maxHoldoutHighStillAbove20']}",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+                "branch_spine=0",
+            ]
+        )
+    )
+    print(f"Wrote observed state family-surface response to {out_dir.resolve()}")
 
 
 OBSERVED_STATE_SOFT_NEIGHBOR_SEEDS = list(range(SPLIT_SEED + 1000, SPLIT_SEED + 1011))
@@ -57436,6 +57560,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatefamilycompress",
             "observedstaterobustness",
             "observedstateroutesafe",
+            "observedstatefamilysurface",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -57629,6 +57754,8 @@ def main() -> None:
         cmd_observedstaterobustness(args)
     elif args.mode == "observedstateroutesafe":
         cmd_observedstateroutesafe(args)
+    elif args.mode == "observedstatefamilysurface":
+        cmd_observedstatefamilysurface(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
