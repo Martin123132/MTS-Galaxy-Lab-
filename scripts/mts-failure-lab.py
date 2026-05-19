@@ -152,6 +152,7 @@ DEFAULT_OBSERVED_STATE_RADIAL_REPAIR_OUT = OUTPUT_PACK_ROOT / "mts-observed-stat
 DEFAULT_OBSERVED_STATE_STRESS_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-stress-harden-v17-98"
 DEFAULT_OBSERVED_STATE_FINAL_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-final-stress-v17-99"
 DEFAULT_OBSERVED_STATE_BARYON_GUARD_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-baryon-guard-v18-00"
+DEFAULT_OBSERVED_STATE_BARYON_GUARD_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-baryon-guard-harden-v18-01"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -53028,6 +53029,461 @@ def cmd_observedstatebaryonguard(args: argparse.Namespace) -> None:
     print(f"Wrote observed state baryon-confidence guard to {out_dir.resolve()}")
 
 
+OBSERVED_STATE_V1801_NULL_SEEDS = OBSERVED_STATE_ROBUSTNESS_SEEDS[:9]
+
+
+def observed_state_v1800_force_baryon_guard_branch(curve: dict, branch: str) -> dict:
+    if branch == "low-load baryon-confidence overrun guard":
+        return observed_state_v1800_baryon_guard_score(curve, 0.88, 5.0, 3.0, 2.0, 2.25, branch)
+    if branch == "dense positive-bulge baryon-confidence overrun guard":
+        return observed_state_v1800_baryon_guard_score(curve, 0.88, 8.0, 4.0, 4.0, 1.25, branch)
+    if branch == "extreme-umax baryon-confidence overrun guard":
+        return observed_state_v1800_baryon_guard_score(curve, 0.88, 2.5, 5.0, 5.0, 1.25, branch)
+    if branch == "gas-bulge baryon-confidence overrun guard":
+        return observed_state_v1800_baryon_guard_score(curve, 0.88, 2.0, 1.5, 1.5, 1.85, branch)
+    return score_curve(curve)
+
+
+def observed_state_v1801_stress_sets(clean_curves: list[dict]) -> list[tuple[str, list[dict]]]:
+    stress_sets: list[tuple[str, list[dict]]] = []
+    for disk_factor in [0.85, 1.00, 1.15]:
+        for bulge_factor in [0.85, 1.00, 1.15]:
+            label = f"mlDiskx{disk_factor:.2f}_mlBulx{bulge_factor:.2f}"
+            stress_sets.append(
+                (
+                    label,
+                    [
+                        transformed_curve(
+                            curve,
+                            ml_disk=curve["mlDisk"] * disk_factor,
+                            ml_bulge=curve["mlBulge"] * bulge_factor,
+                        )
+                        for curve in clean_curves
+                    ],
+                )
+            )
+    for baryon_factor in [0.90, 0.95, 1.00, 1.05, 1.10]:
+        stress_sets.append(
+            (
+                f"baryonVelocityx{baryon_factor:.2f}",
+                [transformed_curve(curve, baryon_velocity_scale=baryon_factor) for curve in clean_curves],
+            )
+        )
+    return stress_sets
+
+
+def observed_state_v1801_stress_tables(
+    clean_curves: list[dict],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> tuple[
+    list[tuple[str, list[dict]]],
+    dict[tuple[str, str], dict],
+    dict[tuple[str, str], dict],
+    dict[tuple[str, str], dict],
+    dict[tuple[str, str], dict],
+    list[dict],
+]:
+    stress_sets = observed_state_v1801_stress_sets(clean_curves)
+    by_key_curve: dict[tuple[str, str], dict] = {}
+    base_scores: dict[tuple[str, str], dict] = {}
+    previous_scores: dict[tuple[str, str], dict] = {}
+    candidate_scores: dict[tuple[str, str], dict] = {}
+    hits: list[dict] = []
+    for stress_label, curves in stress_sets:
+        for curve in curves:
+            key = (stress_label, curve["name"])
+            by_key_curve[key] = curve
+            base = score_curve(curve)
+            previous = observed_state_score_curve_v1799_stress_harden(
+                curve,
+                curve,
+                fit,
+                amp_cap,
+                soft_scale,
+                full_threshold,
+            )
+            candidate = observed_state_score_curve_v1800_baryon_guard(
+                curve,
+                curve,
+                fit,
+                amp_cap,
+                soft_scale,
+                full_threshold,
+            )
+            base_scores[key] = base
+            previous_scores[key] = previous
+            candidate_scores[key] = candidate
+            if (
+                abs(candidate["rmse"] - previous["rmse"]) > 1e-9
+                or candidate.get("observedStateBranch", "") != previous.get("observedStateBranch", "")
+            ):
+                hits.append(
+                    {
+                        "stress": stress_label,
+                        "galaxy": curve["name"],
+                        "lockedRoute": curve["lockedModelRoute"],
+                        "branch": candidate.get("observedStateBranch", ""),
+                        "v1799Rmse": previous["rmse"],
+                        "candidateRmse": candidate["rmse"],
+                        "improvementVsV1799KmS": previous["rmse"] - candidate["rmse"],
+                        "candidateRoute": candidate["candidateRoute"],
+                        "baryonConfidence": candidate.get("baryonConfidence", ""),
+                    }
+                )
+    return stress_sets, by_key_curve, base_scores, previous_scores, candidate_scores, hits
+
+
+def observed_state_v1801_score_assignment(
+    *,
+    track: str,
+    seed: int,
+    assignments: dict[tuple[str, str], str],
+    stress_sets: list[tuple[str, list[dict]]],
+    high_names: set[str],
+    base_scores: dict[tuple[str, str], dict],
+    previous_scores: dict[tuple[str, str], dict],
+) -> dict:
+    high_rows = []
+    protected_regressions = []
+    active_high_improvements = []
+    active_protected_regressions = []
+    active_count_by_branch: dict[str, int] = {}
+    for stress_label, curves in stress_sets:
+        for curve in curves:
+            key = (stress_label, curve["name"])
+            if key in assignments:
+                score = observed_state_v1800_force_baryon_guard_branch(curve, assignments[key])
+                active_count_by_branch[assignments[key]] = active_count_by_branch.get(assignments[key], 0) + 1
+            else:
+                score = previous_scores[key]
+            base = base_scores[key]
+            previous = previous_scores[key]
+            if curve["name"] in high_names:
+                high_rows.append((curve, base, previous, score))
+                if key in assignments:
+                    active_high_improvements.append(previous["rmse"] - score["rmse"])
+            else:
+                regression = score["rmse"] - base["rmse"]
+                protected_regressions.append(regression)
+                if key in assignments:
+                    active_protected_regressions.append(regression)
+    return {
+        "seed": seed,
+        "track": track,
+        "highGainPct": pct_improvement(
+            safe_mean(base["rmse"] for _curve, base, _previous, _score in high_rows),
+            safe_mean(score["rmse"] for _curve, _base, _previous, score in high_rows),
+        ),
+        "highAbove20": sum(1 for _curve, _base, _previous, score in high_rows if score["rmse"] >= 20.0),
+        "activeHighCount": len(active_high_improvements),
+        "activeHighTotalGainKmS": sum(active_high_improvements),
+        "activeHighMeanGainKmS": safe_mean(active_high_improvements),
+        "activeProtectedCount": len(active_protected_regressions),
+        "activeProtectedWorseCount": sum(1 for value in active_protected_regressions if value > 1e-9),
+        "maxProtectedRegression": max(protected_regressions) if protected_regressions else 0.0,
+        "activeCountByBranch": ";".join(f"{branch}:{count}" for branch, count in sorted(active_count_by_branch.items())),
+    }
+
+
+def write_observed_state_baryon_guard_harden_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+    prefix = "mts_observed_state_baryon_guard_harden"
+
+    stress_sets, by_key_curve, base_scores, previous_scores, candidate_scores, hits = observed_state_v1801_stress_tables(
+        clean_curves,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+    )
+    actual_assignments = {(row["stress"], row["galaxy"]): row["branch"] for row in hits}
+    candidate_row = observed_state_v1801_score_assignment(
+        track="v18.00-baryon-guard",
+        seed=0,
+        assignments=actual_assignments,
+        stress_sets=stress_sets,
+        high_names=high_names,
+        base_scores=base_scores,
+        previous_scores=previous_scores,
+    )
+
+    null_rows: list[dict] = []
+    hit_by_stress: dict[str, list[dict]] = {}
+    for row in hits:
+        hit_by_stress.setdefault(row["stress"], []).append(row)
+    for seed in OBSERVED_STATE_V1801_NULL_SEEDS:
+        rng = random.Random(seed + 18010)
+        shuffled_assignments: dict[tuple[str, str], str] = {}
+        for stress_label, local_hits in hit_by_stress.items():
+            branches = [row["branch"] for row in local_hits]
+            rng.shuffle(branches)
+            for row, branch in zip(local_hits, branches):
+                shuffled_assignments[(stress_label, row["galaxy"])] = branch
+        null_rows.append(
+            observed_state_v1801_score_assignment(
+                track="branch-label-shuffle-on-hit-null",
+                seed=seed,
+                assignments=shuffled_assignments,
+                stress_sets=stress_sets,
+                high_names=high_names,
+                base_scores=base_scores,
+                previous_scores=previous_scores,
+            )
+        )
+
+        for track, pool_mode, offset in [
+            ("same-active-count-high-random-null", "high", 28010),
+            ("same-active-count-clean-random-null", "clean", 38010),
+            ("protected-lookalike-random-null", "protected", 48010),
+        ]:
+            rng = random.Random(seed + offset)
+            assignments: dict[tuple[str, str], str] = {}
+            for stress_label, curves in stress_sets:
+                local_hits = hit_by_stress.get(stress_label, [])
+                for branch in sorted({row["branch"] for row in local_hits}):
+                    count = sum(1 for row in local_hits if row["branch"] == branch)
+                    route = observed_state_branch_locked_route(branch)
+                    if pool_mode == "high":
+                        pool = [curve for curve in curves if curve["name"] in high_names]
+                    elif pool_mode == "protected":
+                        pool = [curve for curve in curves if curve["name"] not in high_names]
+                    else:
+                        pool = list(curves)
+                    eligible = [
+                        curve
+                        for curve in pool
+                        if curve["lockedModelRoute"] == route and (stress_label, curve["name"]) not in assignments
+                    ]
+                    if len(eligible) < count:
+                        eligible = [curve for curve in pool if (stress_label, curve["name"]) not in assignments]
+                    rng.shuffle(eligible)
+                    for curve in eligible[:count]:
+                        assignments[(stress_label, curve["name"])] = branch
+            null_rows.append(
+                observed_state_v1801_score_assignment(
+                    track=track,
+                    seed=seed,
+                    assignments=assignments,
+                    stress_sets=stress_sets,
+                    high_names=high_names,
+                    base_scores=base_scores,
+                    previous_scores=previous_scores,
+                )
+            )
+
+    null_summary_rows = []
+    for track in sorted({row["track"] for row in null_rows}):
+        rows = [row for row in null_rows if row["track"] == track]
+        null_summary_rows.append(
+            {
+                "track": track,
+                "medianHighGainPct": safe_median(parse_float(row["highGainPct"]) for row in rows),
+                "bestHighGainPct": max(parse_float(row["highGainPct"]) for row in rows),
+                "medianActiveHighMeanGainKmS": safe_median(parse_float(row["activeHighMeanGainKmS"]) for row in rows),
+                "bestActiveHighMeanGainKmS": max(parse_float(row["activeHighMeanGainKmS"], -1e9) for row in rows),
+                "medianActiveHighTotalGainKmS": safe_median(parse_float(row["activeHighTotalGainKmS"]) for row in rows),
+                "bestActiveHighTotalGainKmS": max(parse_float(row["activeHighTotalGainKmS"], -1e9) for row in rows),
+                "minHighAbove20": min(int(parse_float(row["highAbove20"], 0.0)) for row in rows),
+                "maxProtectedRegression": max(parse_float(row["maxProtectedRegression"], 0.0) for row in rows),
+                "maxActiveProtectedWorseCount": max(int(parse_float(row["activeProtectedWorseCount"], 0.0)) for row in rows),
+            }
+        )
+
+    previous_assignments: dict[tuple[str, str], str] = {}
+    previous_row = observed_state_v1801_score_assignment(
+        track="v17.99-no-baryon-guard",
+        seed=0,
+        assignments=previous_assignments,
+        stress_sets=stress_sets,
+        high_names=high_names,
+        base_scores=base_scores,
+        previous_scores=previous_scores,
+    )
+    high_above20_before = previous_row["highAbove20"]
+    high_above20_after = candidate_row["highAbove20"]
+    best_null_high_gain = max(row["bestHighGainPct"] for row in null_summary_rows)
+    best_null_active_gain = max(row["bestActiveHighMeanGainKmS"] for row in null_summary_rows)
+    best_null_total_gain = max(row["bestActiveHighTotalGainKmS"] for row in null_summary_rows)
+    min_null_above20 = min(row["minHighAbove20"] for row in null_summary_rows)
+    max_null_active_protected_worse = max(row["maxActiveProtectedWorseCount"] for row in null_summary_rows)
+    accepted = (
+        high_above20_before > 0
+        and high_above20_after == 0
+        and min_null_above20 > 0
+        and candidate_row["activeHighTotalGainKmS"] > best_null_total_gain
+        and candidate_row["maxProtectedRegression"] <= 4.0
+        and candidate_row["activeProtectedWorseCount"] == 0
+        and max_null_active_protected_worse > 0
+    )
+    verdict = "v18.01 baryon-guard hardening passed" if accepted else "v18.01 baryon-guard hardening partial"
+
+    case_rows = []
+    for row in hits:
+        key = (row["stress"], row["galaxy"])
+        base = base_scores[key]
+        previous = previous_scores[key]
+        candidate = candidate_scores[key]
+        case_rows.append(
+            {
+                "stress": row["stress"],
+                "galaxy": row["galaxy"],
+                "set": "clean-high-rmse" if row["galaxy"] in high_names else "clean-protected",
+                "lockedRoute": row["lockedRoute"],
+                "baselineRmse": base["rmse"],
+                "v1799Rmse": previous["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "improvementVsV1799KmS": previous["rmse"] - candidate["rmse"],
+                "branch": row["branch"],
+                "baryonConfidence": candidate.get("baryonConfidence", ""),
+                "candidateRoute": candidate["candidateRoute"],
+            }
+        )
+
+    branch_rows = []
+    for branch in sorted({row["branch"] for row in hits}):
+        branch_hits = [row for row in case_rows if row["branch"] == branch]
+        branch_rows.append(
+            {
+                "branch": branch,
+                "hitCount": len(branch_hits),
+                "meanImprovementVsV1799KmS": safe_mean(parse_float(row["improvementVsV1799KmS"]) for row in branch_hits),
+                "galaxies": ";".join(sorted({row["galaxy"] for row in branch_hits})),
+                "stresses": ";".join(sorted({row["stress"] for row in branch_hits})),
+            }
+        )
+
+    summary = {
+        "candidateId": "observed-state-response-v18.01-baryon-guard-hardened",
+        "testedCandidate": "observed-state-response-v18.00-baryon-guard",
+        "previousTrack": "observed-state-response-v17.99-final-stress",
+        "stressSetCount": len(stress_sets),
+        "candidateHitCount": len(hits),
+        "previousHighAbove20": high_above20_before,
+        "candidateHighAbove20": high_above20_after,
+        "candidateHighGainPct": candidate_row["highGainPct"],
+        "candidateActiveHighTotalGainKmS": candidate_row["activeHighTotalGainKmS"],
+        "candidateActiveHighMeanGainKmS": candidate_row["activeHighMeanGainKmS"],
+        "candidateMaxProtectedRegression": candidate_row["maxProtectedRegression"],
+        "candidateActiveProtectedWorseCount": candidate_row["activeProtectedWorseCount"],
+        "bestNullHighGainPct": best_null_high_gain,
+        "bestNullActiveHighTotalGainKmS": best_null_total_gain,
+        "bestNullActiveHighMeanGainKmS": best_null_active_gain,
+        "minNullHighAbove20": min_null_above20,
+        "maxNullActiveProtectedWorseCount": max_null_active_protected_worse,
+        "nullAbove20ClearanceMargin": min_null_above20 - high_above20_after,
+        "activeTotalGainMarginVsBestNullKmS": candidate_row["activeHighTotalGainKmS"] - best_null_total_gain,
+        "activeGainMarginVsBestNullKmS": candidate_row["activeHighMeanGainKmS"] - best_null_active_gain,
+        "verdict": verdict,
+    }
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_branch_ledger.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_null_summary.csv", null_summary_rows)
+
+    formula = {
+        "candidateId": summary["candidateId"],
+        "baseCandidate": summary["testedCandidate"],
+        "hardeningQuestion": "Does the baryon-confidence guard beat stress-matched branch/null controls?",
+        "baryonConfidence": 0.88,
+        "guardBranches": sorted({row["branch"] for row in hits}),
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics galaxies"],
+        "canonicalMtsChanged": False,
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    report = [
+        "# MTS v18.01 Baryon-Guard Hardening",
+        "",
+        "This mode stress-tests v18.00 against branch-shuffle, same-active-count random, and protected-lookalike nulls. It is a framework-candidate hardening pass, not a summary pack.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- v17.99 stress high above 20: `{high_above20_before}`.",
+        f"- v18.00/v18.01 stress high above 20: `{high_above20_after}`.",
+        f"- Candidate aggregate stress high gain: `{fmt(candidate_row['highGainPct'])}%`.",
+        f"- Candidate active total gain: `{fmt(candidate_row['activeHighTotalGainKmS'])}` km/s.",
+        f"- Candidate active mean gain: `{fmt(candidate_row['activeHighMeanGainKmS'])}` km/s.",
+        f"- Best null high gain: `{fmt(best_null_high_gain)}%`.",
+        f"- Best null active total gain: `{fmt(best_null_total_gain)}` km/s.",
+        f"- Best null active mean gain: `{fmt(best_null_active_gain)}` km/s.",
+        f"- Minimum null above-20 count: `{min_null_above20}`.",
+        f"- Candidate max protected regression: `{fmt(candidate_row['maxProtectedRegression'])}` km/s.",
+        f"- Candidate active protected worsens: `{candidate_row['activeProtectedWorseCount']}`.",
+        f"- Max null active protected worsens: `{max_null_active_protected_worse}`.",
+        "",
+        "## Candidate Hits",
+        "",
+    ]
+    for row in sorted(case_rows, key=lambda item: parse_float(item["improvementVsV1799KmS"]), reverse=True):
+        report.append(
+            f"- `{row['galaxy']}` under `{row['stress']}`: `{fmt(row['v1799Rmse'])}` -> `{fmt(row['candidateRmse'])}` km/s, gain `{fmt(row['improvementVsV1799KmS'])}` km/s, branch `{row['branch']}`."
+        )
+    report.extend(["", "## Null Summary", ""])
+    for row in null_summary_rows:
+        report.append(
+            f"- `{row['track']}`: best high gain `{fmt(row['bestHighGainPct'])}%`, best active total gain `{fmt(row['bestActiveHighTotalGainKmS'])}` km/s, best active mean gain `{fmt(row['bestActiveHighMeanGainKmS'])}` km/s, min above-20 `{row['minHighAbove20']}`, max protected regression `{fmt(row['maxProtectedRegression'])}` km/s."
+        )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-state-baryon-guard-harden-v18-01",
+        "candidateId": summary["candidateId"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_branch_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_null_summary.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatebaryonguardharden(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_BARYON_GUARD_HARDEN_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_baryon_guard_harden_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.01 baryon-guard hardening")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"before_above20={summary['previousHighAbove20']}",
+                f"after_above20={summary['candidateHighAbove20']}",
+                f"candidate_gain={fmt(summary['candidateHighGainPct'])}%",
+                f"total_gain={fmt(summary['candidateActiveHighTotalGainKmS'])}",
+                f"active_gain={fmt(summary['candidateActiveHighMeanGainKmS'])}",
+                f"best_null_gain={fmt(summary['bestNullHighGainPct'])}%",
+                f"best_null_total={fmt(summary['bestNullActiveHighTotalGainKmS'])}",
+                f"best_null_active={fmt(summary['bestNullActiveHighMeanGainKmS'])}",
+                f"min_null_above20={summary['minNullHighAbove20']}",
+                f"active_protected_worse={summary['candidateActiveProtectedWorseCount']}",
+                f"protected={fmt(summary['candidateMaxProtectedRegression'])}",
+            ]
+        )
+    )
+    print(f"Wrote observed state baryon-guard hardening to {out_dir.resolve()}")
+
+
 OBSERVED_STATE_SOFT_NEIGHBOR_SEEDS = list(range(SPLIT_SEED + 1000, SPLIT_SEED + 1011))
 OBSERVED_STATE_SOFT_SCALE_GRID = [0.03, 0.05, 0.08, 0.10]
 OBSERVED_STATE_SOFT_FULL_THRESHOLD_GRID = [1.0 / 12.0, 0.12, 0.16, 0.20, 0.30, 0.40]
@@ -63559,6 +64015,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatestressharden",
             "observedstatefinalstress",
             "observedstatebaryonguard",
+            "observedstatebaryonguardharden",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -63778,6 +64235,8 @@ def main() -> None:
         cmd_observedstatefinalstress(args)
     elif args.mode == "observedstatebaryonguard":
         cmd_observedstatebaryonguard(args)
+    elif args.mode == "observedstatebaryonguardharden":
+        cmd_observedstatebaryonguardharden(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
