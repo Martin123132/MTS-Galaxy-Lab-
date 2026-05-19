@@ -52,6 +52,14 @@ if (artifact.metadata.lawNativeVerification) {
     fail(`law-native parity mismatches ${artifact.metadata.lawNativeVerification.cleanParityMismatchCount}`);
   }
 }
+if (artifact.metadata.branchPrune) {
+  if (!String(artifact.metadata.branchPrune.verdict || "").includes("v18 branch")) {
+    fail(`unexpected branch-prune verdict ${artifact.metadata.branchPrune.verdict}`);
+  }
+  if (artifact.metadata.branchPrune.minimalHighAbove20 !== 0) {
+    fail(`branch-prune minimal above-20 count ${artifact.metadata.branchPrune.minimalHighAbove20}`);
+  }
+}
 
 const indexHtml = readText(indexPath);
 const appJs = readText(appPath);
@@ -66,6 +74,8 @@ if (!appJs.includes("v18ReviewArtifactCount")) fail("app.js does not populate v1
 if (!indexHtml.includes("v18ReviewArtifactCount")) fail("index.html does not expose v18 artifact count");
 if (!appJs.includes("v18ReviewLawNative")) fail("app.js does not populate v18 law-native status");
 if (!indexHtml.includes("v18ReviewLawNative")) fail("index.html does not expose v18 law-native status");
+if (!appJs.includes("v18ReviewBranchPrune")) fail("app.js does not populate v18 branch-prune status");
+if (!indexHtml.includes("v18ReviewBranchPrune")) fail("index.html does not expose v18 branch-prune status");
 
 console.log(
   [

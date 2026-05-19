@@ -156,6 +156,7 @@ DEFAULT_OBSERVED_STATE_BARYON_GUARD_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observe
 DEFAULT_OBSERVED_STATE_PROMOTION_GATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-promotion-gate-v18-02"
 DEFAULT_OBSERVED_STATE_V18_RELEASE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LAW_NATIVE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-law-native-v1"
+DEFAULT_OBSERVED_STATE_V18_BRANCH_PRUNE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-branch-prune-v1"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
@@ -54100,6 +54101,283 @@ def cmd_observedstatev18lawnative(args: argparse.Namespace) -> None:
     print(f"Wrote v18 law-native audit to {out_dir.resolve()}")
 
 
+def observed_state_v18_prune_metric(case_rows: list[dict], high_names: set[str], drop_fn: Callable[[dict], bool]) -> dict:
+    clean_rows = [row for row in case_rows if row["set"] != "weak/systematics"]
+    high_rows = [row for row in clean_rows if row["galaxy"] in high_names]
+    protected_rows = [row for row in clean_rows if row["set"] == "clean-protected"]
+
+    def candidate_rmse(row: dict) -> float:
+        return parse_float(row["baselineRmse"]) if drop_fn(row) else parse_float(row["lawNativeRmse"])
+
+    protected_regressions = [candidate_rmse(row) - parse_float(row["baselineRmse"]) for row in protected_rows]
+    return {
+        "cleanGainPct": pct_improvement(
+            safe_mean(parse_float(row["baselineRmse"]) for row in clean_rows),
+            safe_mean(candidate_rmse(row) for row in clean_rows),
+        ),
+        "highGainPct": pct_improvement(
+            safe_mean(parse_float(row["baselineRmse"]) for row in high_rows),
+            safe_mean(candidate_rmse(row) for row in high_rows),
+        ),
+        "highAbove20": sum(1 for row in high_rows if candidate_rmse(row) >= 20.0),
+        "maxProtectedRegressionKmS": max(protected_regressions or [0.0]),
+        "protectedRegressionCount": sum(1 for value in protected_regressions if value > 1e-9),
+    }
+
+
+def write_observed_state_v18_branch_prune_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_observed_v18_branch_prune"
+    context = observed_state_candidate_context()
+    high_names = context["highNames"]
+    artifact_payload = read_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE")
+    case_rows, parity_rows, law_summary = observed_state_v18_law_native_audit_rows(context, artifact_payload)
+    branch_rows = observed_state_v18_branch_summary_rows(case_rows)
+    full_metric = observed_state_v18_prune_metric(case_rows, high_names, lambda _row: False)
+    full_high_above20 = int(full_metric["highAbove20"])
+
+    active_branches = sorted(
+        row["branch"]
+        for row in branch_rows
+        if row["branch"] != "unbranched canonical" and int(parse_float(row["highHitCount"], 0.0)) > 0
+    )
+    branch_ablation_rows: list[dict] = []
+    for branch in active_branches:
+        active_rows = [row for row in case_rows if row["branch"] == branch and row["set"] != "weak/systematics"]
+        active_high_rows = [row for row in active_rows if row["galaxy"] in high_names]
+        active_protected_rows = [row for row in active_rows if row["set"] == "clean-protected"]
+        metric = observed_state_v18_prune_metric(case_rows, high_names, lambda row, item=branch: row["branch"] == item)
+        high_above20_delta = int(metric["highAbove20"]) - full_high_above20
+        high_gain_loss = parse_float(full_metric["highGainPct"]) - parse_float(metric["highGainPct"])
+        zero_gate_break = high_above20_delta > 0
+        branch_status = "essential-zero-above20" if zero_gate_break else ("essential-gain-margin" if high_gain_loss >= 5.0 else "prunable")
+        branch_ablation_rows.append(
+            {
+                "branch": branch,
+                "family": active_rows[0].get("family", "") if active_rows else "",
+                "activeCleanHitCount": len(active_rows),
+                "activeHighHitCount": len(active_high_rows),
+                "activeProtectedHitCount": len(active_protected_rows),
+                "activeHighMeanGainKmS": safe_mean(parse_float(row["lawGainKmS"]) for row in active_high_rows),
+                "ablationHighGainPct": metric["highGainPct"],
+                "ablationCleanGainPct": metric["cleanGainPct"],
+                "ablationHighAbove20": metric["highAbove20"],
+                "highAbove20Delta": high_above20_delta,
+                "highGainLossPct": high_gain_loss,
+                "maxProtectedRegressionKmS": metric["maxProtectedRegressionKmS"],
+                "protectedRegressionCount": metric["protectedRegressionCount"],
+                "branchStatus": branch_status,
+            }
+        )
+
+    families = sorted(
+        {
+            row["family"] or "unfamilied"
+            for row in branch_ablation_rows
+            if int(parse_float(row["activeHighHitCount"], 0.0)) > 0
+        }
+    )
+    family_ablation_rows: list[dict] = []
+    for family in families:
+        active_rows = [
+            row
+            for row in case_rows
+            if row["set"] != "weak/systematics"
+            and row["branch"]
+            and ((row["family"] or "unfamilied") == family)
+        ]
+        active_high_rows = [row for row in active_rows if row["galaxy"] in high_names]
+        active_protected_rows = [row for row in active_rows if row["set"] == "clean-protected"]
+        metric = observed_state_v18_prune_metric(
+            case_rows,
+            high_names,
+            lambda row, item=family: bool(row["branch"]) and ((row["family"] or "unfamilied") == item),
+        )
+        high_above20_delta = int(metric["highAbove20"]) - full_high_above20
+        high_gain_loss = parse_float(full_metric["highGainPct"]) - parse_float(metric["highGainPct"])
+        family_status = "essential-zero-above20" if high_above20_delta > 0 else ("essential-gain-margin" if high_gain_loss >= 5.0 else "prunable")
+        family_ablation_rows.append(
+            {
+                "family": family,
+                "branchCount": len({row["branch"] for row in active_rows}),
+                "activeCleanHitCount": len(active_rows),
+                "activeHighHitCount": len(active_high_rows),
+                "activeProtectedHitCount": len(active_protected_rows),
+                "activeHighMeanGainKmS": safe_mean(parse_float(row["lawGainKmS"]) for row in active_high_rows),
+                "ablationHighGainPct": metric["highGainPct"],
+                "ablationCleanGainPct": metric["cleanGainPct"],
+                "ablationHighAbove20": metric["highAbove20"],
+                "highAbove20Delta": high_above20_delta,
+                "highGainLossPct": high_gain_loss,
+                "maxProtectedRegressionKmS": metric["maxProtectedRegressionKmS"],
+                "protectedRegressionCount": metric["protectedRegressionCount"],
+                "familyStatus": family_status,
+            }
+        )
+
+    kept_branches = [row["branch"] for row in branch_ablation_rows if row["branchStatus"] != "prunable"]
+    dropped_branches = [row["branch"] for row in branch_ablation_rows if row["branchStatus"] == "prunable"]
+    minimal_metric = observed_state_v18_prune_metric(
+        case_rows,
+        high_names,
+        lambda row: bool(row["branch"]) and row["branch"] in set(dropped_branches),
+    )
+    minimal_case_rows = []
+    for row in case_rows:
+        drop = bool(row["branch"]) and row["branch"] in set(dropped_branches)
+        minimal_rmse = parse_float(row["baselineRmse"]) if drop else parse_float(row["lawNativeRmse"])
+        minimal_case_rows.append(
+            {
+                "galaxy": row["galaxy"],
+                "set": row["set"],
+                "branch": row["branch"],
+                "family": row["family"],
+                "baselineRmse": row["baselineRmse"],
+                "fullV18Rmse": row["lawNativeRmse"],
+                "minimalRmse": minimal_rmse,
+                "minimalMinusFullKmS": minimal_rmse - parse_float(row["lawNativeRmse"]),
+                "droppedByPrune": drop,
+                "stillAbove20": minimal_rmse >= 20.0 if row["galaxy"] in high_names else "",
+            }
+        )
+
+    prunable_count = len(dropped_branches)
+    essential_count = len(kept_branches)
+    minimal_passes = (
+        int(minimal_metric["highAbove20"]) == 0
+        and parse_float(minimal_metric["highGainPct"]) >= 60.0
+        and parse_float(minimal_metric["maxProtectedRegressionKmS"]) <= 4.0
+        and int(law_summary["cleanParityMismatchCount"]) == 0
+        and int(law_summary["weakSystematicsLeakage"]) == 0
+    )
+    if prunable_count == 0 and minimal_passes:
+        verdict = "v18 branch set irreducible under zero-above20 gate"
+    elif minimal_passes:
+        verdict = "minimal v18 candidate passes"
+    else:
+        verdict = "minimal pruning blocked"
+
+    summary = {
+        "candidateId": "observed-state-response-v18.01-branch-prune",
+        "verdict": verdict,
+        "fullHighGainPct": full_metric["highGainPct"],
+        "fullCleanGainPct": full_metric["cleanGainPct"],
+        "fullHighAbove20": full_metric["highAbove20"],
+        "fullMaxProtectedRegressionKmS": full_metric["maxProtectedRegressionKmS"],
+        "activeBranchCount": len(active_branches),
+        "essentialBranchCount": essential_count,
+        "prunableBranchCount": prunable_count,
+        "droppedBranches": "; ".join(dropped_branches),
+        "minimalHighGainPct": minimal_metric["highGainPct"],
+        "minimalCleanGainPct": minimal_metric["cleanGainPct"],
+        "minimalHighAbove20": minimal_metric["highAbove20"],
+        "minimalMaxProtectedRegressionKmS": minimal_metric["maxProtectedRegressionKmS"],
+        "minimalEqualsFull": prunable_count == 0,
+        "cleanParityMismatchCount": law_summary["cleanParityMismatchCount"],
+        "weakSystematicsLeakage": law_summary["weakSystematicsLeakage"],
+        "nullMarginKmS": artifact_payload.get("metadata", {}).get("lawNativeVerification", {}).get("nullMarginKmS", math.nan),
+    }
+
+    artifact_payload.setdefault("metadata", {})["branchPrune"] = {
+        "verdict": verdict,
+        "activeBranchCount": len(active_branches),
+        "essentialBranchCount": essential_count,
+        "prunableBranchCount": prunable_count,
+        "minimalEqualsFull": prunable_count == 0,
+        "minimalHighGainPct": minimal_metric["highGainPct"],
+        "minimalHighAbove20": minimal_metric["highAbove20"],
+        "minimalMaxProtectedRegressionKmS": minimal_metric["maxProtectedRegressionKmS"],
+    }
+    write_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+    write_window_json_assignment(out_dir / f"{prefix}_browser_artifact.js", "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_branch_ablation.csv", branch_ablation_rows)
+    write_csv(out_dir / f"{prefix}_family_ablation.csv", family_ablation_rows)
+    write_csv(out_dir / f"{prefix}_minimal_candidate_scores.csv", [minimal_metric])
+    write_csv(out_dir / f"{prefix}_minimal_case_ledger.csv", minimal_case_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+
+    report = [
+        "# MTS v18.01 Branch Pruning Audit",
+        "",
+        "This audit removes each active v18 branch or branch family in turn. An ablated branch falls back to the locked canonical score for the cases it alone repairs, so the test asks whether that branch is genuinely carrying high-RMSE repair weight.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Full v18 high-RMSE gain: `{fmt(full_metric['highGainPct'])}%`.",
+        f"- Full v18 clean gain: `{fmt(full_metric['cleanGainPct'])}%`.",
+        f"- Full v18 high-RMSE above 20: `{full_metric['highAbove20']}`.",
+        f"- Active branches: `{len(active_branches)}`.",
+        f"- Essential branches: `{essential_count}`.",
+        f"- Prunable branches: `{prunable_count}`.",
+        f"- Minimal high-RMSE gain: `{fmt(minimal_metric['highGainPct'])}%`.",
+        f"- Minimal high-RMSE above 20: `{minimal_metric['highAbove20']}`.",
+        f"- Minimal max protected regression: `{fmt(minimal_metric['maxProtectedRegressionKmS'])}` km/s.",
+        f"- Weak/systematics leakage: `{law_summary['weakSystematicsLeakage']}`.",
+        "",
+        "## Essential Families",
+        "",
+    ]
+    for row in family_ablation_rows:
+        report.append(
+            f"- `{row['family']}`: `{row['familyStatus']}`, high hits `{row['activeHighHitCount']}`, ablation above-20 `{row['ablationHighAbove20']}`, high-gain loss `{fmt(row['highGainLossPct'])}` points."
+        )
+    report.extend(["", "## Interpretation", ""])
+    if prunable_count == 0:
+        report.append(
+            "No active branch can be removed while preserving the zero-above-20 high-RMSE gate. The apparent branch count is therefore not currently decorative; the compact defence is by branch family rather than by deleting individual high-only repair branches."
+        )
+    else:
+        report.append(
+            "The minimal candidate drops only branches whose removal preserves the zero-above-20 gate, protected safety, weak exclusion, and parity checks."
+        )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-v18-branch-prune-v1",
+        "candidateId": summary["candidateId"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_branch_ablation.csv",
+            f"{prefix}_family_ablation.csv",
+            f"{prefix}_minimal_candidate_scores.csv",
+            f"{prefix}_minimal_case_ledger.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_browser_artifact.js",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatev18branchprune(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_BRANCH_PRUNE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_branch_prune_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.01 branch pruning audit")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"full_high={fmt(summary['fullHighGainPct'])}%",
+                f"minimal_high={fmt(summary['minimalHighGainPct'])}%",
+                f"above20={summary['minimalHighAbove20']}",
+                f"essential={summary['essentialBranchCount']}",
+                f"prunable={summary['prunableBranchCount']}",
+                f"protected={fmt(summary['minimalMaxProtectedRegressionKmS'])}",
+                f"weak_leakage={summary['weakSystematicsLeakage']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 branch pruning audit to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_candidate_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     context = observed_state_candidate_context()
@@ -64887,6 +65165,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatepromotiongate",
             "observedstatev18releasecandidate",
             "observedstatev18lawnative",
+            "observedstatev18branchprune",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -65114,6 +65393,8 @@ def main() -> None:
         cmd_observedstatev18releasecandidate(args)
     elif args.mode == "observedstatev18lawnative":
         cmd_observedstatev18lawnative(args)
+    elif args.mode == "observedstatev18branchprune":
+        cmd_observedstatev18branchprune(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
