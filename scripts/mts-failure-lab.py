@@ -141,6 +141,7 @@ DEFAULT_OBSERVED_STATE_LAW_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-l
 DEFAULT_OBSERVED_STATE_ROUTE_SAFE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-route-safe-v17-87"
 DEFAULT_OBSERVED_STATE_FAMILY_SURFACE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-family-surface-v17-88"
 DEFAULT_OBSERVED_STATE_FAMILY_MERGE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-family-merge-v17-89"
+DEFAULT_OBSERVED_STATE_LOWLOAD_FAMILY_COLLAPSE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-lowload-family-collapse-v17-90"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -47176,6 +47177,153 @@ def cmd_observedstatefamilymerge(args: argparse.Namespace) -> None:
     print(f"Wrote observed state family-merge response to {out_dir.resolve()}")
 
 
+def observed_state_with_v1790_lowload_family_collapse(
+    fit: dict,
+    amp_cap: float,
+    callback: Callable[[], dict | list[dict]],
+) -> dict | list[dict]:
+    original_lowload_compressed_score = observed_state_v1770_lowload_q_compressed_score
+
+    def lowload_family_surface_score(
+        curve: dict,
+        activation: float,
+        probability: float,
+        fallback_floor: float | None = None,
+        continuity_fallback: bool = False,
+        route_transition_fallback: str = "",
+    ) -> dict:
+        score = observed_state_v1767_support_score(
+            curve,
+            curve,
+            fit,
+            amp_cap,
+            OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_BRANCH,
+            activation,
+            probability,
+            fallback_floor,
+            continuity_fallback,
+            route_transition_fallback,
+        )
+        score["observedStateResponseSource"] = "lowload-family-surface-collapse"
+        return score
+
+    globals()["observed_state_v1770_lowload_q_compressed_score"] = lowload_family_surface_score
+    try:
+        return callback()
+    finally:
+        globals()["observed_state_v1770_lowload_q_compressed_score"] = original_lowload_compressed_score
+
+
+def observed_state_score_curve_v1790_lowload_family_collapse(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    return observed_state_with_v1790_lowload_family_collapse(
+        fit,
+        amp_cap,
+        lambda: observed_state_score_curve_v1789_family_merge(curve, state_curve, fit, amp_cap, soft_scale, full_threshold),
+    )
+
+
+def observed_state_score_curve_v1790_lowload_family_collapse_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    context = observed_state_candidate_context()
+    return observed_state_with_v1790_lowload_family_collapse(
+        context["fit"],
+        context["ampCap"],
+        lambda: observed_state_score_curve_v1789_family_merge_forced(curve, state_curve, branch, activation),
+    )
+
+
+def observed_state_v1790_split_replay_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> list[dict]:
+    rows = observed_state_with_v1790_lowload_family_collapse(
+        fit,
+        amp_cap,
+        lambda: observed_state_v1789_split_replay_rows(clean_curves, high_names, fit, amp_cap, soft_scale, full_threshold),
+    )
+    for row in rows:
+        if row["track"] == "v17.89-family-merged-route-safe":
+            row["track"] = "v17.90-lowload-family-collapse-route-safe"
+    return rows
+
+
+def cmd_observedstatelowloadfamilycollapse(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_LOWLOAD_FAMILY_COLLAPSE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    context = observed_state_candidate_context()
+    capsule = observed_state_with_v1790_lowload_family_collapse(
+        context["fit"],
+        context["ampCap"],
+        lambda: write_observed_state_route_safe_artifacts(
+            out_dir,
+            score_fn=observed_state_score_curve_v1790_lowload_family_collapse,
+            forced_score_fn=observed_state_score_curve_v1790_lowload_family_collapse_forced,
+            split_replay_fn=observed_state_v1790_split_replay_rows,
+            prefix="mts_observed_state_lowload_family_collapse",
+            candidate_id="observed-state-response-v17.90-lowload-family-collapse-route-safe",
+            tested_candidate="observed-state-response-v17.89-family-merged-route-safe",
+            analysis_name="mts-observed-state-lowload-family-collapse-v17-90",
+            report_title="# MTS v17.90 Low-Load Family-Collapse Route-Safe Response",
+            mechanism=(
+                "Use v17.89 as the base, but remove the fixed low-load q-compressed amp/q constants. "
+                "The low-load compressed branch now uses the continuous v17.67 low-load family q/floor surface. "
+                "The candidate keeps canonical q=0.77/Gamma0/M-L unchanged outside accepted state branches."
+            ),
+            report_intro=(
+                "This pass tests whether the remaining low-load q-compressed repair can be expressed as the existing "
+                "continuous low-load family response rather than as a separate fixed constant branch. All v17.89 accepted "
+                "aliases remain; failed broad family collapses are not included."
+            ),
+            extra_formula={
+                "baseCandidate": "observed-state-response-v17.89-family-merged-route-safe",
+                "lowLoadCompressedUsesFamilySurface": True,
+                "removedFixedLowLoadCompressedAmp": OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_AMP,
+                "removedFixedLowLoadCompressedQ": OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_Q,
+                "branchAliasCount": len(OBSERVED_STATE_V1789_BRANCH_ALIASES),
+                "branchAliases": OBSERVED_STATE_V1789_BRANCH_ALIASES,
+                "failedCollapsesExcluded": [
+                    "all compressed branches to family surface: clean/high gain fell below gate",
+                    "gas-memory compressed to family surface: weaker than v17.89 without structural simplification",
+                    "shelf compressed to family surface: weaker than v17.89 without structural simplification",
+                ],
+            },
+            passed_verdict="v17.90 low-load family-collapse route-safe response passed",
+            failed_verdict="v17.90 low-load family-collapse route-safe response underpowered",
+        ),
+    )
+    summary = capsule["summary"]
+    print("MTS v17.90 low-load family-collapse route-safe response")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['nominalHighGainPct'])}%",
+                f"clean={fmt(summary['nominalCleanGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"route_pres={fmt(summary['medianHoldoutRoutePreservation'], 3)}",
+                f"above20={summary['maxHoldoutHighStillAbove20']}",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+                "lowload_family_surface=true",
+            ]
+        )
+    )
+    print(f"Wrote observed state low-load family-collapse response to {out_dir.resolve()}")
+
+
 OBSERVED_STATE_SOFT_NEIGHBOR_SEEDS = list(range(SPLIT_SEED + 1000, SPLIT_SEED + 1011))
 OBSERVED_STATE_SOFT_SCALE_GRID = [0.03, 0.05, 0.08, 0.10]
 OBSERVED_STATE_SOFT_FULL_THRESHOLD_GRID = [1.0 / 12.0, 0.12, 0.16, 0.20, 0.30, 0.40]
@@ -57696,6 +57844,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstateroutesafe",
             "observedstatefamilysurface",
             "observedstatefamilymerge",
+            "observedstatelowloadfamilycollapse",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -57893,6 +58042,8 @@ def main() -> None:
         cmd_observedstatefamilysurface(args)
     elif args.mode == "observedstatefamilymerge":
         cmd_observedstatefamilymerge(args)
+    elif args.mode == "observedstatelowloadfamilycollapse":
+        cmd_observedstatelowloadfamilycollapse(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
