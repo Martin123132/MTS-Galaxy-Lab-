@@ -12,8 +12,9 @@
     qDefault: 0.77
   };
 
-  var V17STATE_EXACT_TOKEN = "__MTS_V17_91_LOWLOAD_TAIL_SELECTOR_ROUTE_SAFE__";
+  var V17STATE_EXACT_TOKEN = "__MTS_V17_92_ROUTE_BOUNDARY_GUARD_ROUTE_SAFE__";
   var V17STATE_LEGACY_TOKENS = {
+    "__MTS_V17_91_LOWLOAD_TAIL_SELECTOR_ROUTE_SAFE__": true,
     "__MTS_V17_90_LOWLOAD_FAMILY_COLLAPSE_ROUTE_SAFE__": true,
     "__MTS_V17_89_FAMILY_MERGED_ROUTE_SAFE__": true,
     "__MTS_V17_88_SPINE_FREE_ROUTE_SAFE__": true,
@@ -33,7 +34,7 @@
 
   var FRAMEWORK_PRESET_LABELS = {
     mts: "MTS baseline",
-    v17state: "MTS v17.91 low-load tail-selector state response",
+    v17state: "MTS v17.92 route-boundary guard state response",
     baryon: "Baryon only",
     soft: "Soft radial support",
     outer: "Outer gate support",
@@ -1859,7 +1860,7 @@
   }
 
   function v17ExactCacheEntry(curve) {
-    var cache = window.MTS_V17_91_SUPPORT_CACHE || window.MTS_V17_90_SUPPORT_CACHE || window.MTS_V17_89_SUPPORT_CACHE || window.MTS_V17_88_SUPPORT_CACHE || window.MTS_V17_87_SUPPORT_CACHE || window.MTS_V17_86_SUPPORT_CACHE || window.MTS_V17_85_SUPPORT_CACHE;
+    var cache = window.MTS_V17_92_SUPPORT_CACHE || window.MTS_V17_91_SUPPORT_CACHE || window.MTS_V17_90_SUPPORT_CACHE || window.MTS_V17_89_SUPPORT_CACHE || window.MTS_V17_88_SUPPORT_CACHE || window.MTS_V17_87_SUPPORT_CACHE || window.MTS_V17_86_SUPPORT_CACHE || window.MTS_V17_85_SUPPORT_CACHE;
     if (!cache || !cache.curves || !curve || !curve.name) return null;
     return cache.curves[curve.name] || null;
   }
@@ -2862,12 +2863,12 @@
     $("frameworkWins").textContent = batch ? batch.wins + "/" + batch.count : "--";
 
     if (batch) {
-      note.textContent = (state.framework.compiled && state.framework.compiled.kind === "v17state-exact-cache" ? "v17.91 exact cache active. " : "") +
+      note.textContent = (state.framework.compiled && state.framework.compiled.kind === "v17state-exact-cache" ? "v17.92 exact cache active. " : "") +
         "Batch complete: " + batch.wins + " / " + batch.count + " LTGs beat baseline. Median delta " + fmt(batch.medianDelta, 2) + " km/s." +
-        (batch.exactCacheFallbacks ? " v17.91 exact cache fallback used on " + batch.exactCacheFallbacks + " point(s)." : "");
+        (batch.exactCacheFallbacks ? " v17.92 exact cache fallback used on " + batch.exactCacheFallbacks + " point(s)." : "");
     } else if (score) {
       if (score.exactCacheHits) {
-        note.textContent = "v17.91 exact cached candidate active for this built-in curve. " +
+        note.textContent = "v17.92 exact cached candidate active for this built-in curve. " +
           (score.exactCacheFallbacks ? score.exactCacheFallbacks + " point(s) fell back to locked MTS." : "All active points used the tested support cache.");
       } else {
         note.textContent = "Formula ready. " + (score.invalidCount ? score.invalidCount + " invalid points were clamped." : "All active points evaluated.");
@@ -2965,7 +2966,7 @@
       exactCacheFallbacks: exactCacheFallbacks,
       expression: state.framework.expression
     };
-    $("frameworkNote").textContent = (state.framework.compiled && state.framework.compiled.kind === "v17state-exact-cache" ? "v17.91 exact cache active. " : "") +
+    $("frameworkNote").textContent = (state.framework.compiled && state.framework.compiled.kind === "v17state-exact-cache" ? "v17.92 exact cache active. " : "") +
       "Batch complete: " + wins + " / " + valid.length + " LTGs beat the MTS baseline for this formula.";
     updateFrameworkPanel();
   }

@@ -143,6 +143,7 @@ DEFAULT_OBSERVED_STATE_FAMILY_SURFACE_OUT = OUTPUT_PACK_ROOT / "mts-observed-sta
 DEFAULT_OBSERVED_STATE_FAMILY_MERGE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-family-merge-v17-89"
 DEFAULT_OBSERVED_STATE_LOWLOAD_FAMILY_COLLAPSE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-lowload-family-collapse-v17-90"
 DEFAULT_OBSERVED_STATE_LOWLOAD_TAIL_SELECTOR_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-lowload-tail-selector-v17-91"
+DEFAULT_OBSERVED_STATE_ROUTE_BOUNDARY_GUARD_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-route-boundary-guard-v17-92"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -47514,6 +47515,151 @@ def cmd_observedstatelowloadtailselector(args: argparse.Namespace) -> None:
     print(f"Wrote observed state low-load tail-selector response to {out_dir.resolve()}")
 
 
+def observed_state_v1792_guarded_continuity_floor(
+    state_curve: dict,
+    base_floor_fn: Callable[[dict], float | None],
+) -> float | None:
+    floor = base_floor_fn(state_curve)
+    if floor is None:
+        return None
+    values = observed_state_values(state_curve)
+    route = state_curve["lockedModelRoute"]
+    lowload_dense_sampling_false_edge = (
+        route == "low-load"
+        and floor == 1.18
+        and values["pointDensity"] > 4.0
+    )
+    buffered_thin_disk_false_margin = (
+        route == "buffered single-crossing"
+        and floor == 1.50
+        and values["outerBulgeShare"] < 0.02
+        and values["pointDensity"] < 0.60
+        and (values["barCurv"] > 20.0 or values["barCurv"] < -60.0)
+    )
+    if lowload_dense_sampling_false_edge or buffered_thin_disk_false_margin:
+        return None
+    return floor
+
+
+def observed_state_with_v1792_route_boundary_guard(callback: Callable[[], dict | list[dict]]) -> dict | list[dict]:
+    original_continuity_floor = observed_state_continuity_fallback_floor
+
+    def guarded_continuity_floor(state_curve: dict) -> float | None:
+        return observed_state_v1792_guarded_continuity_floor(state_curve, original_continuity_floor)
+
+    globals()["observed_state_continuity_fallback_floor"] = guarded_continuity_floor
+    try:
+        return callback()
+    finally:
+        globals()["observed_state_continuity_fallback_floor"] = original_continuity_floor
+
+
+def observed_state_score_curve_v1792_route_boundary_guard(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    return observed_state_with_v1792_route_boundary_guard(
+        lambda: observed_state_score_curve_v1791_lowload_tail_selector(curve, state_curve, fit, amp_cap, soft_scale, full_threshold)
+    )
+
+
+def observed_state_score_curve_v1792_route_boundary_guard_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    return observed_state_with_v1792_route_boundary_guard(
+        lambda: observed_state_score_curve_v1791_lowload_tail_selector_forced(curve, state_curve, branch, activation)
+    )
+
+
+def observed_state_v1792_split_replay_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> list[dict]:
+    rows = observed_state_with_v1792_route_boundary_guard(
+        lambda: observed_state_v1791_split_replay_rows(clean_curves, high_names, fit, amp_cap, soft_scale, full_threshold)
+    )
+    for row in rows:
+        if row["track"] == "v17.91-lowload-tail-selector-route-safe":
+            row["track"] = "v17.92-route-boundary-guard-route-safe"
+    return rows
+
+
+def cmd_observedstaterouteboundaryguard(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_ROUTE_BOUNDARY_GUARD_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = observed_state_with_v1792_route_boundary_guard(
+        lambda: write_observed_state_route_safe_artifacts(
+            out_dir,
+            score_fn=observed_state_score_curve_v1792_route_boundary_guard,
+            forced_score_fn=observed_state_score_curve_v1792_route_boundary_guard_forced,
+            split_replay_fn=observed_state_v1792_split_replay_rows,
+            prefix="mts_observed_state_route_boundary_guard",
+            candidate_id="observed-state-response-v17.92-route-boundary-guard-route-safe",
+            tested_candidate="observed-state-response-v17.91-lowload-tail-selector-route-safe",
+            analysis_name="mts-observed-state-route-boundary-guard-v17-92",
+            report_title="# MTS v17.92 Route-Boundary Guard",
+            mechanism=(
+                "Use v17.91 as the high-RMSE response, but guard unbranched continuity fallback at two route-boundary "
+                "lookalike states. Dense-sampled low-load gas-disk margins and thin buffered disks with extreme curvature "
+                "do not receive continuity fallback support. Branched high-RMSE route transitions are unchanged."
+            ),
+            report_intro=(
+                "This pass explicitly separates accepted high-RMSE route transitions from unbranched protected lookalike "
+                "fallbacks. It is a state-only guard: no galaxy names, residual lookup, raw RMSE lookup, or weak/systematics "
+                "cases enter the formula."
+            ),
+            extra_formula={
+                "baseCandidate": "observed-state-response-v17.91-lowload-tail-selector-route-safe",
+                "routeBoundaryGuard": True,
+                "guardedFallbacks": {
+                    "lowloadDenseSamplingFalseEdge": {
+                        "lockedRoute": "low-load",
+                        "fallbackFloor": 1.18,
+                        "pointDensity": "> 4.0",
+                    },
+                    "bufferedThinDiskFalseMargin": {
+                        "lockedRoute": "buffered single-crossing",
+                        "fallbackFloor": 1.50,
+                        "outerBulgeShare": "< 0.02",
+                        "pointDensity": "< 0.60",
+                        "barCurv": "> 20.0 or < -60.0",
+                    },
+                },
+                "branchedRouteTransitionsChanged": False,
+            },
+            passed_verdict="v17.92 route-boundary guard passed",
+            failed_verdict="v17.92 route-boundary guard underpowered",
+        ),
+    )
+    summary = capsule["summary"]
+    print("MTS v17.92 route-boundary guard")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['nominalHighGainPct'])}%",
+                f"clean={fmt(summary['nominalCleanGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"route_pres={fmt(summary['medianHoldoutRoutePreservation'], 3)}",
+                f"above20={summary['maxHoldoutHighStillAbove20']}",
+                f"max_protected={fmt(summary['maxHoldoutProtectedRegression'])}",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote observed state route-boundary guard to {out_dir.resolve()}")
+
+
 OBSERVED_STATE_SOFT_NEIGHBOR_SEEDS = list(range(SPLIT_SEED + 1000, SPLIT_SEED + 1011))
 OBSERVED_STATE_SOFT_SCALE_GRID = [0.03, 0.05, 0.08, 0.10]
 OBSERVED_STATE_SOFT_FULL_THRESHOLD_GRID = [1.0 / 12.0, 0.12, 0.16, 0.20, 0.30, 0.40]
@@ -58036,6 +58182,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatefamilymerge",
             "observedstatelowloadfamilycollapse",
             "observedstatelowloadtailselector",
+            "observedstaterouteboundaryguard",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -58237,6 +58384,8 @@ def main() -> None:
         cmd_observedstatelowloadfamilycollapse(args)
     elif args.mode == "observedstatelowloadtailselector":
         cmd_observedstatelowloadtailselector(args)
+    elif args.mode == "observedstaterouteboundaryguard":
+        cmd_observedstaterouteboundaryguard(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
