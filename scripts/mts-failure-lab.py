@@ -144,6 +144,7 @@ DEFAULT_OBSERVED_STATE_FAMILY_MERGE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state
 DEFAULT_OBSERVED_STATE_LOWLOAD_FAMILY_COLLAPSE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-lowload-family-collapse-v17-90"
 DEFAULT_OBSERVED_STATE_LOWLOAD_TAIL_SELECTOR_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-lowload-tail-selector-v17-91"
 DEFAULT_OBSERVED_STATE_ROUTE_BOUNDARY_GUARD_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-route-boundary-guard-v17-92"
+DEFAULT_OBSERVED_STATE_RELEASE_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-release-candidate-v17-93"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -47660,6 +47661,511 @@ def cmd_observedstaterouteboundaryguard(args: argparse.Namespace) -> None:
     print(f"Wrote observed state route-boundary guard to {out_dir.resolve()}")
 
 
+def observed_state_v1793_transfer_pass(
+    branch: str,
+    curve: dict,
+    base_pass_fn: Callable[[str, dict], bool],
+) -> bool:
+    if branch not in {"gas-memory edge compressed", "gas-rich buffered disk"}:
+        return base_pass_fn(branch, curve)
+
+    values = observed_state_values(curve)
+    route = curve["lockedModelRoute"]
+    if branch == "gas-rich buffered disk":
+        compact_buffered = (
+            route == "buffered single-crossing"
+            and 0.60 <= values["fGasOut"] <= 0.78
+            and 0.75 <= values["pointDensity"] <= 1.15
+            and values["hOverRout"] >= 0.14
+            and values["outerBulgeShare"] < 0.02
+            and values["outerGasShare"] >= 0.55
+            and values["memoryLoad"] <= 2.2
+        )
+        dense_lgap_buffered = (
+            route == "buffered single-crossing"
+            and values["fGasOut"] >= 0.68
+            and values["outerGasShare"] >= 0.55
+            and values["outerBulgeShare"] < 0.02
+            and values["pointDensity"] >= 2.2
+            and values["memoryLoad"] >= 3.0
+            and values["LgapOverH"] >= 2.5
+            and values["hOverRout"] <= 0.12
+            and values["uOut"] <= 0.34
+        )
+        return compact_buffered or dense_lgap_buffered
+
+    if route == "buffered single-crossing":
+        base_buffered = (
+            0.35 <= values["fGasOut"] <= 0.55
+            and 1.20 <= values["pointDensity"] <= 1.70
+            and values["midGasShare"] < 0.30
+            and values["barCurv"] < -15.0
+            and values["outerBulgeShare"] < 0.02
+            and values["uMax"] <= 1.45
+        )
+        dense_lgap_buffered = (
+            values["fGasOut"] >= 0.68
+            and values["outerGasShare"] >= 0.55
+            and values["outerBulgeShare"] < 0.02
+            and values["pointDensity"] >= 2.2
+            and values["memoryLoad"] >= 3.0
+            and values["LgapOverH"] >= 2.5
+            and values["hOverRout"] <= 0.12
+            and values["uOut"] <= 0.34
+        )
+        return base_buffered or dense_lgap_buffered
+
+    if route == "low-load":
+        lowload_smooth = (
+            0.40 <= values["fGasOut"] <= 0.70
+            and values["memoryLoad"] >= 1.75
+            and 0.14 <= values["hOverRout"] <= 0.28
+            and values["outerGasShare"] >= 0.40
+            and values["midGasShare"] < 0.35
+            and values["innerGasShare"] < 0.12
+            and values["pointDensity"] <= 1.70
+            and values["uOut"] <= 0.42
+            and values["uMax"] <= 0.95
+        )
+        dwarf = (
+            values["fGasOut"] > 0.78
+            and values["memoryLoad"] < 1.20
+            and values["outerGasShare"] > 0.75
+            and values["pointDensity"] <= 1.50
+            and values["uMax"] <= 0.90
+        )
+        extended_saturation = (
+            4.0 <= values["memoryLoad"] <= 6.2
+            and values["fGasOut"] >= 0.68
+            and values["LgapOverH"] >= 3.0
+            and values["pointDensity"] >= 2.3
+            and values["uOut"] <= 0.28
+            and values["outerGasShare"] >= 0.58
+            and 0.82 <= values["uMax"] <= 1.15
+            and values["outerBulgeShare"] < 0.02
+        )
+        midgas_memory = (
+            3.4 <= values["memoryLoad"] <= 4.7
+            and 0.30 <= values["fGasOut"] <= 0.50
+            and 0.10 <= values["midGasShare"] <= 0.24
+            and 0.22 <= values["outerGasShare"] <= 0.40
+            and 1.0 <= values["pointDensity"] <= 2.3
+            and 0.32 <= values["uOut"] <= 0.40
+            and values["barCurv"] < -12.0
+            and values["uMax"] <= 1.02
+            and values["outerBulgeShare"] < 0.02
+        )
+        high_shear = (
+            1.5 <= values["memoryLoad"] <= 2.7
+            and 0.45 <= values["fGasOut"] <= 0.68
+            and values["midGasShare"] >= 0.34
+            and values["outerGasShare"] >= 0.48
+            and 1.45 <= values["pointDensity"] <= 2.4
+            and 0.34 <= values["uOut"] <= 0.43
+            and values["LgapOverH"] < 0.90
+            and 0.78 <= values["uMax"] <= 1.02
+            and values["barCurv"] > -12.0
+            and values["outerBulgeShare"] < 0.02
+        )
+        gas_disk_edge = (
+            2.0 <= values["memoryLoad"] <= 2.7
+            and 0.40 <= values["fGasOut"] <= 0.70
+            and 0.22 <= values["midGasShare"] <= 0.36
+            and 0.38 <= values["outerGasShare"] <= 0.62
+            and values["uMax"] <= 0.85
+            and 0.33 <= values["uOut"] <= 0.46
+            and values["hOverRout"] >= 0.14
+            and values["pointDensity"] <= 1.65
+            and values["outerBulgeShare"] < 0.02
+        )
+        return lowload_smooth or dwarf or extended_saturation or midgas_memory or high_shear or gas_disk_edge
+
+    return False
+
+
+def observed_state_with_v1793_uncertainty_transfer_guard(
+    callback: Callable[[], dict | list[dict]],
+) -> dict | list[dict]:
+    original_transfer_pass = observed_state_v1785_branch_transfer_pass
+
+    def hardened_transfer_pass(branch: str, curve: dict) -> bool:
+        return observed_state_v1793_transfer_pass(branch, curve, original_transfer_pass)
+
+    globals()["observed_state_v1785_branch_transfer_pass"] = hardened_transfer_pass
+    try:
+        return callback()
+    finally:
+        globals()["observed_state_v1785_branch_transfer_pass"] = original_transfer_pass
+
+
+def observed_state_score_curve_v1793_release_candidate(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    return observed_state_with_v1793_uncertainty_transfer_guard(
+        lambda: observed_state_score_curve_v1792_route_boundary_guard(
+            curve,
+            state_curve,
+            fit,
+            amp_cap,
+            soft_scale,
+            full_threshold,
+        )
+    )
+
+
+def observed_state_score_curve_v1793_release_candidate_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    return observed_state_with_v1793_uncertainty_transfer_guard(
+        lambda: observed_state_score_curve_v1792_route_boundary_guard_forced(curve, state_curve, branch, activation)
+    )
+
+
+def observed_state_v1793_split_replay_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> list[dict]:
+    rows = observed_state_with_v1793_uncertainty_transfer_guard(
+        lambda: observed_state_v1792_split_replay_rows(clean_curves, high_names, fit, amp_cap, soft_scale, full_threshold)
+    )
+    for row in rows:
+        if row["track"] == "v17.92-route-boundary-guard-route-safe":
+            row["track"] = "v17.93-release-candidate-transfer-guard"
+    return rows
+
+
+def observed_state_stress_metrics_for_curves(
+    curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+    stress_label: str,
+) -> tuple[dict, list[dict]]:
+    paired = []
+    for curve in curves:
+        base = score_curve(curve)
+        cand = observed_state_score_curve_v1793_release_candidate(
+            curve,
+            curve,
+            fit,
+            amp_cap,
+            soft_scale,
+            full_threshold,
+        )
+        paired.append((curve, base, cand))
+    high_rows = [row for row in paired if row[0]["name"] in high_names]
+    protected_rows = [row for row in paired if row[0]["name"] not in high_names]
+    protected_regressions = [cand["rmse"] - base["rmse"] for _curve, base, cand in protected_rows]
+    metrics = {
+        "stress": stress_label,
+        "highGainPct": pct_improvement(
+            safe_mean(base["rmse"] for _curve, base, _cand in high_rows),
+            safe_mean(cand["rmse"] for _curve, _base, cand in high_rows),
+        ),
+        "cleanGainPct": pct_improvement(
+            safe_mean(base["rmse"] for _curve, base, _cand in paired),
+            safe_mean(cand["rmse"] for _curve, _base, cand in paired),
+        ),
+        "highStillAbove20": sum(1 for _curve, _base, cand in high_rows if cand["rmse"] >= 20.0),
+        "highWorsened": sum(1 for _curve, base, cand in high_rows if cand["rmse"] > base["rmse"]),
+        "protectedRegressionCount": sum(1 for regression in protected_regressions if regression > 1e-9),
+        "maxProtectedRegression": max(protected_regressions) if protected_regressions else 0.0,
+        "routePreservation": safe_mean(1.0 if cand["candidateRoute"] == base["candidateRoute"] else 0.0 for _curve, base, cand in paired),
+    }
+    case_rows = []
+    for curve, base, cand in paired:
+        is_high = curve["name"] in high_names
+        regression = cand["rmse"] - base["rmse"]
+        if (is_high and (cand["rmse"] >= 20.0 or cand["rmse"] > base["rmse"])) or (not is_high and regression > 1e-9):
+            case_rows.append(
+                {
+                    "stress": stress_label,
+                    "galaxy": curve["name"],
+                    "set": "clean-high-rmse" if is_high else "clean-protected",
+                    "lockedRoute": curve["lockedModelRoute"],
+                    "baselineRmse": base["rmse"],
+                    "candidateRmse": cand["rmse"],
+                    "gainKmS": base["rmse"] - cand["rmse"],
+                    "regressionKmS": regression,
+                    "branch": cand.get("observedStateBranch", ""),
+                    "responseSource": cand.get("observedStateResponseSource", ""),
+                    "candidateRoute": cand["candidateRoute"],
+                    "stillAbove20": cand["rmse"] >= 20.0 if is_high else "",
+                }
+            )
+    return metrics, case_rows
+
+
+def write_observed_state_release_candidate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+    prefix = "mts_observed_state_release_candidate"
+
+    capsule = observed_state_with_v1793_uncertainty_transfer_guard(
+        lambda: write_observed_state_route_safe_artifacts(
+            out_dir,
+            score_fn=observed_state_score_curve_v1793_release_candidate,
+            forced_score_fn=observed_state_score_curve_v1793_release_candidate_forced,
+            split_replay_fn=observed_state_v1793_split_replay_rows,
+            prefix=prefix,
+            candidate_id="observed-state-response-v17.93-release-candidate-transfer-guard",
+            tested_candidate="observed-state-response-v17.92-route-boundary-guard-route-safe",
+            analysis_name="mts-observed-state-release-candidate-v17-93",
+            report_title="# MTS v17.93 Release-Candidate Transfer Guard",
+            mechanism=(
+                "Keep v17.92's state-response law and add an uncertainty-transfer guard for accepted gas-memory and "
+                "gas-rich edge branches. The guard preserves real high-RMSE gas-memory states under small state-variable "
+                "jitter while excluding the protected low-load lookalikes that caused rare false releases."
+            ),
+            report_intro=(
+                "This is a framework hardening pass, not a summary pack. It targets the high-RMSE branches that failed "
+                "state-jitter stress and leaves canonical MTS, q=0.77/Gamma0/M-L, weak/systematics exclusion, and the "
+                "v17.92 nominal scores locked."
+            ),
+            extra_formula={
+                "baseCandidate": "observed-state-response-v17.92-route-boundary-guard-route-safe",
+                "uncertaintyTransferGuard": True,
+                "hardenedBranches": ["gas-memory edge compressed", "gas-rich buffered disk"],
+                "protectedLookalikeExclusions": {
+                    "lowLoadGasMemorySmooth": "requires memoryLoad >= 1.75, uOut <= 0.42, h/rOut <= 0.28",
+                    "lowLoadHighShear": "requires pointDensity >= 1.45 and uMax >= 0.78",
+                    "gasDiskEdge": "requires memoryLoad >= 2.0 and bounded gas/disk edge state",
+                },
+            },
+            passed_verdict="v17.93 nominal route-safe gates passed",
+            failed_verdict="v17.93 nominal route-safe gates failed",
+        )
+    )
+
+    jitter_rows, jitter_case_rows, jitter_protected_rows = observed_state_with_v1793_uncertainty_transfer_guard(
+        lambda: observed_state_soft_gate_robustness_eval(
+            clean_curves,
+            high_names,
+            fit,
+            amp_cap,
+            soft_scale,
+            full_threshold,
+            score_fn=observed_state_score_curve_v1793_release_candidate,
+        )
+    )
+    write_csv(out_dir / f"{prefix}_state_jitter.csv", jitter_rows)
+    write_csv(out_dir / f"{prefix}_state_jitter_cases.csv", jitter_case_rows)
+    write_csv(out_dir / f"{prefix}_state_jitter_protected.csv", jitter_protected_rows)
+
+    ml_rows: list[dict] = []
+    ml_case_rows: list[dict] = []
+    for disk_factor in [0.85, 1.00, 1.15]:
+        for bulge_factor in [0.85, 1.00, 1.15]:
+            label = f"mlDiskx{disk_factor:.2f}_mlBulx{bulge_factor:.2f}"
+            transformed = [
+                transformed_curve(curve, ml_disk=curve["mlDisk"] * disk_factor, ml_bulge=curve["mlBulge"] * bulge_factor)
+                for curve in clean_curves
+            ]
+            metrics, case_rows = observed_state_stress_metrics_for_curves(
+                transformed,
+                high_names,
+                fit,
+                amp_cap,
+                soft_scale,
+                full_threshold,
+                label,
+            )
+            metrics["mlDiskFactor"] = disk_factor
+            metrics["mlBulgeFactor"] = bulge_factor
+            ml_rows.append(metrics)
+            ml_case_rows.extend(case_rows)
+    write_csv(out_dir / f"{prefix}_ml_jitter.csv", ml_rows)
+    write_csv(out_dir / f"{prefix}_ml_jitter_cases.csv", ml_case_rows)
+
+    baryon_rows: list[dict] = []
+    baryon_case_rows: list[dict] = []
+    for baryon_factor in [0.90, 0.95, 1.00, 1.05, 1.10]:
+        label = f"baryonVelocityx{baryon_factor:.2f}"
+        transformed = [transformed_curve(curve, baryon_velocity_scale=baryon_factor) for curve in clean_curves]
+        metrics, case_rows = observed_state_stress_metrics_for_curves(
+            transformed,
+            high_names,
+            fit,
+            amp_cap,
+            soft_scale,
+            full_threshold,
+            label,
+        )
+        metrics["baryonVelocityFactor"] = baryon_factor
+        baryon_rows.append(metrics)
+        baryon_case_rows.extend(case_rows)
+    write_csv(out_dir / f"{prefix}_baryon_scale_stress.csv", baryon_rows)
+    write_csv(out_dir / f"{prefix}_baryon_scale_cases.csv", baryon_case_rows)
+
+    jitter_summary = {
+        "trialCount": len(jitter_rows),
+        "minHighGainPct": min(parse_float(row["highGainPct"]) for row in jitter_rows),
+        "medianHighGainPct": safe_median(parse_float(row["highGainPct"]) for row in jitter_rows),
+        "minCleanGainPct": min(parse_float(row["cleanGainPct"]) for row in jitter_rows),
+        "medianCleanGainPct": safe_median(parse_float(row["cleanGainPct"]) for row in jitter_rows),
+        "maxHighStillAbove20": max(int(parse_float(row["highStillAbove20"], 0.0)) for row in jitter_rows),
+        "maxHighWorsened": max(int(parse_float(row["highWorsened"], 0.0)) for row in jitter_rows),
+        "maxProtectedRegression": max(parse_float(row["maxProtectedRegression"], 0.0) for row in jitter_rows),
+        "minRoutePreservation": min(parse_float(row["routePreservation"]) for row in jitter_rows),
+    }
+    ml_summary = {
+        "variantCount": len(ml_rows),
+        "minHighGainPct": min(parse_float(row["highGainPct"]) for row in ml_rows),
+        "minCleanGainPct": min(parse_float(row["cleanGainPct"]) for row in ml_rows),
+        "maxHighStillAbove20": max(int(parse_float(row["highStillAbove20"], 0.0)) for row in ml_rows),
+        "maxProtectedRegression": max(parse_float(row["maxProtectedRegression"], 0.0) for row in ml_rows),
+    }
+    baryon_summary = {
+        "variantCount": len(baryon_rows),
+        "minHighGainPct": min(parse_float(row["highGainPct"]) for row in baryon_rows),
+        "minCleanGainPct": min(parse_float(row["cleanGainPct"]) for row in baryon_rows),
+        "maxHighStillAbove20": max(int(parse_float(row["highStillAbove20"], 0.0)) for row in baryon_rows),
+        "maxProtectedRegression": max(parse_float(row["maxProtectedRegression"], 0.0) for row in baryon_rows),
+    }
+    nominal = capsule["summary"]
+    stress_passed = (
+        nominal["nominalHighStillAbove20"] == 0
+        and nominal["bestNullMarginPct"] >= 50.0
+        and nominal["maxHoldoutProtectedRegression"] <= 0.0
+        and jitter_summary["maxHighStillAbove20"] == 0
+        and jitter_summary["maxHighWorsened"] == 0
+        and jitter_summary["maxProtectedRegression"] <= 4.0
+        and jitter_summary["minHighGainPct"] >= 65.0
+        and ml_summary["maxProtectedRegression"] <= 4.0
+        and baryon_summary["maxProtectedRegression"] <= 8.0
+    )
+    final_verdict = (
+        "v17.93 release candidate stress passed"
+        if stress_passed
+        else "v17.93 release candidate stress failed"
+    )
+
+    report = [
+        "# MTS v17.93 Release-Candidate Stress",
+        "",
+        "This pass modifies the framework candidate by hardening the gas-memory/gas-rich transfer guard from v17.92. It does not change canonical MTS.",
+        "",
+        "## Law Change",
+        "",
+        "- Base law: `v17.92 route-boundary guard`.",
+        "- Added uncertainty-transfer margins for `gas-memory edge compressed` and `gas-rich buffered disk`.",
+        "- Added protected-lookalike exclusions: low-load smooth transfer now requires `memoryLoad >= 1.75`, `uOut <= 0.42`, and `h/rOut <= 0.28`; high-shear transfer requires `pointDensity >= 1.45` and `uMax >= 0.78`.",
+        "",
+        "## Scores",
+        "",
+        f"- Verdict: `{final_verdict}`.",
+        f"- Nominal high-RMSE gain: `{fmt(nominal['nominalHighGainPct'])}%`.",
+        f"- Nominal clean-set gain: `{fmt(nominal['nominalCleanGainPct'])}%`.",
+        f"- Holdout high-RMSE gain: `{fmt(nominal['medianHoldoutHighGainPct'])}%`.",
+        f"- Holdout clean-set gain: `{fmt(nominal['medianHoldoutCleanGainPct'])}%`.",
+        f"- Best null high-RMSE gain: `{fmt(nominal['bestNullHighGainPct'])}%`.",
+        f"- Null margin: `{fmt(nominal['bestNullMarginPct'])}` points.",
+        f"- Nominal high-RMSE above 20: `{nominal['nominalHighStillAbove20']}`.",
+        f"- Max holdout protected regression: `{fmt(nominal['maxHoldoutProtectedRegression'])} km/s`.",
+        "",
+        "## State-Jitter Stress",
+        "",
+        f"- Trials: `{jitter_summary['trialCount']}`.",
+        f"- Minimum high-RMSE gain: `{fmt(jitter_summary['minHighGainPct'])}%`.",
+        f"- Minimum clean-set gain: `{fmt(jitter_summary['minCleanGainPct'])}%`.",
+        f"- Max high-RMSE cases above 20: `{jitter_summary['maxHighStillAbove20']}`.",
+        f"- Max protected regression: `{fmt(jitter_summary['maxProtectedRegression'])} km/s`.",
+        "",
+        "## M/L And Baryon-Scale Stress",
+        "",
+        f"- M/L variants: `{ml_summary['variantCount']}`, minimum high-RMSE gain `{fmt(ml_summary['minHighGainPct'])}%`, max protected regression `{fmt(ml_summary['maxProtectedRegression'])} km/s`.",
+        f"- Baryon-scale variants: `{baryon_summary['variantCount']}`, minimum high-RMSE gain `{fmt(baryon_summary['minHighGainPct'])}%`, max protected regression `{fmt(baryon_summary['maxProtectedRegression'])} km/s`.",
+        "",
+        "## Named Residual Risks",
+        "",
+    ]
+    risky_cases = sorted(
+        [row for row in ml_case_rows + baryon_case_rows if row.get("set") == "clean-high-rmse" and row.get("stillAbove20") is True],
+        key=lambda row: parse_float(row.get("candidateRmse"), 0.0),
+        reverse=True,
+    )[:12]
+    if risky_cases:
+        for row in risky_cases:
+            report.append(
+                f"- `{row['galaxy']}` under `{row['stress']}`: candidate RMSE `{fmt(row['candidateRmse'])}` km/s, gain `{fmt(row['gainKmS'])}` km/s."
+            )
+    else:
+        report.append("- No high-RMSE stress residuals above 20.")
+    report.extend(
+        [
+            "",
+            "## Guardrail",
+            "",
+            "No galaxy names, raw residuals, raw RMSE lookup, q retuning, amplitude lookup, or weak/systematics galaxies enter the formula.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule["verdict"] = final_verdict
+    capsule["stressPassed"] = stress_passed
+    capsule["jitterStressSummary"] = jitter_summary
+    capsule["mlStressSummary"] = ml_summary
+    capsule["baryonScaleStressSummary"] = baryon_summary
+    capsule["summary"]["verdict"] = final_verdict
+    capsule["outputFiles"].extend(
+        [
+            f"{prefix}_state_jitter.csv",
+            f"{prefix}_state_jitter_cases.csv",
+            f"{prefix}_state_jitter_protected.csv",
+            f"{prefix}_ml_jitter.csv",
+            f"{prefix}_ml_jitter_cases.csv",
+            f"{prefix}_baryon_scale_stress.csv",
+            f"{prefix}_baryon_scale_cases.csv",
+        ]
+    )
+    (out_dir / f"{prefix}_capsule.json").write_text(
+        json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8"
+    )
+    return capsule
+
+
+def cmd_observedstatereleasecandidate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_RELEASE_CANDIDATE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_release_candidate_artifacts(out_dir)
+    summary = capsule["summary"]
+    jitter = capsule["jitterStressSummary"]
+    print("MTS v17.93 release-candidate stress")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['nominalHighGainPct'])}%",
+                f"clean={fmt(summary['nominalCleanGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+                f"jitter_above20={jitter['maxHighStillAbove20']}",
+                f"jitter_protected={fmt(jitter['maxProtectedRegression'])}",
+            ]
+        )
+    )
+    print(f"Wrote observed state release candidate to {out_dir.resolve()}")
+
+
 OBSERVED_STATE_SOFT_NEIGHBOR_SEEDS = list(range(SPLIT_SEED + 1000, SPLIT_SEED + 1011))
 OBSERVED_STATE_SOFT_SCALE_GRID = [0.03, 0.05, 0.08, 0.10]
 OBSERVED_STATE_SOFT_FULL_THRESHOLD_GRID = [1.0 / 12.0, 0.12, 0.16, 0.20, 0.30, 0.40]
@@ -58183,6 +58689,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatelowloadfamilycollapse",
             "observedstatelowloadtailselector",
             "observedstaterouteboundaryguard",
+            "observedstatereleasecandidate",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -58386,6 +58893,8 @@ def main() -> None:
         cmd_observedstatelowloadtailselector(args)
     elif args.mode == "observedstaterouteboundaryguard":
         cmd_observedstaterouteboundaryguard(args)
+    elif args.mode == "observedstatereleasecandidate":
+        cmd_observedstatereleasecandidate(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
