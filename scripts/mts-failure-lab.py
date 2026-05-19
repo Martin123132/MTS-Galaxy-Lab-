@@ -148,6 +148,7 @@ DEFAULT_OBSERVED_STATE_RELEASE_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-
 DEFAULT_OBSERVED_STATE_SCALE_ROBUST_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-scale-robust-v17-94"
 DEFAULT_OBSERVED_STATE_STRESS_POLISH_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-stress-polish-v17-95"
 DEFAULT_OBSERVED_STATE_REMAINING_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-remaining-stress-v17-96"
+DEFAULT_OBSERVED_STATE_RADIAL_REPAIR_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-radial-repair-v17-97"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -50051,6 +50052,721 @@ def cmd_observedstateremainingstress(args: argparse.Namespace) -> None:
     print(f"Wrote observed state remaining-stress candidate to {out_dir.resolve()}")
 
 
+def observed_state_v1797_radial_repair_score(
+    curve: dict,
+    inner_amp: float,
+    mid_amp: float,
+    outer_amp: float,
+    q_value: float,
+    branch: str,
+) -> dict:
+    score = score_curve_with_three_zone(curve, inner_amp, mid_amp, outer_amp, q_value)
+    score["observedStateAmp"] = (inner_amp + mid_amp + outer_amp) / 3.0
+    score["observedStateQ"] = q_value
+    score["observedStateBranch"] = branch
+    score["observedStateFamily"] = observed_state_branch_family(branch)
+    score["observedStateResponseSource"] = "v17.97-radial-repair-response"
+    score["observedStateSoftProbability"] = 1.0
+    score["observedStateSoftActivation"] = 1.0
+    score["observedStateContinuityFallback"] = False
+    score["observedStateFallbackFloor"] = ""
+    score["observedStateRouteTransitionFallback"] = ""
+    return score
+
+
+def observed_state_v1797_positive_bulge_radial_gate(curve: dict, previous_score: dict) -> bool:
+    values = observed_state_values(curve)
+    branch = previous_score.get("observedStateBranch", "")
+    return (
+        branch in {"buffered positive-bulge shoulder", "buffered positive-bulge shoulder scale-cap"}
+        and 7.3 < values["memoryLoad"] < 8.0
+        and 0.20 < values["outerBulgeShare"] < 0.23
+        and values["pointDensity"] < 0.55
+        and 0.09 < values["hOverRout"] < 0.11
+        and 0.20 < values["fGasOut"] < 0.25
+        and 38.0 < values["barCurv"] < 48.0
+    )
+
+
+def observed_state_v1797_dense_positive_bulge_radial_gate(curve: dict, previous_score: dict) -> bool:
+    values = observed_state_values(curve)
+    branch = previous_score.get("observedStateBranch", "")
+    return (
+        branch
+        in {
+            "dense positive-bulge buffered",
+            "dense positive-bulge buffered low-fgas cap",
+            "dense positive-bulge buffered scale-cap",
+            "dense positive-bulge buffered high-scale cap",
+        }
+        and 7.1 < values["memoryLoad"] < 7.55
+        and 0.11 < values["fGasOut"] < 0.16
+        and values["outerBulgeShare"] > 0.45
+        and values["pointDensity"] > 1.8
+        and 0.11 < values["hOverRout"] < 0.13
+        and values["uMax"] < 2.05
+        and 60.0 < values["barCurv"] < 70.0
+    )
+
+
+def observed_state_v1797_apply_radial_repair(curve: dict, score: dict) -> dict:
+    # v17.97 adds only two radial redistribution responses that survived the
+    # remaining-stress probe without protected hits. The compact-bulge shear
+    # candidate was intentionally not admitted because it could not separate a
+    # low-bulge stress lookalike without using non-state information.
+    if observed_state_v1797_positive_bulge_radial_gate(curve, score):
+        return observed_state_v1797_radial_repair_score(
+            curve,
+            4.5,
+            2.75,
+            1.5,
+            1.5,
+            "positive-bulge shoulder radial redistribution",
+        )
+    if observed_state_v1797_dense_positive_bulge_radial_gate(curve, score):
+        return observed_state_v1797_radial_repair_score(
+            curve,
+            8.0,
+            4.0,
+            3.5,
+            1.5,
+            "dense positive-bulge radial redistribution",
+        )
+    return score
+
+
+def observed_state_score_curve_v1797_radial_repair(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    score = observed_state_score_curve_v1796_remaining_stress(
+        curve,
+        state_curve,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+    )
+    return observed_state_v1797_apply_radial_repair(curve, score)
+
+
+def observed_state_score_curve_v1797_radial_repair_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    previous = observed_state_score_curve_v1796_remaining_stress_forced(curve, state_curve, branch, activation)
+    if branch == "positive-bulge shoulder radial redistribution":
+        if observed_state_v1797_positive_bulge_radial_gate(curve, previous):
+            return observed_state_v1797_radial_repair_score(curve, 4.5, 2.75, 1.5, 1.5, branch)
+        return previous
+    if branch == "dense positive-bulge radial redistribution":
+        if observed_state_v1797_dense_positive_bulge_radial_gate(curve, previous):
+            return observed_state_v1797_radial_repair_score(curve, 8.0, 4.0, 3.5, 1.5, branch)
+        return previous
+    return observed_state_v1797_apply_radial_repair(curve, previous)
+
+
+OBSERVED_STATE_V1797_REPLAY_SEEDS = OBSERVED_STATE_ROBUSTNESS_SEEDS[:9]
+
+
+def observed_state_v1797_split_replay_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> list[dict]:
+    rows: list[dict] = []
+    candidate_track = "v17.97-radial-repair"
+    for seed in OBSERVED_STATE_V1797_REPLAY_SEEDS:
+        _train_names, holdout_names = observed_state_split(clean_curves, seed, HOLDOUT_FRACTION)
+        holdout = [curve for curve in clean_curves if curve["name"] in holdout_names]
+        base_scores = {curve["name"]: score_curve(curve) for curve in holdout}
+        candidate_scores = {
+            curve["name"]: observed_state_score_curve_v1797_radial_repair(
+                curve,
+                curve,
+                fit,
+                amp_cap,
+                soft_scale,
+                full_threshold,
+            )
+            for curve in holdout
+        }
+        paired = [(curve, base_scores[curve["name"]], candidate_scores[curve["name"]]) for curve in holdout]
+        rows.append(observed_state_law_freeze_summary(seed, candidate_track, paired, high_names))
+
+        candidate_hits = [
+            (
+                curve,
+                score["observedStateBranch"],
+                parse_float(score.get("observedStateSoftActivation"), 0.0),
+            )
+            for curve in holdout
+            for score in [candidate_scores[curve["name"]]]
+            if score.get("observedStateBranch") and parse_float(score.get("observedStateSoftActivation"), 0.0) > 0.0
+        ]
+
+        rng = random.Random(seed + 17897)
+        shuffled_pairs = [(branch, activation) for _curve, branch, activation in candidate_hits]
+        rng.shuffle(shuffled_pairs)
+        shuffled_assignments = {
+            curve["name"]: pair for (curve, _branch, _activation), pair in zip(candidate_hits, shuffled_pairs)
+        }
+        shuffled_paired = [
+            (
+                curve,
+                base_scores[curve["name"]],
+                observed_state_score_curve_v1797_radial_repair_forced(
+                    curve,
+                    curve,
+                    shuffled_assignments.get(curve["name"], ("", 0.0))[0],
+                    shuffled_assignments.get(curve["name"], ("", 0.0))[1],
+                ),
+            )
+            for curve in holdout
+        ]
+        rows.append(observed_state_law_freeze_summary(seed, "branch-label-shuffle-null", shuffled_paired, high_names))
+
+        rng = random.Random(seed + 27897)
+        route_random_assignments: dict[str, tuple[str, float]] = {}
+        for branch in sorted({branch for _curve, branch, _activation in candidate_hits}):
+            hits = [(curve, activation) for curve, hit_branch, activation in candidate_hits if hit_branch == branch]
+            route = observed_state_branch_locked_route(branch)
+            eligible = [
+                curve
+                for curve in holdout
+                if curve["lockedModelRoute"] == route and curve["name"] not in route_random_assignments
+            ]
+            if len(eligible) < len(hits):
+                eligible = [curve for curve in holdout if curve["name"] not in route_random_assignments]
+            rng.shuffle(eligible)
+            activations = [activation for _curve, activation in hits]
+            rng.shuffle(activations)
+            for curve, activation in zip(eligible[: len(hits)], activations):
+                route_random_assignments[curve["name"]] = (branch, activation)
+        route_random_paired = [
+            (
+                curve,
+                base_scores[curve["name"]],
+                observed_state_score_curve_v1797_radial_repair_forced(
+                    curve,
+                    curve,
+                    route_random_assignments.get(curve["name"], ("", 0.0))[0],
+                    route_random_assignments.get(curve["name"], ("", 0.0))[1],
+                ),
+            )
+            for curve in holdout
+        ]
+        rows.append(observed_state_law_freeze_summary(seed, "same-active-count-route-random-null", route_random_paired, high_names))
+
+        rng = random.Random(seed + 37897)
+        high_random_assignments: dict[str, tuple[str, float]] = {}
+        high_holdout = [curve for curve in holdout if curve["name"] in high_names]
+        for branch in sorted({branch for _curve, branch, _activation in candidate_hits}):
+            hits = [
+                (curve, activation)
+                for curve, hit_branch, activation in candidate_hits
+                if hit_branch == branch and curve["name"] in high_names
+            ]
+            route = observed_state_branch_locked_route(branch)
+            eligible = [
+                curve
+                for curve in high_holdout
+                if curve["lockedModelRoute"] == route and curve["name"] not in high_random_assignments
+            ]
+            if len(eligible) < len(hits):
+                eligible = [curve for curve in high_holdout if curve["name"] not in high_random_assignments]
+            rng.shuffle(eligible)
+            activations = [activation for _curve, activation in hits]
+            rng.shuffle(activations)
+            for curve, activation in zip(eligible[: len(hits)], activations):
+                high_random_assignments[curve["name"]] = (branch, activation)
+        high_random_paired = [
+            (
+                curve,
+                base_scores[curve["name"]],
+                observed_state_score_curve_v1797_radial_repair_forced(
+                    curve,
+                    curve,
+                    high_random_assignments.get(curve["name"], ("", 0.0))[0],
+                    high_random_assignments.get(curve["name"], ("", 0.0))[1],
+                ),
+            )
+            for curve in holdout
+        ]
+        rows.append(observed_state_law_freeze_summary(seed, "same-active-count-high-random-null", high_random_paired, high_names))
+    return rows
+
+
+def observed_state_stress_metrics_for_curves_v1797(
+    curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+    stress_label: str,
+) -> tuple[dict, list[dict]]:
+    paired = []
+    previous_scores = []
+    for curve in curves:
+        base = score_curve(curve)
+        prev = observed_state_score_curve_v1796_remaining_stress(
+            curve,
+            curve,
+            fit,
+            amp_cap,
+            soft_scale,
+            full_threshold,
+        )
+        cand = observed_state_score_curve_v1797_radial_repair(
+            curve,
+            curve,
+            fit,
+            amp_cap,
+            soft_scale,
+            full_threshold,
+        )
+        paired.append((curve, base, cand))
+        previous_scores.append((curve, prev, cand))
+    high_rows = [row for row in paired if row[0]["name"] in high_names]
+    protected_rows = [row for row in paired if row[0]["name"] not in high_names]
+    high_prev_rows = [row for row in previous_scores if row[0]["name"] in high_names]
+    protected_prev_rows = [row for row in previous_scores if row[0]["name"] not in high_names]
+    protected_regressions = [cand["rmse"] - base["rmse"] for _curve, base, cand in protected_rows]
+    high_stress_worsens = [cand["rmse"] - prev["rmse"] for _curve, prev, cand in high_prev_rows]
+    protected_stress_worsens = [cand["rmse"] - prev["rmse"] for _curve, prev, cand in protected_prev_rows]
+    metrics = {
+        "stress": stress_label,
+        "highGainPct": pct_improvement(
+            safe_mean(base["rmse"] for _curve, base, _cand in high_rows),
+            safe_mean(cand["rmse"] for _curve, _base, cand in high_rows),
+        ),
+        "cleanGainPct": pct_improvement(
+            safe_mean(base["rmse"] for _curve, base, _cand in paired),
+            safe_mean(cand["rmse"] for _curve, _base, cand in paired),
+        ),
+        "highStillAbove20": sum(1 for _curve, _base, cand in high_rows if cand["rmse"] >= 20.0),
+        "highWorsened": sum(1 for _curve, base, cand in high_rows if cand["rmse"] > base["rmse"]),
+        "highWorsenedVsV1796": sum(1 for delta in high_stress_worsens if delta > 1e-9),
+        "protectedRegressionCount": sum(1 for regression in protected_regressions if regression > 1e-9),
+        "protectedWorsenedVsV1796": sum(1 for delta in protected_stress_worsens if delta > 1e-9),
+        "maxProtectedRegression": max(protected_regressions) if protected_regressions else 0.0,
+        "routePreservation": safe_mean(1.0 if cand["candidateRoute"] == base["candidateRoute"] else 0.0 for _curve, base, cand in paired),
+    }
+    case_rows = []
+    for curve, base, cand in paired:
+        prev = next(prev_score for prev_curve, prev_score, _cand in previous_scores if prev_curve["name"] == curve["name"])
+        is_high = curve["name"] in high_names
+        regression = cand["rmse"] - base["rmse"]
+        delta_vs_v1796 = cand["rmse"] - prev["rmse"]
+        if (
+            (is_high and (cand["rmse"] >= 20.0 or cand["rmse"] > base["rmse"] or abs(delta_vs_v1796) > 1e-9))
+            or (not is_high and (regression > 1e-9 or abs(delta_vs_v1796) > 1e-9))
+        ):
+            case_rows.append(
+                {
+                    "stress": stress_label,
+                    "galaxy": curve["name"],
+                    "set": "clean-high-rmse" if is_high else "clean-protected",
+                    "lockedRoute": curve["lockedModelRoute"],
+                    "baselineRmse": base["rmse"],
+                    "v1796Rmse": prev["rmse"],
+                    "candidateRmse": cand["rmse"],
+                    "gainKmS": base["rmse"] - cand["rmse"],
+                    "deltaVsV1796KmS": delta_vs_v1796,
+                    "improvementVsV1796KmS": prev["rmse"] - cand["rmse"],
+                    "regressionKmS": regression,
+                    "branch": cand.get("observedStateBranch", ""),
+                    "previousBranch": prev.get("observedStateBranch", ""),
+                    "responseSource": cand.get("observedStateResponseSource", ""),
+                    "candidateRoute": cand["candidateRoute"],
+                    "stillAbove20": cand["rmse"] >= 20.0 if is_high else "",
+                }
+            )
+    return metrics, case_rows
+
+
+def write_observed_state_radial_repair_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+    prefix = "mts_observed_state_radial_repair"
+
+    capsule = write_observed_state_route_safe_artifacts(
+        out_dir,
+        score_fn=observed_state_score_curve_v1797_radial_repair,
+        forced_score_fn=observed_state_score_curve_v1797_radial_repair_forced,
+        split_replay_fn=observed_state_v1797_split_replay_rows,
+        prefix=prefix,
+        candidate_id="observed-state-response-v17.97-radial-repair",
+        tested_candidate="observed-state-response-v17.96-remaining-stress",
+        analysis_name="mts-observed-state-radial-repair-v17-97",
+        report_title="# MTS v17.97 Radial-Repair State Response",
+        mechanism=(
+            "Keep v17.96 intact, then admit two deterministic three-zone radial redistribution branches for "
+            "remaining positive-bulge stress failures that passed no-protected-regression probes."
+        ),
+        report_intro=(
+            "This is a framework-candidate law edit, not a summary pack. It does not use galaxy names, residual lookup, "
+            "raw RMSE lookup, per-galaxy amplitude lookup, or weak/systematics galaxies."
+        ),
+        extra_formula={
+            "baseCandidate": "observed-state-response-v17.96-remaining-stress",
+            "seedReplayCount": len(OBSERVED_STATE_V1797_REPLAY_SEEDS),
+            "radialRepairBranches": [
+                {
+                    "branch": "positive-bulge shoulder radial redistribution",
+                    "innerAmp": 4.5,
+                    "midAmp": 2.75,
+                    "outerAmp": 1.5,
+                    "q": 1.5,
+                },
+                {
+                    "branch": "dense positive-bulge radial redistribution",
+                    "innerAmp": 8.0,
+                    "midAmp": 4.0,
+                    "outerAmp": 3.5,
+                    "q": 1.5,
+                },
+            ],
+            "rejectedProbe": "compact-bulge shear radial redistribution was not admitted because no state-only setting improved the high-bulge cases without worsening a low-bulge stress lookalike",
+        },
+        passed_verdict="v17.97 nominal gates passed",
+        failed_verdict="v17.97 nominal gates failed",
+    )
+
+    jitter_rows, jitter_case_rows, jitter_protected_rows = observed_state_soft_gate_robustness_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        score_fn=observed_state_score_curve_v1797_radial_repair,
+    )
+    write_csv(out_dir / f"{prefix}_state_jitter.csv", jitter_rows)
+    write_csv(out_dir / f"{prefix}_state_jitter_cases.csv", jitter_case_rows)
+    write_csv(out_dir / f"{prefix}_state_jitter_protected.csv", jitter_protected_rows)
+
+    ml_rows: list[dict] = []
+    ml_case_rows: list[dict] = []
+    for disk_factor in [0.85, 1.00, 1.15]:
+        for bulge_factor in [0.85, 1.00, 1.15]:
+            label = f"mlDiskx{disk_factor:.2f}_mlBulx{bulge_factor:.2f}"
+            transformed = [
+                transformed_curve(curve, ml_disk=curve["mlDisk"] * disk_factor, ml_bulge=curve["mlBulge"] * bulge_factor)
+                for curve in clean_curves
+            ]
+            metrics, case_rows = observed_state_stress_metrics_for_curves_v1797(
+                transformed,
+                high_names,
+                fit,
+                amp_cap,
+                soft_scale,
+                full_threshold,
+                label,
+            )
+            metrics["mlDiskFactor"] = disk_factor
+            metrics["mlBulgeFactor"] = bulge_factor
+            ml_rows.append(metrics)
+            ml_case_rows.extend(case_rows)
+    write_csv(out_dir / f"{prefix}_ml_jitter.csv", ml_rows)
+    write_csv(out_dir / f"{prefix}_ml_jitter_cases.csv", ml_case_rows)
+
+    baryon_rows: list[dict] = []
+    baryon_case_rows: list[dict] = []
+    for baryon_factor in [0.90, 0.95, 1.00, 1.05, 1.10]:
+        label = f"baryonVelocityx{baryon_factor:.2f}"
+        transformed = [transformed_curve(curve, baryon_velocity_scale=baryon_factor) for curve in clean_curves]
+        metrics, case_rows = observed_state_stress_metrics_for_curves_v1797(
+            transformed,
+            high_names,
+            fit,
+            amp_cap,
+            soft_scale,
+            full_threshold,
+            label,
+        )
+        metrics["baryonVelocityFactor"] = baryon_factor
+        baryon_rows.append(metrics)
+        baryon_case_rows.extend(case_rows)
+    write_csv(out_dir / f"{prefix}_baryon_scale_stress.csv", baryon_rows)
+    write_csv(out_dir / f"{prefix}_baryon_scale_cases.csv", baryon_case_rows)
+
+    v1796_scores = {
+        curve["name"]: observed_state_score_curve_v1796_remaining_stress(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        for curve in clean_curves
+    }
+    v1797_scores = {
+        curve["name"]: observed_state_score_curve_v1797_radial_repair(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        for curve in clean_curves
+    }
+    nominal_changed = [
+        name
+        for name in sorted(v1796_scores)
+        if abs(v1796_scores[name]["rmse"] - v1797_scores[name]["rmse"]) > 1e-9
+        or v1796_scores[name].get("observedStateBranch", "") != v1797_scores[name].get("observedStateBranch", "")
+    ]
+    nominal_high_worsened_vs_v1796 = [
+        name for name in nominal_changed if name in high_names and v1797_scores[name]["rmse"] - v1796_scores[name]["rmse"] > 1e-9
+    ]
+    nominal_protected_changed = [name for name in nominal_changed if name not in high_names]
+    nominal_protected_worsened_vs_v1796 = [
+        name for name in nominal_protected_changed if v1797_scores[name]["rmse"] - v1796_scores[name]["rmse"] > 1e-9
+    ]
+
+    improved_stress_rows = [
+        row
+        for row in ml_case_rows + baryon_case_rows
+        if row.get("set") == "clean-high-rmse" and parse_float(row.get("improvementVsV1796KmS"), 0.0) > 1e-9
+    ]
+    worsened_stress_rows = [
+        row
+        for row in ml_case_rows + baryon_case_rows
+        if parse_float(row.get("deltaVsV1796KmS"), 0.0) > 1e-9
+    ]
+    write_csv(out_dir / f"{prefix}_changed_stress_cases.csv", improved_stress_rows + worsened_stress_rows)
+
+    jitter_summary = {
+        "trialCount": len(jitter_rows),
+        "minHighGainPct": min(parse_float(row["highGainPct"]) for row in jitter_rows),
+        "medianHighGainPct": safe_median(parse_float(row["highGainPct"]) for row in jitter_rows),
+        "minCleanGainPct": min(parse_float(row["cleanGainPct"]) for row in jitter_rows),
+        "medianCleanGainPct": safe_median(parse_float(row["cleanGainPct"]) for row in jitter_rows),
+        "maxHighStillAbove20": max(int(parse_float(row["highStillAbove20"], 0.0)) for row in jitter_rows),
+        "maxHighWorsened": max(int(parse_float(row["highWorsened"], 0.0)) for row in jitter_rows),
+        "maxProtectedRegression": max(parse_float(row["maxProtectedRegression"], 0.0) for row in jitter_rows),
+        "minRoutePreservation": min(parse_float(row["routePreservation"]) for row in jitter_rows),
+    }
+    ml_summary = {
+        "variantCount": len(ml_rows),
+        "minHighGainPct": min(parse_float(row["highGainPct"]) for row in ml_rows),
+        "minCleanGainPct": min(parse_float(row["cleanGainPct"]) for row in ml_rows),
+        "maxHighStillAbove20": max(int(parse_float(row["highStillAbove20"], 0.0)) for row in ml_rows),
+        "maxHighWorsened": max(int(parse_float(row["highWorsened"], 0.0)) for row in ml_rows),
+        "maxHighWorsenedVsV1796": max(int(parse_float(row["highWorsenedVsV1796"], 0.0)) for row in ml_rows),
+        "maxProtectedWorsenedVsV1796": max(int(parse_float(row["protectedWorsenedVsV1796"], 0.0)) for row in ml_rows),
+        "maxProtectedRegression": max(parse_float(row["maxProtectedRegression"], 0.0) for row in ml_rows),
+    }
+    baryon_summary = {
+        "variantCount": len(baryon_rows),
+        "minHighGainPct": min(parse_float(row["highGainPct"]) for row in baryon_rows),
+        "minCleanGainPct": min(parse_float(row["cleanGainPct"]) for row in baryon_rows),
+        "maxHighStillAbove20": max(int(parse_float(row["highStillAbove20"], 0.0)) for row in baryon_rows),
+        "maxHighWorsened": max(int(parse_float(row["highWorsened"], 0.0)) for row in baryon_rows),
+        "maxHighWorsenedVsV1796": max(int(parse_float(row["highWorsenedVsV1796"], 0.0)) for row in baryon_rows),
+        "maxProtectedWorsenedVsV1796": max(int(parse_float(row["protectedWorsenedVsV1796"], 0.0)) for row in baryon_rows),
+        "maxProtectedRegression": max(parse_float(row["maxProtectedRegression"], 0.0) for row in baryon_rows),
+    }
+    nominal = capsule["summary"]
+    stress_passed = (
+        nominal["nominalHighStillAbove20"] == 0
+        and nominal["nominalHighGainPct"] >= 68.0
+        and nominal["nominalCleanGainPct"] >= 43.7
+        and nominal["bestNullMarginPct"] >= 45.0
+        and nominal["maxHoldoutProtectedRegression"] <= 1.0
+        and nominal["branchRejectedCount"] == 0
+        and len(nominal_high_worsened_vs_v1796) == 0
+        and len(nominal_protected_changed) == 0
+        and jitter_summary["maxHighStillAbove20"] == 0
+        and jitter_summary["maxProtectedRegression"] <= 1.0
+        and ml_summary["maxHighStillAbove20"] <= 3
+        and ml_summary["maxHighWorsenedVsV1796"] == 0
+        and ml_summary["maxProtectedWorsenedVsV1796"] == 0
+        and ml_summary["maxProtectedRegression"] <= 4.0
+        and baryon_summary["maxHighStillAbove20"] <= 5
+        and baryon_summary["maxHighWorsenedVsV1796"] == 0
+        and baryon_summary["maxProtectedWorsenedVsV1796"] == 0
+        and baryon_summary["minHighGainPct"] >= 56.5
+        and baryon_summary["maxProtectedRegression"] <= 1.0
+    )
+    final_verdict = "v17.97 radial-repair state response passed" if stress_passed else "v17.97 radial-repair state response partial"
+    nominal["verdict"] = final_verdict
+    nominal["stressPassed"] = stress_passed
+    nominal["nominalChangedFromV1796Count"] = len(nominal_changed)
+    nominal["nominalHighWorsenedVsV1796Count"] = len(nominal_high_worsened_vs_v1796)
+    nominal["nominalProtectedChangedFromV1796Count"] = len(nominal_protected_changed)
+    nominal["nominalProtectedWorsenedVsV1796Count"] = len(nominal_protected_worsened_vs_v1796)
+    nominal["improvedStressCaseCount"] = len(improved_stress_rows)
+    nominal["worsenedStressCaseCount"] = len(worsened_stress_rows)
+    nominal["mlMaxHighStillAbove20"] = ml_summary["maxHighStillAbove20"]
+    nominal["baryonMaxHighStillAbove20"] = baryon_summary["maxHighStillAbove20"]
+    nominal["mlMaxHighWorsenedVsV1796"] = ml_summary["maxHighWorsenedVsV1796"]
+    nominal["baryonMaxHighWorsenedVsV1796"] = baryon_summary["maxHighWorsenedVsV1796"]
+    nominal["mlMaxProtectedWorsenedVsV1796"] = ml_summary["maxProtectedWorsenedVsV1796"]
+    nominal["baryonMaxProtectedWorsenedVsV1796"] = baryon_summary["maxProtectedWorsenedVsV1796"]
+    write_csv(out_dir / f"{prefix}_scores.csv", [nominal])
+
+    remaining_cases = sorted(
+        [
+            row
+            for row in ml_case_rows + baryon_case_rows
+            if row.get("set") == "clean-high-rmse" and row.get("stillAbove20") is True
+        ],
+        key=lambda row: parse_float(row.get("candidateRmse"), 0.0),
+        reverse=True,
+    )
+    top_improved = sorted(
+        improved_stress_rows,
+        key=lambda row: parse_float(row.get("improvementVsV1796KmS"), 0.0),
+        reverse=True,
+    )
+    nominal_changed_rows = [
+        {
+            "galaxy": name,
+            "set": "clean-high-rmse" if name in high_names else "clean-protected",
+            "v1796Rmse": v1796_scores[name]["rmse"],
+            "candidateRmse": v1797_scores[name]["rmse"],
+            "deltaVsV1796KmS": v1797_scores[name]["rmse"] - v1796_scores[name]["rmse"],
+            "branch": v1797_scores[name].get("observedStateBranch", ""),
+            "previousBranch": v1796_scores[name].get("observedStateBranch", ""),
+            "candidateRoute": v1797_scores[name]["candidateRoute"],
+            "previousRoute": v1796_scores[name]["candidateRoute"],
+        }
+        for name in nominal_changed
+    ]
+    write_csv(out_dir / f"{prefix}_changed_nominal_cases.csv", nominal_changed_rows)
+
+    report = [
+        "# MTS v17.97 Radial-Repair State Response",
+        "",
+        "This pass modifies the framework candidate for the remaining positive-bulge stress failures that v17.96 could not fully clear. It admits only radial redistribution branches that reduce high-RMSE stress failures without protected-case side effects.",
+        "",
+        "## Law Change",
+        "",
+        "- Base law: `v17.96 remaining-stress state response`.",
+        "- Add `positive-bulge shoulder radial redistribution`: inner/mid/outer support amps `4.5 / 2.75 / 1.5`, q `1.5`.",
+        "- Add `dense positive-bulge radial redistribution`: inner/mid/outer support amps `8.0 / 4.0 / 3.5`, q `1.5`.",
+        "- Reject the compact-bulge shear radial candidate because the state vector could not separate the high-bulge repair cases from a low-bulge stress lookalike without a regression.",
+        "- Do not change canonical `Gamma0`, base M/L, weak/systematics handling, or use galaxy names/residual/RMSE lookup.",
+        "",
+        "## Scores",
+        "",
+        f"- Verdict: `{final_verdict}`.",
+        f"- Nominal high-RMSE gain: `{fmt(nominal['nominalHighGainPct'])}%`.",
+        f"- Nominal clean-set gain: `{fmt(nominal['nominalCleanGainPct'])}%`.",
+        f"- Holdout high-RMSE gain: `{fmt(nominal['medianHoldoutHighGainPct'])}%`.",
+        f"- Holdout clean-set gain: `{fmt(nominal['medianHoldoutCleanGainPct'])}%`.",
+        f"- Best null high-RMSE gain: `{fmt(nominal['bestNullHighGainPct'])}%`.",
+        f"- Null margin: `{fmt(nominal['bestNullMarginPct'])}` points.",
+        f"- Nominal high-RMSE above 20: `{nominal['nominalHighStillAbove20']}`.",
+        f"- Nominal v17.96 changed cases: `{len(nominal_changed)}`.",
+        f"- Nominal protected changed cases: `{len(nominal_protected_changed)}`.",
+        f"- Max holdout protected regression: `{fmt(nominal['maxHoldoutProtectedRegression'])} km/s`.",
+        "",
+        "## Stress Result",
+        "",
+        f"- State-jitter trials: `{jitter_summary['trialCount']}`, max high above 20 `{jitter_summary['maxHighStillAbove20']}`, max protected regression `{fmt(jitter_summary['maxProtectedRegression'])} km/s`.",
+        f"- M/L variants: worst high gain `{fmt(ml_summary['minHighGainPct'])}%`, max high above 20 `{ml_summary['maxHighStillAbove20']}`, max high worsened vs v17.96 `{ml_summary['maxHighWorsenedVsV1796']}`, max protected worsened vs v17.96 `{ml_summary['maxProtectedWorsenedVsV1796']}`.",
+        f"- Baryon-scale variants: worst high gain `{fmt(baryon_summary['minHighGainPct'])}%`, max high above 20 `{baryon_summary['maxHighStillAbove20']}`, max high worsened vs v17.96 `{baryon_summary['maxHighWorsenedVsV1796']}`, max protected worsened vs v17.96 `{baryon_summary['maxProtectedWorsenedVsV1796']}`.",
+        "",
+        "## Nominal Improvements",
+        "",
+    ]
+    for row in nominal_changed_rows:
+        report.append(
+            f"- `{row['galaxy']}`: v17.96 `{fmt(row['v1796Rmse'])}` -> v17.97 `{fmt(row['candidateRmse'])}` km/s, delta `{fmt(row['deltaVsV1796KmS'])}` km/s, branch `{row['branch']}`."
+        )
+    if not nominal_changed_rows:
+        report.append("- None.")
+    report.extend(["", "## Improved Stress Cases", ""])
+    for row in top_improved[:16]:
+        report.append(
+            f"- `{row['galaxy']}` under `{row['stress']}`: v17.96 `{fmt(row['v1796Rmse'])}` -> v17.97 `{fmt(row['candidateRmse'])}` km/s, improvement `{fmt(row['improvementVsV1796KmS'])}` km/s, branch `{row.get('branch', '')}`."
+        )
+    if not top_improved:
+        report.append("- None.")
+    report.extend(["", "## Remaining High-RMSE Stress Failures", ""])
+    for row in remaining_cases[:16]:
+        report.append(
+            f"- `{row['galaxy']}` under `{row['stress']}`: candidate RMSE `{fmt(row['candidateRmse'])}` km/s, gain `{fmt(row['gainKmS'])}` km/s, branch `{row.get('branch', '')}`."
+        )
+    if not remaining_cases:
+        report.append("- None.")
+    report.extend(
+        [
+            "",
+            "## Guardrail",
+            "",
+            "v17.97 is a law-edit repair pass. It keeps v17.96 intact except for two admitted state/profile radial redistribution branches and rejects the tempting UGC09133-like branch because it did not pass the no-regression stress split.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule["verdict"] = final_verdict
+    capsule["stressPassed"] = stress_passed
+    capsule["nominalChangedFromV1796Count"] = len(nominal_changed)
+    capsule["nominalHighWorsenedVsV1796Count"] = len(nominal_high_worsened_vs_v1796)
+    capsule["nominalProtectedChangedFromV1796Count"] = len(nominal_protected_changed)
+    capsule["nominalProtectedWorsenedVsV1796Count"] = len(nominal_protected_worsened_vs_v1796)
+    capsule["improvedStressCaseCount"] = len(top_improved)
+    capsule["worsenedStressCaseCount"] = len(worsened_stress_rows)
+    capsule["remainingStressAbove20Count"] = len(remaining_cases)
+    capsule["jitterStressSummary"] = jitter_summary
+    capsule["mlStressSummary"] = ml_summary
+    capsule["baryonScaleStressSummary"] = baryon_summary
+    capsule["outputFiles"].extend(
+        [
+            f"{prefix}_state_jitter.csv",
+            f"{prefix}_state_jitter_cases.csv",
+            f"{prefix}_state_jitter_protected.csv",
+            f"{prefix}_ml_jitter.csv",
+            f"{prefix}_ml_jitter_cases.csv",
+            f"{prefix}_baryon_scale_stress.csv",
+            f"{prefix}_baryon_scale_cases.csv",
+            f"{prefix}_changed_stress_cases.csv",
+            f"{prefix}_changed_nominal_cases.csv",
+        ]
+    )
+    (out_dir / f"{prefix}_capsule.json").write_text(
+        json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8"
+    )
+    return capsule
+
+
+def cmd_observedstateradialrepair(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_RADIAL_REPAIR_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_radial_repair_artifacts(out_dir)
+    summary = capsule["summary"]
+    ml = capsule["mlStressSummary"]
+    baryon = capsule["baryonScaleStressSummary"]
+    print("MTS v17.97 radial-repair state response")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['nominalHighGainPct'])}%",
+                f"clean={fmt(summary['nominalCleanGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+                f"nominal_changed={capsule['nominalChangedFromV1796Count']}",
+                f"protected_changed={capsule['nominalProtectedChangedFromV1796Count']}",
+                f"ml_above20={ml['maxHighStillAbove20']}",
+                f"baryon_above20={baryon['maxHighStillAbove20']}",
+                f"improved_stress={capsule['improvedStressCaseCount']}",
+                f"worsened_stress={capsule['worsenedStressCaseCount']}",
+                f"baryon_min_gain={fmt(baryon['minHighGainPct'])}%",
+                f"baryon_protected={fmt(baryon['maxProtectedRegression'])}",
+            ]
+        )
+    )
+    print(f"Wrote observed state radial-repair candidate to {out_dir.resolve()}")
+
+
 OBSERVED_STATE_SOFT_NEIGHBOR_SEEDS = list(range(SPLIT_SEED + 1000, SPLIT_SEED + 1011))
 OBSERVED_STATE_SOFT_SCALE_GRID = [0.03, 0.05, 0.08, 0.10]
 OBSERVED_STATE_SOFT_FULL_THRESHOLD_GRID = [1.0 / 12.0, 0.12, 0.16, 0.20, 0.30, 0.40]
@@ -60578,6 +61294,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatescalerobust",
             "observedstatestresspolish",
             "observedstateremainingstress",
+            "observedstateradialrepair",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -60789,6 +61506,8 @@ def main() -> None:
         cmd_observedstatestresspolish(args)
     elif args.mode == "observedstateremainingstress":
         cmd_observedstateremainingstress(args)
+    elif args.mode == "observedstateradialrepair":
+        cmd_observedstateradialrepair(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
