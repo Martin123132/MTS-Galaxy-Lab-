@@ -158,6 +158,7 @@ DEFAULT_OBSERVED_STATE_V18_RELEASE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-re
 DEFAULT_OBSERVED_STATE_V18_LAW_NATIVE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-law-native-v1"
 DEFAULT_OBSERVED_STATE_V18_BRANCH_PRUNE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-branch-prune-v1"
 DEFAULT_OBSERVED_STATE_V18_FAMILY_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-family-audit-v1"
+DEFAULT_OBSERVED_STATE_V18_BRANCH_IDENTITY_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-branch-identity-v1"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
@@ -54808,6 +54809,517 @@ def cmd_observedstatev18familyaudit(args: argparse.Namespace) -> None:
     print(f"Wrote v18 family audit to {out_dir.resolve()}")
 
 
+OBSERVED_STATE_V18_BRANCH_IDENTITY_SEEDS = OBSERVED_STATE_V1800_REPLAY_SEEDS
+OBSERVED_STATE_V18_BRANCH_IDENTITY_ANALOG_COUNT = 5
+
+
+def observed_state_v18_branch_identity_scaler(clean_curves: list[dict]) -> dict:
+    raw = {curve["name"]: observed_state_v18_state_values(curve) for curve in clean_curves}
+    means: dict[str, float] = {}
+    scales: dict[str, float] = {}
+    for feature in OBSERVED_STATE_V18_FAMILY_BOUNDARY_FEATURES:
+        values = [parse_float(values.get(feature), math.nan) for values in raw.values()]
+        values = [value for value in values if math.isfinite(value)]
+        means[feature] = safe_mean(values)
+        variance = sum((value - means[feature]) ** 2 for value in values) / max(1, len(values) - 1)
+        scales[feature] = math.sqrt(variance) or 1.0
+    return {"raw": raw, "means": means, "scales": scales}
+
+
+def observed_state_v18_branch_identity_vector(name: str, scaler: dict) -> list[float]:
+    raw_values = scaler["raw"].get(name, {})
+    return [
+        (parse_float(raw_values.get(feature), scaler["means"][feature]) - scaler["means"][feature]) / scaler["scales"][feature]
+        for feature in OBSERVED_STATE_V18_FAMILY_BOUNDARY_FEATURES
+    ]
+
+
+def observed_state_v18_branch_identity_distance(name_a: str, name_b: str, scaler: dict) -> float:
+    a = observed_state_v18_branch_identity_vector(name_a, scaler)
+    b = observed_state_v18_branch_identity_vector(name_b, scaler)
+    return math.sqrt(sum((left - right) ** 2 for left, right in zip(a, b)) / max(1, len(a)))
+
+
+def observed_state_v18_forced_branch_score(curve: dict, branch: str) -> dict:
+    return observed_state_score_curve_v1800_baryon_guard_forced(curve, curve, branch, 1.0)
+
+
+def observed_state_v18_branch_identity_null_rows(
+    branch: str,
+    active_high_rows: list[dict],
+    high_rows: list[dict],
+    curves_by_name: dict[str, dict],
+    seeds: list[int],
+) -> tuple[list[dict], dict]:
+    if not active_high_rows:
+        return [], {
+            "branch": branch,
+            "actualHighGainPct": math.nan,
+            "medianSameRouteForcedNullGainPct": math.nan,
+            "sameRouteForcedNullMarginPct": math.nan,
+            "branchNullBeat": False,
+        }
+    actual_gain_pct = observed_state_v18_row_gain_pct(active_high_rows)
+    active_names = {row["galaxy"] for row in active_high_rows}
+    route_counts: dict[str, int] = {}
+    for row in active_high_rows:
+        route_counts[row["lockedRoute"]] = route_counts.get(row["lockedRoute"], 0) + 1
+    pool = [row for row in high_rows if row["galaxy"] not in active_names]
+    rows: list[dict] = []
+    for seed in seeds:
+        rng = random.Random(f"v18-branch-identity-null:{branch}:{seed}")
+        selected: list[dict] = []
+        used: set[str] = set()
+        for route, count in sorted(route_counts.items()):
+            route_pool = [row for row in pool if row["lockedRoute"] == route and row["galaxy"] not in used]
+            rng.shuffle(route_pool)
+            selected.extend(route_pool[:count])
+            used.update(row["galaxy"] for row in route_pool[:count])
+        if len(selected) < len(active_high_rows):
+            fallback = [row for row in pool if row["galaxy"] not in used]
+            rng.shuffle(fallback)
+            selected.extend(fallback[: len(active_high_rows) - len(selected)])
+        forced_pairs = []
+        for row in selected:
+            curve = curves_by_name[row["galaxy"]]
+            baseline = score_curve(curve)
+            forced = observed_state_v18_forced_branch_score(curve, branch)
+            forced_pairs.append((row, baseline, forced))
+        null_gain_pct = pct_improvement(
+            safe_mean(pair[1]["rmse"] for pair in forced_pairs),
+            safe_mean(pair[2]["rmse"] for pair in forced_pairs),
+        )
+        max_regression = max([pair[2]["rmse"] - pair[1]["rmse"] for pair in forced_pairs] or [0.0])
+        rows.append(
+            {
+                "branch": branch,
+                "seed": seed,
+                "activeHighHitCount": len(active_high_rows),
+                "actualHighGainPct": actual_gain_pct,
+                "sameRouteForcedNullGainPct": null_gain_pct,
+                "sameRouteForcedNullMarginPct": actual_gain_pct - null_gain_pct,
+                "sameRouteForcedNullMaxRegressionKmS": max_regression,
+                "selectedGalaxies": "; ".join(sorted(row["galaxy"] for row in selected)),
+            }
+        )
+    margin = safe_median(row["sameRouteForcedNullMarginPct"] for row in rows)
+    summary = {
+        "branch": branch,
+        "actualHighGainPct": actual_gain_pct,
+        "medianSameRouteForcedNullGainPct": safe_median(row["sameRouteForcedNullGainPct"] for row in rows),
+        "sameRouteForcedNullMarginPct": margin,
+        "branchNullBeat": margin >= 10.0,
+    }
+    return rows, summary
+
+
+def observed_state_v18_branch_identity_protected_analogues(
+    branch: str,
+    active_high_rows: list[dict],
+    protected_rows: list[dict],
+    curves_by_name: dict[str, dict],
+    scaler: dict,
+    analog_count: int,
+) -> tuple[list[dict], dict]:
+    if not active_high_rows:
+        return [], {"branch": branch, "maxProtectedAnalogueRegressionKmS": 0.0, "protectedAnalogueWorseCount": 0}
+    active_names = [row["galaxy"] for row in active_high_rows]
+    branch_route = observed_state_branch_locked_route(branch)
+    candidates = []
+    for row in protected_rows:
+        if branch_route and row["lockedRoute"] != branch_route:
+            continue
+        distance = min(observed_state_v18_branch_identity_distance(row["galaxy"], active, scaler) for active in active_names)
+        candidates.append((distance, row))
+    candidates.sort(key=lambda item: (item[0], item[1]["galaxy"]))
+    rows: list[dict] = []
+    for rank, (distance, row) in enumerate(candidates[:analog_count], start=1):
+        curve = curves_by_name[row["galaxy"]]
+        baseline = score_curve(curve)
+        forced = observed_state_v18_forced_branch_score(curve, branch)
+        rows.append(
+            {
+                "branch": branch,
+                "family": observed_state_branch_family(branch),
+                "rank": rank,
+                "protectedGalaxy": row["galaxy"],
+                "lockedRoute": row["lockedRoute"],
+                "nearestHighBranchGalaxy": min(
+                    active_names,
+                    key=lambda name: observed_state_v18_branch_identity_distance(row["galaxy"], name, scaler),
+                ),
+                "stateDistance": distance,
+                "baselineRmse": baseline["rmse"],
+                "forcedRmse": forced["rmse"],
+                "forcedRegressionKmS": forced["rmse"] - baseline["rmse"],
+                "forcedCandidateRoute": forced.get("candidateRoute", ""),
+                "forcedBranchReported": forced.get("observedStateBranch", ""),
+                "forcedFamilyReported": forced.get("observedStateFamily", ""),
+            }
+        )
+    summary = {
+        "branch": branch,
+        "maxProtectedAnalogueRegressionKmS": max([row["forcedRegressionKmS"] for row in rows] or [0.0]),
+        "protectedAnalogueWorseCount": sum(1 for row in rows if row["forcedRegressionKmS"] > 1e-9),
+        "protectedAnalogueStressCount": sum(1 for row in rows if row["forcedRegressionKmS"] > 3.0),
+    }
+    return rows, summary
+
+
+def observed_state_v18_branch_identity_holdout_rows(
+    branch: str,
+    active_high_rows: list[dict],
+    clean_curves: list[dict],
+    seeds: list[int],
+) -> tuple[list[dict], dict]:
+    active_high_by_name = {row["galaxy"]: row for row in active_high_rows}
+    rows: list[dict] = []
+    for seed in seeds:
+        _train_names, holdout_names = observed_state_split(clean_curves, seed, HOLDOUT_FRACTION)
+        holdout_rows = [row for name, row in active_high_by_name.items() if name in holdout_names]
+        rows.append(
+            {
+                "branch": branch,
+                "seed": seed,
+                "holdoutBranchHighHitCount": len(holdout_rows),
+                "holdoutBranchHighGainPct": observed_state_v18_row_gain_pct(holdout_rows),
+                "holdoutBranchAbove20": sum(1 for row in holdout_rows if parse_float(row["lawNativeRmse"]) >= 20.0),
+                "holdoutBranchGalaxies": "; ".join(sorted(row["galaxy"] for row in holdout_rows)),
+            }
+        )
+    summary = {
+        "branch": branch,
+        "holdoutPresenceRate": safe_mean(1.0 if row["holdoutBranchHighHitCount"] > 0 else 0.0 for row in rows),
+        "medianHoldoutHighGainPct": safe_median(row["holdoutBranchHighGainPct"] for row in rows if row["holdoutBranchHighHitCount"] > 0),
+        "maxHoldoutAbove20": max([row["holdoutBranchAbove20"] for row in rows] or [0]),
+    }
+    return rows, summary
+
+
+def observed_state_v18_branch_identity_surface_rows(
+    branch: str,
+    active_rows: list[dict],
+    curves_by_name: dict[str, dict],
+) -> list[dict]:
+    rows: list[dict] = []
+    for feature in OBSERVED_STATE_V18_FAMILY_BOUNDARY_FEATURES:
+        values = []
+        for row in active_rows:
+            curve = curves_by_name[row["galaxy"]]
+            value = observed_state_v18_state_values(curve).get(feature, math.nan)
+            value = parse_float(value, math.nan)
+            if math.isfinite(value):
+                values.append(value)
+        if not values:
+            continue
+        rows.append(
+            {
+                "branch": branch,
+                "family": observed_state_branch_family(branch),
+                "feature": feature,
+                "hitCount": len(values),
+                "min": min(values),
+                "median": safe_median(values),
+                "max": max(values),
+                "span": max(values) - min(values),
+            }
+        )
+    return rows
+
+
+def write_observed_state_v18_branch_identity_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_observed_v18_branch_identity"
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    curves_by_name = {curve["name"]: curve for curve in context["curves"]}
+    scaler = observed_state_v18_branch_identity_scaler(clean_curves)
+    artifact_payload = read_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE")
+    case_rows, _parity_rows, law_summary = observed_state_v18_law_native_audit_rows(context, artifact_payload)
+    full_metric = observed_state_v18_prune_metric(case_rows, high_names, lambda _row: False)
+    full_high_above20 = int(full_metric["highAbove20"])
+    clean_rows = [row for row in case_rows if row["set"] != "weak/systematics"]
+    high_rows = [row for row in clean_rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [row for row in clean_rows if row["set"] == "clean-protected"]
+    branches = sorted(
+        {
+            row["branch"]
+            for row in high_rows
+            if row.get("branch")
+        }
+    )
+
+    branch_ledger_rows: list[dict] = []
+    null_rows_all: list[dict] = []
+    protected_analogue_rows_all: list[dict] = []
+    holdout_rows_all: list[dict] = []
+    forced_parity_rows: list[dict] = []
+    state_surface_rows: list[dict] = []
+
+    for branch in branches:
+        active_rows = [row for row in clean_rows if row.get("branch") == branch]
+        active_high_rows = [row for row in active_rows if row["set"] == "clean-high-rmse"]
+        active_protected_rows = [row for row in active_rows if row["set"] == "clean-protected"]
+        metric = observed_state_v18_prune_metric(case_rows, high_names, lambda row, item=branch: row.get("branch") == item)
+        high_above20_delta = int(metric["highAbove20"]) - full_high_above20
+        high_gain_loss = parse_float(full_metric["highGainPct"]) - parse_float(metric["highGainPct"])
+
+        max_forced_diff = 0.0
+        forced_route_mismatch_count = 0
+        for row in active_rows:
+            curve = curves_by_name[row["galaxy"]]
+            forced = observed_state_v18_forced_branch_score(curve, branch)
+            diff = forced["rmse"] - parse_float(row["lawNativeRmse"])
+            max_forced_diff = max(max_forced_diff, abs(diff))
+            if forced.get("candidateRoute", "") != row["lawCandidateRoute"]:
+                forced_route_mismatch_count += 1
+            forced_parity_rows.append(
+                {
+                    "branch": branch,
+                    "family": row.get("family", observed_state_branch_family(branch)),
+                    "galaxy": row["galaxy"],
+                    "set": row["set"],
+                    "lawNativeRmse": row["lawNativeRmse"],
+                    "forcedRmse": forced["rmse"],
+                    "forcedMinusLawRmse": diff,
+                    "lawRoute": row["lawCandidateRoute"],
+                    "forcedRoute": forced.get("candidateRoute", ""),
+                    "forcedBranchReported": forced.get("observedStateBranch", ""),
+                    "forcedResponseSource": forced.get("observedStateResponseSource", ""),
+                }
+            )
+
+        branch_null_rows, branch_null_summary = observed_state_v18_branch_identity_null_rows(
+            branch,
+            active_high_rows,
+            high_rows,
+            curves_by_name,
+            OBSERVED_STATE_V18_BRANCH_IDENTITY_SEEDS,
+        )
+        null_rows_all.extend(branch_null_rows)
+        analogue_rows, analogue_summary = observed_state_v18_branch_identity_protected_analogues(
+            branch,
+            active_high_rows,
+            protected_rows,
+            curves_by_name,
+            scaler,
+            OBSERVED_STATE_V18_BRANCH_IDENTITY_ANALOG_COUNT,
+        )
+        protected_analogue_rows_all.extend(analogue_rows)
+        branch_holdout_rows, branch_holdout_summary = observed_state_v18_branch_identity_holdout_rows(
+            branch,
+            active_high_rows,
+            clean_curves,
+            OBSERVED_STATE_V18_BRANCH_IDENTITY_SEEDS,
+        )
+        holdout_rows_all.extend(branch_holdout_rows)
+        state_surface_rows.extend(observed_state_v18_branch_identity_surface_rows(branch, active_rows, curves_by_name))
+
+        active_protected_regressions = [parse_float(row["lawNativeRmse"]) - parse_float(row["baselineRmse"]) for row in active_protected_rows]
+        branch_null_margin = parse_float(branch_null_summary.get("sameRouteForcedNullMarginPct"), math.nan)
+        max_protected_analogue_regression = parse_float(analogue_summary.get("maxProtectedAnalogueRegressionKmS"), 0.0)
+        if max_forced_diff > 1e-7 or forced_route_mismatch_count:
+            verdict = "identity mismatch"
+        elif max_protected_analogue_regression > 3.0:
+            verdict = "protected-stress branch"
+        elif branch_null_margin < 10.0:
+            verdict = "fails branch null"
+        elif len(active_high_rows) <= 1:
+            verdict = "edge branch"
+        elif high_gain_loss >= 5.0 and high_above20_delta > 0 and parse_float(branch_holdout_summary["holdoutPresenceRate"], 0.0) >= 0.25:
+            verdict = "law-like branch"
+        elif high_above20_delta > 0 or high_gain_loss >= 2.0:
+            verdict = "edge branch"
+        else:
+            verdict = "weak branch identity"
+
+        branch_ledger_rows.append(
+            {
+                "branch": branch,
+                "family": active_rows[0].get("family", observed_state_branch_family(branch)) if active_rows else observed_state_branch_family(branch),
+                "verdict": verdict,
+                "activeCleanHitCount": len(active_rows),
+                "activeHighHitCount": len(active_high_rows),
+                "activeProtectedHitCount": len(active_protected_rows),
+                "activeHighMeanGainKmS": safe_mean(parse_float(row["lawGainKmS"]) for row in active_high_rows),
+                "activeHighGainPct": observed_state_v18_row_gain_pct(active_high_rows),
+                "ablationHighGainPct": metric["highGainPct"],
+                "highGainLossPct": high_gain_loss,
+                "ablationHighAbove20": metric["highAbove20"],
+                "highAbove20Delta": high_above20_delta,
+                "sameRouteForcedNullMarginPct": branch_null_margin,
+                "sameRouteForcedNullGainPct": branch_null_summary.get("medianSameRouteForcedNullGainPct", math.nan),
+                "holdoutPresenceRate": branch_holdout_summary["holdoutPresenceRate"],
+                "medianHoldoutHighGainPct": branch_holdout_summary["medianHoldoutHighGainPct"],
+                "maxForcedParityDiffKmS": max_forced_diff,
+                "forcedRouteMismatchCount": forced_route_mismatch_count,
+                "maxActiveProtectedRegressionKmS": max(active_protected_regressions or [0.0]),
+                "activeProtectedWorseCount": sum(1 for value in active_protected_regressions if value > 1e-9),
+                "maxProtectedAnalogueRegressionKmS": max_protected_analogue_regression,
+                "protectedAnalogueWorseCount": analogue_summary["protectedAnalogueWorseCount"],
+                "protectedAnalogueStressCount": analogue_summary["protectedAnalogueStressCount"],
+                "highGalaxies": "; ".join(sorted(row["galaxy"] for row in active_high_rows)),
+                "protectedGalaxies": "; ".join(sorted(row["galaxy"] for row in active_protected_rows)),
+            }
+        )
+
+    order = {
+        "law-like branch": 0,
+        "edge branch": 1,
+        "weak branch identity": 2,
+        "fails branch null": 3,
+        "protected-stress branch": 4,
+        "identity mismatch": 5,
+    }
+    branch_ledger_rows.sort(key=lambda row: (order.get(row["verdict"], 99), row["family"], row["branch"]))
+    law_like_count = sum(1 for row in branch_ledger_rows if row["verdict"] == "law-like branch")
+    edge_count = sum(1 for row in branch_ledger_rows if row["verdict"] == "edge branch")
+    fail_null_count = sum(1 for row in branch_ledger_rows if row["verdict"] == "fails branch null")
+    protected_stress_count = sum(1 for row in branch_ledger_rows if row["verdict"] == "protected-stress branch")
+    identity_mismatch_count = sum(1 for row in branch_ledger_rows if row["verdict"] == "identity mismatch")
+    weak_identity_count = sum(1 for row in branch_ledger_rows if row["verdict"] == "weak branch identity")
+    if identity_mismatch_count or protected_stress_count:
+        verdict = "v18 branch identity blocked by safety/parity"
+    elif law_like_count >= 5 and fail_null_count <= len(branch_ledger_rows) // 2:
+        verdict = "v18 branch identity partially defensible"
+    elif law_like_count >= 3:
+        verdict = "v18 branch identity mixed"
+    else:
+        verdict = "v18 branch identity mostly null-like"
+
+    summary = {
+        "candidateId": "observed-state-response-v18.02-branch-identity",
+        "verdict": verdict,
+        "fullHighGainPct": full_metric["highGainPct"],
+        "fullCleanGainPct": full_metric["cleanGainPct"],
+        "fullHighAbove20": full_metric["highAbove20"],
+        "branchCount": len(branch_ledger_rows),
+        "lawLikeBranchCount": law_like_count,
+        "edgeBranchCount": edge_count,
+        "weakIdentityBranchCount": weak_identity_count,
+        "failNullBranchCount": fail_null_count,
+        "protectedStressBranchCount": protected_stress_count,
+        "identityMismatchBranchCount": identity_mismatch_count,
+        "maxProtectedAnalogueRegressionKmS": max([parse_float(row["maxProtectedAnalogueRegressionKmS"], 0.0) for row in branch_ledger_rows] or [0.0]),
+        "maxForcedParityDiffKmS": max([parse_float(row["maxForcedParityDiffKmS"], 0.0) for row in branch_ledger_rows] or [0.0]),
+        "activeHighHitCount": sum(int(parse_float(row["activeHighHitCount"], 0.0)) for row in branch_ledger_rows),
+        "weakSystematicsLeakage": law_summary["weakSystematicsLeakage"],
+        "cleanParityMismatchCount": law_summary["cleanParityMismatchCount"],
+    }
+
+    artifact_payload.setdefault("metadata", {})["branchIdentity"] = {
+        "verdict": verdict,
+        "branchCount": summary["branchCount"],
+        "lawLikeBranchCount": law_like_count,
+        "edgeBranchCount": edge_count,
+        "failNullBranchCount": fail_null_count,
+        "protectedStressBranchCount": protected_stress_count,
+        "identityMismatchBranchCount": identity_mismatch_count,
+        "weakSystematicsLeakage": law_summary["weakSystematicsLeakage"],
+        "maxProtectedAnalogueRegressionKmS": summary["maxProtectedAnalogueRegressionKmS"],
+    }
+    write_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+    write_window_json_assignment(out_dir / f"{prefix}_browser_artifact.js", "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_branch_ledger.csv", branch_ledger_rows)
+    write_csv(out_dir / f"{prefix}_branch_nulls.csv", null_rows_all)
+    write_csv(out_dir / f"{prefix}_protected_analogues.csv", protected_analogue_rows_all)
+    write_csv(out_dir / f"{prefix}_holdout_stability.csv", holdout_rows_all)
+    write_csv(out_dir / f"{prefix}_forced_parity.csv", forced_parity_rows)
+    write_csv(out_dir / f"{prefix}_state_surface.csv", state_surface_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+
+    report = [
+        "# MTS v18.02 Branch Identity Audit",
+        "",
+        "This audit keeps v18.01 frozen and tests whether each essential branch has its own defensible state identity.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Full high-RMSE gain: `{fmt(summary['fullHighGainPct'])}%`.",
+        f"- Full clean-set gain: `{fmt(summary['fullCleanGainPct'])}%`.",
+        f"- High-RMSE cases still above 20 km/s: `{summary['fullHighAbove20']}`.",
+        f"- Branches tested: `{summary['branchCount']}`.",
+        f"- Law-like branches: `{law_like_count}`.",
+        f"- Edge branches: `{edge_count}`.",
+        f"- Branches failing same-route forced null: `{fail_null_count}`.",
+        f"- Protected-stress branches: `{protected_stress_count}`.",
+        f"- Identity mismatches: `{identity_mismatch_count}`.",
+        f"- Max protected analogue regression: `{fmt(summary['maxProtectedAnalogueRegressionKmS'])}` km/s.",
+        f"- Max forced/law parity difference: `{fmt(summary['maxForcedParityDiffKmS'], 9)}` km/s.",
+        f"- Weak/systematics leakage: `{summary['weakSystematicsLeakage']}`.",
+        "",
+        "## Branch Ledger",
+        "",
+        "| Branch | Family | Verdict | High hits | Gain loss | Null margin | Protected analogue max |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in branch_ledger_rows:
+        report.append(
+            f"| {row['branch']} | {row['family']} | {row['verdict']} | {row['activeHighHitCount']} | "
+            f"{fmt(row['highGainLossPct'])} | {fmt(row['sameRouteForcedNullMarginPct'])} | {fmt(row['maxProtectedAnalogueRegressionKmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "A branch is law-like only if forcing that branch reproduces the frozen v18 score, protected nearest analogues remain safe, and same-route forced random targets do not explain the branch's high-RMSE gain.",
+            "This is not a new formula. It is a branch-by-branch identity test for the existing v18 law.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-v18-branch-identity-v1",
+        "candidateId": summary["candidateId"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_branch_ledger.csv",
+            f"{prefix}_branch_nulls.csv",
+            f"{prefix}_protected_analogues.csv",
+            f"{prefix}_holdout_stability.csv",
+            f"{prefix}_forced_parity.csv",
+            f"{prefix}_state_surface.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_browser_artifact.js",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatev18branchidentity(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_BRANCH_IDENTITY_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_branch_identity_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.02 branch identity audit")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['fullHighGainPct'])}%",
+                f"clean={fmt(summary['fullCleanGainPct'])}%",
+                f"above20={summary['fullHighAbove20']}",
+                f"branches={summary['branchCount']}",
+                f"law_like={summary['lawLikeBranchCount']}",
+                f"edge={summary['edgeBranchCount']}",
+                f"fails_null={summary['failNullBranchCount']}",
+                f"protected_stress={summary['protectedStressBranchCount']}",
+                f"weak_leakage={summary['weakSystematicsLeakage']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 branch identity audit to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_candidate_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     context = observed_state_candidate_context()
@@ -65597,6 +66109,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18lawnative",
             "observedstatev18branchprune",
             "observedstatev18familyaudit",
+            "observedstatev18branchidentity",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -65828,6 +66341,8 @@ def main() -> None:
         cmd_observedstatev18branchprune(args)
     elif args.mode == "observedstatev18familyaudit":
         cmd_observedstatev18familyaudit(args)
+    elif args.mode == "observedstatev18branchidentity":
+        cmd_observedstatev18branchidentity(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":

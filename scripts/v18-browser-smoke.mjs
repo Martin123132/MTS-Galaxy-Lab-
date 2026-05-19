@@ -71,6 +71,17 @@ if (artifact.metadata.familyAudit) {
     fail(`invalid v18 family count ${artifact.metadata.familyAudit.familyCount}`);
   }
 }
+if (artifact.metadata.branchIdentity) {
+  if (!String(artifact.metadata.branchIdentity.verdict || "").includes("v18 branch identity")) {
+    fail(`unexpected branch-identity verdict ${artifact.metadata.branchIdentity.verdict}`);
+  }
+  if (artifact.metadata.branchIdentity.weakSystematicsLeakage !== 0) {
+    fail(`branch-identity weak/systematics leakage ${artifact.metadata.branchIdentity.weakSystematicsLeakage}`);
+  }
+  if (!Number.isInteger(artifact.metadata.branchIdentity.branchCount) || artifact.metadata.branchIdentity.branchCount < 1) {
+    fail(`invalid v18 branch-identity count ${artifact.metadata.branchIdentity.branchCount}`);
+  }
+}
 
 const indexHtml = readText(indexPath);
 const appJs = readText(appPath);
@@ -89,6 +100,8 @@ if (!appJs.includes("v18ReviewBranchPrune")) fail("app.js does not populate v18 
 if (!indexHtml.includes("v18ReviewBranchPrune")) fail("index.html does not expose v18 branch-prune status");
 if (!appJs.includes("v18ReviewFamilyAudit")) fail("app.js does not populate v18 family-audit status");
 if (!indexHtml.includes("v18ReviewFamilyAudit")) fail("index.html does not expose v18 family-audit status");
+if (!appJs.includes("v18ReviewBranchIdentity")) fail("app.js does not populate v18 branch-identity status");
+if (!indexHtml.includes("v18ReviewBranchIdentity")) fail("index.html does not expose v18 branch-identity status");
 
 console.log(
   [
