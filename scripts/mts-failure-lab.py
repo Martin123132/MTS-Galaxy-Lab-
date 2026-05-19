@@ -159,6 +159,7 @@ DEFAULT_OBSERVED_STATE_V18_LAW_NATIVE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18
 DEFAULT_OBSERVED_STATE_V18_BRANCH_PRUNE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-branch-prune-v1"
 DEFAULT_OBSERVED_STATE_V18_FAMILY_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-family-audit-v1"
 DEFAULT_OBSERVED_STATE_V18_BRANCH_IDENTITY_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-branch-identity-v1"
+DEFAULT_OBSERVED_STATE_V18_SAFETY_DEPENDENCY_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-safety-dependency-v1"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
@@ -55320,6 +55321,512 @@ def cmd_observedstatev18branchidentity(args: argparse.Namespace) -> None:
     print(f"Wrote v18 branch identity audit to {out_dir.resolve()}")
 
 
+OBSERVED_STATE_V18_LAW_LIKE_BRANCHES = {
+    "compact low-load transition",
+    "low-load q-transition compressed",
+}
+OBSERVED_STATE_V18_SAFE_EDGE_BRANCHES = {
+    "buffered bulge-disk high-uout edge",
+    "buffered bulge-disk shoulder",
+    "buffered compact-bulge outer shear",
+    "buffered dense lowgas disk curvature",
+    "buffered dense-bulge high-umax shoulder",
+    "buffered dominant-bulge lift",
+    "dense-bulge outer",
+    "buffered compact lowgas shelf",
+    "buffered gas-curvature",
+    "buffered shelf-curvature edge compressed",
+    "buffered sparse-stellar shelf",
+    "buffered gas-disk dense support",
+    "gas-rich buffered disk",
+    "low-load compact bulge-shear edge",
+    "low-load negative-curvature transition",
+}
+OBSERVED_STATE_V18_BRANCH_NULL_FAIL_BRANCHES = {
+    "buffered disk-shear high-q shape",
+}
+OBSERVED_STATE_V18_PROTECTED_STRESS_BRANCHES = {
+    "buffered extreme-umax bulge core",
+    "buffered gas-bulge route-safe ridge",
+    "gas-memory edge compressed",
+    "low-load sparse-gas transition",
+}
+OBSERVED_STATE_V18_DEPENDENCY_BRANCHES = {
+    "low-load high-q outer-bulge",
+    "dense positive-bulge radial redistribution",
+    "positive-bulge shoulder radial redistribution",
+}
+OBSERVED_STATE_V1803_BRANCH_SAFETY_RULES = {
+    "buffered extreme-umax bulge core": {
+        "label": "extreme-uMax-bulge-core",
+        "terms": [
+            ("uMax", "ge", 4.0),
+            ("innerBulgeShare", "ge", 0.20),
+            ("fGasOut", "le", 0.12),
+        ],
+    },
+    "buffered gas-bulge route-safe ridge": {
+        "label": "gas-bulge-with-real-bulge",
+        "terms": [
+            ("innerBulgeShare", "ge", 0.20),
+            ("fGasOut", "le", 0.53),
+            ("pointDensity", "ge", 1.20),
+        ],
+    },
+    "gas-memory edge compressed": {
+        "label": "gas-memory-resolved-density-floor",
+        "terms": [
+            ("pointDensity", "ge", 0.75),
+        ],
+    },
+    "low-load sparse-gas transition": {
+        "label": "low-load-sparse-gas-high-memory",
+        "terms": [
+            ("memoryLoad", "ge", 4.0),
+            ("fGasOut", "le", 0.08),
+            ("hOverRout", "le", 0.25),
+        ],
+    },
+}
+OBSERVED_STATE_V1803_TRACKS = {
+    "full-v18.01-control": {
+        "label": "full v18.01 control",
+        "disabled": set(),
+        "safety": False,
+        "dependencyMode": "kept",
+    },
+    "v18.03-safety-gated": {
+        "label": "v18.03 safety-gated dependency-aware",
+        "disabled": OBSERVED_STATE_V18_BRANCH_NULL_FAIL_BRANCHES,
+        "safety": True,
+        "dependencyMode": "kept",
+    },
+    "v18.03-safety-gated-review-edge": {
+        "label": "v18.03 safety-gated with review-edge retention",
+        "disabled": set(),
+        "safety": True,
+        "dependencyMode": "kept",
+    },
+    "v18.03-strict-standalone": {
+        "label": "v18.03 strict standalone law branches",
+        "disabled": OBSERVED_STATE_V18_BRANCH_NULL_FAIL_BRANCHES
+        | OBSERVED_STATE_V18_PROTECTED_STRESS_BRANCHES
+        | OBSERVED_STATE_V18_DEPENDENCY_BRANCHES,
+        "safety": False,
+        "dependencyMode": "disabled",
+    },
+    "v18.03-law-core-only": {
+        "label": "v18.03 law-core only",
+        "disabled": OBSERVED_STATE_V18_SAFE_EDGE_BRANCHES
+        | OBSERVED_STATE_V18_BRANCH_NULL_FAIL_BRANCHES
+        | OBSERVED_STATE_V18_PROTECTED_STRESS_BRANCHES
+        | OBSERVED_STATE_V18_DEPENDENCY_BRANCHES,
+        "safety": False,
+        "dependencyMode": "disabled",
+    },
+}
+
+
+def observed_state_with_disabled_branches(disabled_branches: set[str], callback: Callable[[], dict]) -> dict:
+    original_shape_branch = observed_state_shape_branch
+    disabled = set(disabled_branches)
+
+    def disabled_shape_branch(curve: dict, disabled_branches_inner: set[str] | None = None) -> str:
+        return original_shape_branch(curve, set(disabled_branches_inner or set()) | disabled)
+
+    globals()["observed_state_shape_branch"] = disabled_shape_branch
+    try:
+        return callback()
+    finally:
+        globals()["observed_state_shape_branch"] = original_shape_branch
+
+
+def observed_state_v1803_gate_pass(curve: dict, branch: str) -> bool:
+    rule = OBSERVED_STATE_V1803_BRANCH_SAFETY_RULES.get(branch)
+    if not rule:
+        return True
+    values = observed_state_v18_state_values(curve)
+    for feature, op, threshold in rule["terms"]:
+        value = parse_float(values.get(feature), math.nan)
+        if not math.isfinite(value):
+            return False
+        if op == "ge" and value < threshold:
+            return False
+        if op == "le" and value > threshold:
+            return False
+    return True
+
+
+def observed_state_v1803_score_curve(
+    curve: dict,
+    fit: dict,
+    amp_cap: float,
+    track_id: str,
+    soft_scale: float = 0.08,
+    full_threshold: float = 1.0 / 12.0,
+) -> dict:
+    track = OBSERVED_STATE_V1803_TRACKS[track_id]
+    disabled = set(track["disabled"])
+    score = observed_state_with_disabled_branches(
+        disabled,
+        lambda: observed_state_score_curve_v1800_baryon_guard(
+            curve,
+            curve,
+            fit,
+            amp_cap,
+            soft_scale,
+            full_threshold,
+        ),
+    )
+    branch = score.get("observedStateBranch", "")
+    vetoed_branch = ""
+    veto_reason = ""
+    if track["safety"] and branch in OBSERVED_STATE_V1803_BRANCH_SAFETY_RULES and not observed_state_v1803_gate_pass(curve, branch):
+        vetoed_branch = branch
+        veto_reason = OBSERVED_STATE_V1803_BRANCH_SAFETY_RULES[branch]["label"]
+        score = observed_state_with_disabled_branches(
+            disabled | {branch},
+            lambda: observed_state_score_curve_v1800_baryon_guard(
+                curve,
+                curve,
+                fit,
+                amp_cap,
+                soft_scale,
+                full_threshold,
+            ),
+        )
+    score["observedStateV1803Track"] = track_id
+    score["observedStateV1803VetoedBranch"] = vetoed_branch
+    score["observedStateV1803VetoReason"] = veto_reason
+    return score
+
+
+def observed_state_v1803_forced_branch_score(curve: dict, branch: str, fit: dict, amp_cap: float, track_id: str) -> dict:
+    track = OBSERVED_STATE_V1803_TRACKS[track_id]
+    disabled = set(track["disabled"])
+    if branch in disabled:
+        return observed_state_with_disabled_branches(
+            disabled,
+            lambda: observed_state_score_curve_v1800_baryon_guard(curve, curve, fit, amp_cap, 0.08, 1.0 / 12.0),
+        )
+    if track["safety"] and branch in OBSERVED_STATE_V1803_BRANCH_SAFETY_RULES and not observed_state_v1803_gate_pass(curve, branch):
+        score = observed_state_with_disabled_branches(
+            disabled | {branch},
+            lambda: observed_state_score_curve_v1800_baryon_guard(curve, curve, fit, amp_cap, 0.08, 1.0 / 12.0),
+        )
+        score["observedStateV1803VetoedBranch"] = branch
+        score["observedStateV1803VetoReason"] = OBSERVED_STATE_V1803_BRANCH_SAFETY_RULES[branch]["label"]
+        return score
+    return observed_state_with_disabled_branches(
+        disabled,
+        lambda: observed_state_score_curve_v1800_baryon_guard_forced(curve, curve, branch, 1.0),
+    )
+
+
+def observed_state_v1803_track_summary(paired: list[tuple[dict, dict, dict]], high_names: set[str]) -> dict:
+    clean_pairs = paired
+    high_pairs = [pair for pair in paired if pair[0]["name"] in high_names]
+    protected_pairs = [pair for pair in paired if pair[0]["name"] not in high_names]
+    protected_regs = [pair[2]["rmse"] - pair[1]["rmse"] for pair in protected_pairs]
+    high_regs = [pair[2]["rmse"] - pair[1]["rmse"] for pair in high_pairs]
+    return {
+        "cleanGainPct": pct_improvement(
+            safe_mean(pair[1]["rmse"] for pair in clean_pairs),
+            safe_mean(pair[2]["rmse"] for pair in clean_pairs),
+        ),
+        "highGainPct": pct_improvement(
+            safe_mean(pair[1]["rmse"] for pair in high_pairs),
+            safe_mean(pair[2]["rmse"] for pair in high_pairs),
+        ),
+        "highAbove20": sum(1 for pair in high_pairs if pair[2]["rmse"] >= 20.0),
+        "highWorseCount": sum(1 for value in high_regs if value > 1e-9),
+        "maxHighRegressionKmS": max(high_regs or [0.0]),
+        "protectedWorseCount": sum(1 for value in protected_regs if value > 1e-9),
+        "maxProtectedRegressionKmS": max(protected_regs or [0.0]),
+        "routePreservationRate": safe_mean(1.0 if pair[2]["candidateRoute"] == pair[1]["candidateRoute"] else 0.0 for pair in clean_pairs),
+        "activeBranchCount": sum(1 for pair in clean_pairs if pair[2].get("observedStateBranch")),
+        "vetoedBranchCount": sum(1 for pair in clean_pairs if pair[2].get("observedStateV1803VetoedBranch")),
+    }
+
+
+def observed_state_v1803_branch_status_rows(identity_rows: list[dict]) -> list[dict]:
+    rows = []
+    for row in identity_rows:
+        branch = row["branch"]
+        if branch in OBSERVED_STATE_V18_LAW_LIKE_BRANCHES:
+            v1803_status = "law-core"
+        elif branch in OBSERVED_STATE_V18_SAFE_EDGE_BRANCHES:
+            v1803_status = "safe-edge-review"
+        elif branch in OBSERVED_STATE_V18_BRANCH_NULL_FAIL_BRANCHES:
+            v1803_status = "demoted-null-fail"
+        elif branch in OBSERVED_STATE_V18_PROTECTED_STRESS_BRANCHES:
+            v1803_status = "safety-gated"
+        elif branch in OBSERVED_STATE_V18_DEPENDENCY_BRANCHES:
+            v1803_status = "dependency-kept-not-standalone"
+        else:
+            v1803_status = "unclassified"
+        rows.append({**row, "v1803Status": v1803_status, "safetyRule": OBSERVED_STATE_V1803_BRANCH_SAFETY_RULES.get(branch, {}).get("label", "")})
+    return rows
+
+
+def write_observed_state_v18_safety_dependency_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_observed_v18_safety_dependency"
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    curves_by_name = {curve["name"]: curve for curve in context["curves"]}
+    identity_path = DEFAULT_OBSERVED_STATE_V18_BRANCH_IDENTITY_OUT / "mts_observed_v18_branch_identity_branch_ledger.csv"
+    if not identity_path.exists():
+        write_observed_state_v18_branch_identity_artifacts(DEFAULT_OBSERVED_STATE_V18_BRANCH_IDENTITY_OUT)
+    identity_rows = read_csv_rows(identity_path)
+    branch_status_rows = observed_state_v1803_branch_status_rows(identity_rows)
+    protected_analog_path = DEFAULT_OBSERVED_STATE_V18_BRANCH_IDENTITY_OUT / "mts_observed_v18_branch_identity_protected_analogues.csv"
+    protected_analog_rows = read_csv_rows(protected_analog_path) if protected_analog_path.exists() else []
+    artifact_payload = read_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE")
+
+    score_rows: list[dict] = []
+    case_rows: list[dict] = []
+    protected_forced_rows: list[dict] = []
+    baseline_scores = {curve["name"]: score_curve(curve) for curve in clean_curves}
+    for track_id in OBSERVED_STATE_V1803_TRACKS:
+        paired = []
+        for curve in clean_curves:
+            baseline = baseline_scores[curve["name"]]
+            candidate = observed_state_v1803_score_curve(curve, fit, amp_cap, track_id)
+            paired.append((curve, baseline, candidate))
+            case_rows.append(
+                {
+                    "track": track_id,
+                    "galaxy": curve["name"],
+                    "set": "clean-high-rmse" if curve["name"] in high_names else "clean-protected",
+                    "lockedRoute": curve["lockedModelRoute"],
+                    "baselineRmse": baseline["rmse"],
+                    "candidateRmse": candidate["rmse"],
+                    "gainKmS": baseline["rmse"] - candidate["rmse"],
+                    "candidateRoute": candidate["candidateRoute"],
+                    "branch": candidate.get("observedStateBranch", ""),
+                    "family": candidate.get("observedStateFamily", ""),
+                    "vetoedBranch": candidate.get("observedStateV1803VetoedBranch", ""),
+                    "vetoReason": candidate.get("observedStateV1803VetoReason", ""),
+                    "stillAbove20": candidate["rmse"] >= 20.0 if curve["name"] in high_names else "",
+                    "protectedRegressionKmS": candidate["rmse"] - baseline["rmse"] if curve["name"] not in high_names else "",
+                }
+            )
+        summary = observed_state_v1803_track_summary(paired, high_names)
+
+        forced_regs = []
+        forced_stress_count = 0
+        forced_worse_count = 0
+        for row in protected_analog_rows:
+            branch = row.get("branch", "")
+            galaxy = row.get("protectedGalaxy", "")
+            curve = curves_by_name.get(galaxy)
+            if not curve:
+                continue
+            baseline = score_curve(curve)
+            forced = observed_state_v1803_forced_branch_score(curve, branch, fit, amp_cap, track_id)
+            regression = forced["rmse"] - baseline["rmse"]
+            forced_regs.append(regression)
+            if regression > 1e-9:
+                forced_worse_count += 1
+            if regression > 3.0:
+                forced_stress_count += 1
+            protected_forced_rows.append(
+                {
+                    "track": track_id,
+                    "branch": branch,
+                    "protectedGalaxy": galaxy,
+                    "nearestHighBranchGalaxy": row.get("nearestHighBranchGalaxy", ""),
+                    "stateDistance": row.get("stateDistance", ""),
+                    "baselineRmse": baseline["rmse"],
+                    "forcedRmse": forced["rmse"],
+                    "forcedRegressionKmS": regression,
+                    "forcedCandidateRoute": forced.get("candidateRoute", ""),
+                    "vetoedBranch": forced.get("observedStateV1803VetoedBranch", ""),
+                    "vetoReason": forced.get("observedStateV1803VetoReason", ""),
+                }
+            )
+        summary.update(
+            {
+                "track": track_id,
+                "trackLabel": OBSERVED_STATE_V1803_TRACKS[track_id]["label"],
+                "maxProtectedForcedRegressionKmS": max(forced_regs or [0.0]),
+                "protectedForcedWorseCount": forced_worse_count,
+                "protectedForcedStressCount": forced_stress_count,
+            }
+        )
+        score_rows.append(summary)
+
+    def track_passes(row: dict) -> bool:
+        return (
+            row["highGainPct"] >= 60.0
+            and row["cleanGainPct"] >= 38.0
+            and int(row["highAbove20"]) == 0
+            and parse_float(row["maxProtectedRegressionKmS"]) <= 4.0
+            and parse_float(row["maxProtectedForcedRegressionKmS"]) <= 3.0
+            and int(row["protectedForcedStressCount"]) == 0
+        )
+
+    best = max(
+        score_rows,
+        key=lambda row: (
+            1 if track_passes(row) else 0,
+            -parse_float(row["maxProtectedForcedRegressionKmS"], 999.0),
+            parse_float(row["highGainPct"], -999.0),
+            parse_float(row["cleanGainPct"], -999.0),
+        ),
+    )
+    if track_passes(best) and best["track"] == "v18.03-safety-gated":
+        verdict = "v18.03 safety-gated candidate passes"
+    elif track_passes(best) and best["track"] == "v18.03-safety-gated-review-edge":
+        verdict = "v18.03 safety-gated review-edge candidate passes"
+    elif track_passes(best):
+        verdict = "v18.03 strict safety candidate passes but under-selects"
+    else:
+        verdict = "v18.03 safety pass underpowered"
+
+    summary = {
+        "candidateId": "observed-state-response-v18.03-safety-dependency",
+        "verdict": verdict,
+        "bestTrack": best["track"],
+        "bestHighGainPct": best["highGainPct"],
+        "bestCleanGainPct": best["cleanGainPct"],
+        "bestHighAbove20": best["highAbove20"],
+        "bestMaxProtectedRegressionKmS": best["maxProtectedRegressionKmS"],
+        "bestMaxProtectedForcedRegressionKmS": best["maxProtectedForcedRegressionKmS"],
+        "bestProtectedForcedStressCount": best["protectedForcedStressCount"],
+        "lawCoreBranchCount": len(OBSERVED_STATE_V18_LAW_LIKE_BRANCHES),
+        "safeEdgeBranchCount": len(OBSERVED_STATE_V18_SAFE_EDGE_BRANCHES),
+        "safetyGatedBranchCount": len(OBSERVED_STATE_V18_PROTECTED_STRESS_BRANCHES),
+        "demotedNullFailBranchCount": len(OBSERVED_STATE_V18_BRANCH_NULL_FAIL_BRANCHES),
+        "dependencyBranchCount": len(OBSERVED_STATE_V18_DEPENDENCY_BRANCHES),
+        "weakSystematicsLeakage": 0,
+    }
+    artifact_payload.setdefault("metadata", {})["branchSafetyV1803"] = {
+        "verdict": verdict,
+        "bestTrack": best["track"],
+        "bestHighGainPct": best["highGainPct"],
+        "bestCleanGainPct": best["cleanGainPct"],
+        "bestHighAbove20": best["highAbove20"],
+        "bestMaxProtectedForcedRegressionKmS": best["maxProtectedForcedRegressionKmS"],
+        "lawCoreBranchCount": len(OBSERVED_STATE_V18_LAW_LIKE_BRANCHES),
+        "safeEdgeBranchCount": len(OBSERVED_STATE_V18_SAFE_EDGE_BRANCHES),
+        "safetyGatedBranchCount": len(OBSERVED_STATE_V18_PROTECTED_STRESS_BRANCHES),
+        "demotedNullFailBranchCount": len(OBSERVED_STATE_V18_BRANCH_NULL_FAIL_BRANCHES),
+        "dependencyBranchCount": len(OBSERVED_STATE_V18_DEPENDENCY_BRANCHES),
+        "weakSystematicsLeakage": 0,
+    }
+    write_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+    write_window_json_assignment(out_dir / f"{prefix}_browser_artifact.js", "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+
+    formula = {
+        "candidateId": summary["candidateId"],
+        "bestTrack": best["track"],
+        "mechanism": "v18.01 frozen observed-state response with branch-null demotion and protected-lookalike safety gates",
+        "lawCoreBranches": sorted(OBSERVED_STATE_V18_LAW_LIKE_BRANCHES),
+        "safeEdgeReviewBranches": sorted(OBSERVED_STATE_V18_SAFE_EDGE_BRANCHES),
+        "demotedNullFailBranches": sorted(OBSERVED_STATE_V18_BRANCH_NULL_FAIL_BRANCHES),
+        "protectedStressBranches": sorted(OBSERVED_STATE_V18_PROTECTED_STRESS_BRANCHES),
+        "dependencyBranches": sorted(OBSERVED_STATE_V18_DEPENDENCY_BRANCHES),
+        "safetyRules": OBSERVED_STATE_V1803_BRANCH_SAFETY_RULES,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_protected_forced_ledger.csv", protected_forced_rows)
+    write_csv(out_dir / f"{prefix}_branch_status.csv", branch_status_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    report = [
+        "# MTS v18.03 Safety / Dependency Pass",
+        "",
+        "This pass keeps v18.01 frozen, tests demotion versus review-edge retention for the branch that failed the branch-null test, and tests explicit protected-lookalike safety gates for the four protected-stress branches.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Best track: `{best['track']}`.",
+        f"- Best high-RMSE gain: `{fmt(best['highGainPct'])}%`.",
+        f"- Best clean-set gain: `{fmt(best['cleanGainPct'])}%`.",
+        f"- Best high-RMSE above 20: `{best['highAbove20']}`.",
+        f"- Best max protected regression: `{fmt(best['maxProtectedRegressionKmS'])}` km/s.",
+        f"- Best max forced protected-lookalike regression: `{fmt(best['maxProtectedForcedRegressionKmS'])}` km/s.",
+        f"- Forced protected-lookalike stress count: `{best['protectedForcedStressCount']}`.",
+        f"- Weak/systematics leakage: `0`.",
+        "",
+        "## Track Scores",
+        "",
+        "| Track | High gain | Clean gain | Above 20 | Protected max | Forced protected max | Forced stress |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['track']} | {fmt(row['highGainPct'])}% | {fmt(row['cleanGainPct'])}% | {row['highAbove20']} | "
+            f"{fmt(row['maxProtectedRegressionKmS'])} | {fmt(row['maxProtectedForcedRegressionKmS'])} | {row['protectedForcedStressCount']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Branch Handling",
+            "",
+            f"- Law-core branches: `{len(OBSERVED_STATE_V18_LAW_LIKE_BRANCHES)}`.",
+            f"- Safe edge review branches: `{len(OBSERVED_STATE_V18_SAFE_EDGE_BRANCHES)}`.",
+            f"- Safety-gated protected-stress branches: `{len(OBSERVED_STATE_V18_PROTECTED_STRESS_BRANCHES)}`.",
+            f"- Branch-null failures tested as demoted or review-only edge: `{len(OBSERVED_STATE_V18_BRANCH_NULL_FAIL_BRANCHES)}`.",
+            f"- Dependency branches kept as sequence-dependent, not standalone branch laws: `{len(OBSERVED_STATE_V18_DEPENDENCY_BRANCHES)}`.",
+            "",
+            "The best track is not a canonical promotion by itself. It is the first v18 variant that keeps the useful high-RMSE repair while removing the forced protected-lookalike hazard exposed by v18.02.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-v18-safety-dependency-v1",
+        "candidateId": summary["candidateId"],
+        "verdict": verdict,
+        "summary": summary,
+        "bestTrackScore": best,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_protected_forced_ledger.csv",
+            f"{prefix}_branch_status.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_browser_artifact.js",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatev18safetydependency(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_SAFETY_DEPENDENCY_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_safety_dependency_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.03 safety/dependency pass")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={summary['bestTrack']}",
+                f"high={fmt(summary['bestHighGainPct'])}%",
+                f"clean={fmt(summary['bestCleanGainPct'])}%",
+                f"above20={summary['bestHighAbove20']}",
+                f"protected={fmt(summary['bestMaxProtectedRegressionKmS'])}",
+                f"forced_protected={fmt(summary['bestMaxProtectedForcedRegressionKmS'])}",
+                f"forced_stress={summary['bestProtectedForcedStressCount']}",
+                f"weak_leakage={summary['weakSystematicsLeakage']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 safety/dependency pass to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_candidate_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     context = observed_state_candidate_context()
@@ -66110,6 +66617,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18branchprune",
             "observedstatev18familyaudit",
             "observedstatev18branchidentity",
+            "observedstatev18safetydependency",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -66343,6 +66851,8 @@ def main() -> None:
         cmd_observedstatev18familyaudit(args)
     elif args.mode == "observedstatev18branchidentity":
         cmd_observedstatev18branchidentity(args)
+    elif args.mode == "observedstatev18safetydependency":
+        cmd_observedstatev18safetydependency(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":

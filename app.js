@@ -3958,6 +3958,7 @@
     var branchPrune = artifact && artifact.metadata && artifact.metadata.branchPrune;
     var familyAudit = artifact && artifact.metadata && artifact.metadata.familyAudit;
     var branchIdentity = artifact && artifact.metadata && artifact.metadata.branchIdentity;
+    var branchSafety = artifact && artifact.metadata && artifact.metadata.branchSafetyV1803;
     var artifactCount = artifact && artifact.metadata ? artifact.metadata.curveCount : 0;
     $("v18ReviewStatus").textContent = active ? "active" : "ready";
     $("v18ReviewHighGain").textContent = fmt(gate.nominalHighGainPct, 2) + "%";
@@ -3977,9 +3978,11 @@
     if ($("v18ReviewStableFamilies")) $("v18ReviewStableFamilies").textContent = familyAudit ? String(familyAudit.stableFamilyCount) + " / " + String(familyAudit.familyCount) : "--";
     if ($("v18ReviewBranchIdentity")) $("v18ReviewBranchIdentity").textContent = branchIdentity ? String(branchIdentity.verdict) : "--";
     if ($("v18ReviewLawLikeBranches")) $("v18ReviewLawLikeBranches").textContent = branchIdentity ? String(branchIdentity.lawLikeBranchCount) + " / " + String(branchIdentity.branchCount) : "--";
+    if ($("v18ReviewSafetyPass")) $("v18ReviewSafetyPass").textContent = branchSafety ? String(branchSafety.verdict) : "--";
+    if ($("v18ReviewSafetyBest")) $("v18ReviewSafetyBest").textContent = branchSafety ? String(branchSafety.bestTrack) : "--";
     if ($("v18ReviewNote")) {
       $("v18ReviewNote").textContent = active
-        ? "Active preset uses the generated v18.01 artifact with " + artifactCount + " cached curves. Law-native status: " + (lawNative ? lawNative.verdict + " with " + lawNative.cleanParityMismatchCount + " clean mismatches" : "not run") + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "not run") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "not run") + ". Branch identity: " + (branchIdentity ? branchIdentity.verdict + " (" + branchIdentity.lawLikeBranchCount + " / " + branchIdentity.branchCount + " law-like)" : "not run") + ". The v18 review gate adds the baryon-confidence stress guard: no stress cases remain above 20 km/s, active protected worsens stay at 0, and the hardening margin over the best null is " + fmt(gate.nullMarginKmS, 2) + " km/s."
+        ? "Active preset uses the generated v18.01 artifact with " + artifactCount + " cached curves. Law-native status: " + (lawNative ? lawNative.verdict + " with " + lawNative.cleanParityMismatchCount + " clean mismatches" : "not run") + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "not run") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "not run") + ". Branch identity: " + (branchIdentity ? branchIdentity.verdict + " (" + branchIdentity.lawLikeBranchCount + " / " + branchIdentity.branchCount + " law-like)" : "not run") + ". Safety pass: " + (branchSafety ? branchSafety.verdict + " via " + branchSafety.bestTrack : "not run") + ". The v18 review gate adds the baryon-confidence stress guard: no stress cases remain above 20 km/s, active protected worsens stay at 0, and the hardening margin over the best null is " + fmt(gate.nullMarginKmS, 2) + " km/s."
         : "Select MTS v18.01 review candidate in the Test Rig to inspect the generated artifact. Nominal curves remain the v17.97 exact cache; the v18 addition is the stress/quality guard validated by the promotion gate.";
     }
   }
