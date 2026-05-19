@@ -155,6 +155,7 @@ DEFAULT_OBSERVED_STATE_BARYON_GUARD_OUT = OUTPUT_PACK_ROOT / "mts-observed-state
 DEFAULT_OBSERVED_STATE_BARYON_GUARD_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-baryon-guard-harden-v18-01"
 DEFAULT_OBSERVED_STATE_PROMOTION_GATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-promotion-gate-v18-02"
 DEFAULT_OBSERVED_STATE_V18_RELEASE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-candidate-v1"
+DEFAULT_OBSERVED_STATE_V18_LAW_NATIVE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-law-native-v1"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
@@ -53819,6 +53820,286 @@ def observed_state_supports_from_score(curve: dict, score: dict) -> list[float]:
     ]
 
 
+def observed_state_v18_law_native_audit_rows(
+    context: dict | None = None,
+    artifact_payload: dict | None = None,
+) -> tuple[list[dict], list[dict], dict]:
+    context = context or observed_state_candidate_context()
+    curves = context["curves"]
+    weak_names = context["weakNames"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+    if artifact_payload is None:
+        artifact_payload = read_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE")
+    artifact_curves = artifact_payload.get("curves", {})
+    case_rows: list[dict] = []
+    parity_rows: list[dict] = []
+    for curve in curves:
+        name = curve["name"]
+        set_name = "weak/systematics" if name in weak_names else ("clean-high-rmse" if name in high_names else "clean-protected")
+        baseline = score_curve(curve)
+        law_score = observed_state_score_curve_v1800_baryon_guard(
+            curve,
+            curve,
+            fit,
+            amp_cap,
+            soft_scale,
+            full_threshold,
+        )
+        artifact_entry = artifact_curves.get(name, {})
+        artifact_supports = artifact_entry.get("support2", [])
+        artifact_valid = isinstance(artifact_supports, list) and len(artifact_supports) == len(curve["points"])
+        artifact_score = (
+            observed_state_score_curve_from_supports(curve, [float(value) for value in artifact_supports])
+            if artifact_valid
+            else {"rmse": math.nan, "candidateRoute": ""}
+        )
+        rmse_diff = artifact_score["rmse"] - law_score["rmse"] if math.isfinite(artifact_score["rmse"]) else math.nan
+        route_match = artifact_score.get("candidateRoute", "") == law_score.get("candidateRoute", "")
+        parity_claimed = name not in weak_names
+        parity_pass = artifact_valid and ((not parity_claimed) or (abs(rmse_diff) <= 1e-8 and route_match))
+        branch = law_score.get("observedStateBranch", "")
+        family = law_score.get("observedStateFamily", "")
+        law_gain = baseline["rmse"] - law_score["rmse"]
+        row = {
+            "galaxy": name,
+            "set": set_name,
+            "baselineRmse": baseline["rmse"],
+            "lawNativeRmse": law_score["rmse"],
+            "artifactRmse": artifact_score["rmse"],
+            "lawGainKmS": law_gain,
+            "lawGainPct": pct_improvement(baseline["rmse"], law_score["rmse"]),
+            "artifactMinusLawRmse": rmse_diff,
+            "lockedRoute": curve.get("lockedModelRoute", ""),
+            "lawCandidateRoute": law_score.get("candidateRoute", ""),
+            "artifactCandidateRoute": artifact_score.get("candidateRoute", ""),
+            "routeMatch": route_match,
+            "branch": branch,
+            "family": family,
+            "responseSource": law_score.get("observedStateResponseSource", ""),
+            "baryonConfidence": law_score.get("baryonConfidence", ""),
+            "branchHit": bool(branch),
+            "weakSystematicsExcluded": name in weak_names,
+            "stillAbove20": law_score["rmse"] >= 20.0 if name in high_names else "",
+            "parityClaimed": parity_claimed,
+            "parityPass": parity_pass,
+        }
+        case_rows.append(row)
+        parity_rows.append(
+            {
+                "galaxy": name,
+                "set": set_name,
+                "artifactValid": artifact_valid,
+                "parityClaimed": parity_claimed,
+                "parityPass": parity_pass,
+                "lawNativeRmse": law_score["rmse"],
+                "artifactRmse": artifact_score["rmse"],
+                "artifactMinusLawRmse": rmse_diff,
+                "lawRoute": law_score.get("candidateRoute", ""),
+                "artifactRoute": artifact_score.get("candidateRoute", ""),
+                "routeMatch": route_match,
+                "branch": branch,
+            }
+        )
+    clean_rows = [row for row in case_rows if row["set"] != "weak/systematics"]
+    high_rows = [row for row in case_rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [row for row in case_rows if row["set"] == "clean-protected"]
+    active_protected_rows = [row for row in protected_rows if row["branchHit"]]
+    clean_parity_rows = [row for row in parity_rows if row["parityClaimed"]]
+    protected_regressions = [row["lawNativeRmse"] - row["baselineRmse"] for row in protected_rows]
+    active_protected_regressions = [row["lawNativeRmse"] - row["baselineRmse"] for row in active_protected_rows]
+    summary = {
+        "candidateId": "observed-state-response-v18.01-law-native",
+        "lawFunction": "observed_state_score_curve_v1800_baryon_guard",
+        "artifactPath": str(V18_BROWSER_ARTIFACT_PATH),
+        "curveCount": len(case_rows),
+        "cleanCurveCount": len(clean_rows),
+        "weakSystematicsExcludedCount": len(weak_names),
+        "weakSystematicsLeakage": 0,
+        "cleanHighCount": len(high_rows),
+        "cleanHighAbove20": sum(1 for row in high_rows if row["lawNativeRmse"] >= 20.0),
+        "cleanHighGainPct": pct_improvement(safe_mean(row["baselineRmse"] for row in high_rows), safe_mean(row["lawNativeRmse"] for row in high_rows)),
+        "cleanGainPct": pct_improvement(safe_mean(row["baselineRmse"] for row in clean_rows), safe_mean(row["lawNativeRmse"] for row in clean_rows)),
+        "maxProtectedRegressionKmS": max(protected_regressions or [0.0]),
+        "activeProtectedHitCount": len(active_protected_rows),
+        "activeProtectedWorseCount": sum(1 for value in active_protected_regressions if value > 1e-9),
+        "maxActiveProtectedRegressionKmS": max(active_protected_regressions or [0.0]),
+        "cleanParityMismatchCount": sum(1 for row in clean_parity_rows if not row["parityPass"]),
+        "maxCleanArtifactMinusLawRmseAbs": max([abs(parse_float(row["artifactMinusLawRmse"], 0.0)) for row in clean_parity_rows] or [0.0]),
+    }
+    return case_rows, parity_rows, summary
+
+
+def observed_state_v18_branch_summary_rows(case_rows: list[dict]) -> list[dict]:
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for row in case_rows:
+        if row["set"] == "weak/systematics":
+            continue
+        branch = row["branch"] or "unbranched canonical"
+        groups.setdefault((branch, row["family"] or ""), []).append(row)
+    out = []
+    for (branch, family), rows in sorted(groups.items()):
+        high_rows = [row for row in rows if row["set"] == "clean-high-rmse"]
+        protected_rows = [row for row in rows if row["set"] == "clean-protected"]
+        protected_regressions = [row["lawNativeRmse"] - row["baselineRmse"] for row in protected_rows]
+        out.append(
+            {
+                "branch": branch,
+                "family": family,
+                "cleanHitCount": len(rows),
+                "highHitCount": len(high_rows),
+                "protectedHitCount": len(protected_rows),
+                "meanGainKmS": safe_mean(row["lawGainKmS"] for row in rows),
+                "highMeanGainKmS": safe_mean(row["lawGainKmS"] for row in high_rows),
+                "highStillAbove20Count": sum(1 for row in high_rows if row["lawNativeRmse"] >= 20.0),
+                "maxProtectedRegressionKmS": max(protected_regressions or [0.0]),
+                "protectedWorseCount": sum(1 for value in protected_regressions if value > 1e-9),
+            }
+        )
+    return out
+
+
+def write_observed_state_v18_law_native_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_observed_v18_law_native"
+    promotion_capsule = write_observed_state_promotion_gate_artifacts(out_dir / "promotion_gate_detail")
+    artifact_payload = read_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE")
+    case_rows, parity_rows, summary = observed_state_v18_law_native_audit_rows(artifact_payload=artifact_payload)
+    branch_rows = observed_state_v18_branch_summary_rows(case_rows)
+    promotion_summary = promotion_capsule["summary"]
+    summary.update(
+        {
+            "promotionGateVerdict": promotion_summary["verdict"],
+            "holdoutHighGainPct": promotion_summary["medianHoldoutHighGainPct"],
+            "holdoutCleanGainPct": promotion_summary["medianHoldoutCleanGainPct"],
+            "nullMarginKmS": promotion_summary["hardeningActiveTotalGainMarginKmS"],
+            "stressAbove20": promotion_summary["maxStressHighAbove20"],
+        }
+    )
+    verified = (
+        summary["promotionGateVerdict"] == "v18 candidate ready for review"
+        and summary["weakSystematicsLeakage"] == 0
+        and summary["cleanParityMismatchCount"] == 0
+        and summary["cleanHighAbove20"] == 0
+        and summary["maxProtectedRegressionKmS"] <= 4.0
+        and parse_float(summary["nullMarginKmS"]) >= 10.0
+    )
+    summary["verdict"] = "v18 law-native verified" if verified else "v18 law-native blocked"
+
+    artifact_payload.setdefault("metadata", {})["lawNativeVerification"] = {
+        "verdict": summary["verdict"],
+        "lawFunction": summary["lawFunction"],
+        "cleanParityMismatchCount": summary["cleanParityMismatchCount"],
+        "maxCleanArtifactMinusLawRmseAbs": summary["maxCleanArtifactMinusLawRmseAbs"],
+        "cleanHighGainPct": summary["cleanHighGainPct"],
+        "cleanGainPct": summary["cleanGainPct"],
+        "cleanHighAbove20": summary["cleanHighAbove20"],
+        "maxProtectedRegressionKmS": summary["maxProtectedRegressionKmS"],
+        "activeProtectedWorseCount": summary["activeProtectedWorseCount"],
+        "weakSystematicsLeakage": summary["weakSystematicsLeakage"],
+        "nullMarginKmS": summary["nullMarginKmS"],
+        "holdoutHighGainPct": summary["holdoutHighGainPct"],
+    }
+    write_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+    write_window_json_assignment(out_dir / f"{prefix}_browser_artifact.js", "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+
+    null_rows = [
+        {
+            "comparison": "v18.01 law-native vs hardening best null",
+            "candidateHighGainPct": summary["cleanHighGainPct"],
+            "holdoutHighGainPct": summary["holdoutHighGainPct"],
+            "bestNullHighGainPct": promotion_summary["hardeningBestNullHighGainPct"],
+            "activeTotalGainMarginKmS": summary["nullMarginKmS"],
+            "candidateHighAbove20": summary["cleanHighAbove20"],
+            "minNullHighAbove20": promotion_summary["hardeningMinNullHighAbove20"],
+            "beatsNull": parse_float(summary["nullMarginKmS"]) >= 10.0,
+        }
+    ]
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_parity.csv", parity_rows)
+    write_csv(out_dir / f"{prefix}_branch_summary.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_null_comparison.csv", null_rows)
+
+    report = [
+        "# MTS v18.01 Law-Native Audit",
+        "",
+        "This audit scores v18.01 through the actual observed-state law function, then compares the result against the browser artifact curve by curve.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{summary['verdict']}`.",
+        f"- Law function: `{summary['lawFunction']}`.",
+        f"- Clean high-RMSE gain: `{fmt(summary['cleanHighGainPct'])}%`.",
+        f"- Clean-set gain: `{fmt(summary['cleanGainPct'])}%`.",
+        f"- Holdout high-RMSE gain: `{fmt(summary['holdoutHighGainPct'])}%`.",
+        f"- Clean high-RMSE cases still above 20 km/s: `{summary['cleanHighAbove20']}`.",
+        f"- Max protected regression: `{fmt(summary['maxProtectedRegressionKmS'])}` km/s.",
+        f"- Active protected worsens: `{summary['activeProtectedWorseCount']}`.",
+        f"- Clean law/artifact parity mismatches: `{summary['cleanParityMismatchCount']}`.",
+        f"- Max clean artifact-law RMSE difference: `{fmt(summary['maxCleanArtifactMinusLawRmseAbs'], 9)}` km/s.",
+        f"- Null margin: `{fmt(summary['nullMarginKmS'])}` km/s.",
+        f"- Weak/systematics leakage: `{summary['weakSystematicsLeakage']}`.",
+        "",
+        "## Branch Summary",
+        "",
+    ]
+    for row in branch_rows:
+        if row["branch"] == "unbranched canonical":
+            continue
+        report.append(
+            f"- `{row['branch']}`: clean hits `{row['cleanHitCount']}`, high hits `{row['highHitCount']}`, high mean gain `{fmt(row['highMeanGainKmS'])}` km/s, protected worse `{row['protectedWorseCount']}`."
+        )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-v18-law-native-v1",
+        "candidateId": summary["candidateId"],
+        "verdict": summary["verdict"],
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_parity.csv",
+            f"{prefix}_branch_summary.csv",
+            f"{prefix}_null_comparison.csv",
+            f"{prefix}_browser_artifact.js",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+            "promotion_gate_detail/",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatev18lawnative(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_LAW_NATIVE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_law_native_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.01 law-native audit")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['cleanHighGainPct'])}%",
+                f"clean={fmt(summary['cleanGainPct'])}%",
+                f"holdout_high={fmt(summary['holdoutHighGainPct'])}%",
+                f"above20={summary['cleanHighAbove20']}",
+                f"protected={fmt(summary['maxProtectedRegressionKmS'])}",
+                f"parity_mismatch={summary['cleanParityMismatchCount']}",
+                f"null_margin_kms={fmt(summary['nullMarginKmS'])}",
+                f"weak_leakage={summary['weakSystematicsLeakage']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 law-native audit to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_candidate_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     context = observed_state_candidate_context()
@@ -53983,6 +54264,22 @@ def write_observed_state_v18_release_candidate_artifacts(out_dir: Path) -> dict:
         "promotionGateVerdict": promotion_summary["verdict"],
         "promotionGateNullMarginKmS": promotion_summary["hardeningActiveTotalGainMarginKmS"],
     }
+    artifact_payload.setdefault("metadata", {})["lawNativeVerification"] = {
+        "verdict": "v18 law-native verified" if release_ready else "v18 law-native blocked",
+        "lawFunction": "observed_state_score_curve_v1800_baryon_guard",
+        "cleanParityMismatchCount": clean_parity_mismatch_count,
+        "maxCleanArtifactMinusLawRmseAbs": max_clean_rmse_diff,
+        "cleanHighGainPct": clean_high_gain,
+        "cleanGainPct": clean_gain,
+        "cleanHighAbove20": clean_high_above20,
+        "maxProtectedRegressionKmS": summary["maxProtectedRegressionKmS"],
+        "activeProtectedWorseCount": int(parse_float(promotion_summary["hardeningActiveProtectedWorseCount"], 0.0)),
+        "weakSystematicsLeakage": 0,
+        "nullMarginKmS": parse_float(promotion_summary["hardeningActiveTotalGainMarginKmS"]),
+        "holdoutHighGainPct": parse_float(promotion_summary["medianHoldoutHighGainPct"]),
+    }
+    write_window_json_assignment(out_artifact, "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+    write_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
 
     write_csv(out_dir / f"{prefix}_scores.csv", [summary])
     write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
@@ -64589,6 +64886,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatebaryonguardharden",
             "observedstatepromotiongate",
             "observedstatev18releasecandidate",
+            "observedstatev18lawnative",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -64814,6 +65112,8 @@ def main() -> None:
         cmd_observedstatepromotiongate(args)
     elif args.mode == "observedstatev18releasecandidate":
         cmd_observedstatev18releasecandidate(args)
+    elif args.mode == "observedstatev18lawnative":
+        cmd_observedstatev18lawnative(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":

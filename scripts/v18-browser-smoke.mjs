@@ -44,6 +44,14 @@ if (artifact.metadata.reviewGate.activeProtectedWorseCount !== 0) fail("activePr
 if (!Number.isFinite(artifact.metadata.reviewGate.nullMarginKmS) || artifact.metadata.reviewGate.nullMarginKmS < 10) {
   fail(`null margin too small: ${artifact.metadata.reviewGate.nullMarginKmS}`);
 }
+if (artifact.metadata.lawNativeVerification) {
+  if (artifact.metadata.lawNativeVerification.verdict !== "v18 law-native verified") {
+    fail(`unexpected law-native verdict ${artifact.metadata.lawNativeVerification.verdict}`);
+  }
+  if (artifact.metadata.lawNativeVerification.cleanParityMismatchCount !== 0) {
+    fail(`law-native parity mismatches ${artifact.metadata.lawNativeVerification.cleanParityMismatchCount}`);
+  }
+}
 
 const indexHtml = readText(indexPath);
 const appJs = readText(appPath);
@@ -56,6 +64,8 @@ if (!appJs.includes("v17ExactCacheEntry(curve, compiled)")) fail("app.js is not 
 if (!appJs.includes("generated v18.01 artifact")) fail("app.js v18 panel does not describe the generated artifact");
 if (!appJs.includes("v18ReviewArtifactCount")) fail("app.js does not populate v18 artifact count");
 if (!indexHtml.includes("v18ReviewArtifactCount")) fail("index.html does not expose v18 artifact count");
+if (!appJs.includes("v18ReviewLawNative")) fail("app.js does not populate v18 law-native status");
+if (!indexHtml.includes("v18ReviewLawNative")) fail("index.html does not expose v18 law-native status");
 
 console.log(
   [
