@@ -236,6 +236,7 @@
             <select id="frameworkPreset">
               <option value="mts">MTS baseline</option>
               <option value="v17state">MTS v17.97 radial-repair state response</option>
+              <option value="v18review">MTS v18.01 review candidate</option>
               <option value="baryon">Baryon only</option>
               <option value="soft">Soft radial support</option>
               <option value="outer">Outer gate support</option>
@@ -261,6 +262,7 @@
             <select id="comparisonPreset">
               <option value="mts">MTS baseline</option>
               <option value="v17state">MTS v17.97 radial-repair state response</option>
+              <option value="v18review">MTS v18.01 review candidate</option>
               <option value="baryon" selected>Baryon only</option>
               <option value="soft">Soft radial support</option>
               <option value="outer">Outer gate support</option>
@@ -617,6 +619,22 @@
               <div><span id="v18MetricDLabel">S-law dU</span><strong id="v18MetricD">--</strong></div>
             </div>
             <div class="v18-note" id="v18Note">v18 diagnostics are computed from the active curve.</div>
+          </section>
+
+          <section class="diagnostic-block">
+            <div class="block-head">
+              <h3>v18 Review Gate</h3>
+              <span id="v18ReviewStatus">ready</span>
+            </div>
+            <div class="v18-metrics">
+              <div><span>High Gain</span><strong id="v18ReviewHighGain">--</strong></div>
+              <div><span>Holdout Gain</span><strong id="v18ReviewHoldout">--</strong></div>
+              <div><span>Stress Above 20</span><strong id="v18ReviewStress">--</strong></div>
+              <div><span>Null Margin</span><strong id="v18ReviewNullMargin">--</strong></div>
+              <div><span>Protected Worse</span><strong id="v18ReviewProtected">--</strong></div>
+              <div><span>Diff vs v17.97</span><strong id="v18ReviewDiff">--</strong></div>
+            </div>
+            <div class="v18-note" id="v18ReviewNote">Select the v18.01 review preset to inspect the stress/quality-gated candidate.</div>
           </section>
 
           <section class="diagnostic-block">

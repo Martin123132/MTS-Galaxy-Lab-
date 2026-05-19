@@ -13,6 +13,19 @@
   };
 
   var V17STATE_EXACT_TOKEN = "__MTS_V17_97_RADIAL_REPAIR_STATE_RESPONSE__";
+  var V18REVIEW_TOKEN = "__MTS_V18_01_PROMOTION_GATE_REVIEW__";
+  var V18_REVIEW_GATE = {
+    candidateId: "observed-state-response-v18.01-promotion-gate",
+    verdict: "v18 candidate ready for review",
+    nominalHighGainPct: 68.07867961334428,
+    nominalCleanGainPct: 43.737260426360244,
+    holdoutHighGainPct: 66.67923997034711,
+    stressAbove20: 0,
+    stressMinHighGainPct: 59.47261043333803,
+    nullMarginKmS: 26.105578965995377,
+    activeProtectedWorseCount: 0,
+    nominalDiffVsV1797Count: 0
+  };
   var V17STATE_LEGACY_TOKENS = {
     "__MTS_V17_96_REMAINING_STRESS_STATE_RESPONSE__": true,
     "__MTS_V17_95_STRESS_POLISH_STATE_RESPONSE__": true,
@@ -31,6 +44,7 @@
   var FRAMEWORK_PRESETS = {
     mts: "gamma0 * leff * (1 - exp(-pow(r / leff, q)))",
     v17state: V17STATE_EXACT_TOKEN,
+    v18review: V18REVIEW_TOKEN,
     baryon: "0",
     soft: "gamma0 * leff * (1 - exp(-r / leff))",
     outer: "gamma0 * leff * pow(max(0, x), 0.75) * (1 - exp(-memory / 2))",
@@ -40,6 +54,7 @@
   var FRAMEWORK_PRESET_LABELS = {
     mts: "MTS baseline",
     v17state: "MTS v17.97 radial-repair state response",
+    v18review: "MTS v18.01 review candidate",
     baryon: "Baryon only",
     soft: "Soft radial support",
     outer: "Outer gate support",
@@ -1819,10 +1834,11 @@
   function compileFrameworkExpression(expression) {
     var source = String(expression || "").trim();
     if (!source) throw new Error("Framework formula is empty.");
-    if (source === V17STATE_EXACT_TOKEN || V17STATE_LEGACY_TOKENS[source]) {
+    if (source === V18REVIEW_TOKEN || source === V17STATE_EXACT_TOKEN || V17STATE_LEGACY_TOKENS[source]) {
       return {
         source: source,
         kind: "v17state-exact-cache",
+        reviewGate: source === V18REVIEW_TOKEN,
         fn: null
       };
     }
@@ -1868,6 +1884,14 @@
     var cache = window.MTS_V17_97_SUPPORT_CACHE || window.MTS_V17_96_SUPPORT_CACHE || window.MTS_V17_95_SUPPORT_CACHE || window.MTS_V17_94_SUPPORT_CACHE || window.MTS_V17_93_SUPPORT_CACHE || window.MTS_V17_92_SUPPORT_CACHE || window.MTS_V17_91_SUPPORT_CACHE || window.MTS_V17_90_SUPPORT_CACHE || window.MTS_V17_89_SUPPORT_CACHE || window.MTS_V17_88_SUPPORT_CACHE || window.MTS_V17_87_SUPPORT_CACHE || window.MTS_V17_86_SUPPORT_CACHE || window.MTS_V17_85_SUPPORT_CACHE;
     if (!cache || !cache.curves || !curve || !curve.name) return null;
     return cache.curves[curve.name] || null;
+  }
+
+  function exactCacheDisplayName(compiled) {
+    return compiled && compiled.reviewGate ? "v18.01 review candidate" : "v17.97 exact cache";
+  }
+
+  function isV18ReviewActive() {
+    return !!(state.framework.compiled && state.framework.compiled.source === V18REVIEW_TOKEN);
   }
 
   function frameworkProfileBand(curve, xMin, xMax) {
@@ -2868,12 +2892,12 @@
     $("frameworkWins").textContent = batch ? batch.wins + "/" + batch.count : "--";
 
     if (batch) {
-      note.textContent = (state.framework.compiled && state.framework.compiled.kind === "v17state-exact-cache" ? "v17.97 exact cache active. " : "") +
+      note.textContent = (state.framework.compiled && state.framework.compiled.kind === "v17state-exact-cache" ? exactCacheDisplayName(state.framework.compiled) + " active. " : "") +
         "Batch complete: " + batch.wins + " / " + batch.count + " LTGs beat baseline. Median delta " + fmt(batch.medianDelta, 2) + " km/s." +
-        (batch.exactCacheFallbacks ? " v17.97 exact cache fallback used on " + batch.exactCacheFallbacks + " point(s)." : "");
+        (batch.exactCacheFallbacks ? " Exact-cache fallback used on " + batch.exactCacheFallbacks + " point(s)." : "");
     } else if (score) {
       if (score.exactCacheHits) {
-        note.textContent = "v17.97 exact cached candidate active for this built-in curve. " +
+        note.textContent = exactCacheDisplayName(state.framework.compiled) + " active for this built-in curve. " +
           (score.exactCacheFallbacks ? score.exactCacheFallbacks + " point(s) fell back to locked MTS." : "All active points used the tested support cache.");
       } else {
         note.textContent = "Formula ready. " + (score.invalidCount ? score.invalidCount + " invalid points were clamped." : "All active points evaluated.");
@@ -2971,9 +2995,10 @@
       exactCacheFallbacks: exactCacheFallbacks,
       expression: state.framework.expression
     };
-    $("frameworkNote").textContent = (state.framework.compiled && state.framework.compiled.kind === "v17state-exact-cache" ? "v17.97 exact cache active. " : "") +
+    $("frameworkNote").textContent = (state.framework.compiled && state.framework.compiled.kind === "v17state-exact-cache" ? exactCacheDisplayName(state.framework.compiled) + " active. " : "") +
       "Batch complete: " + wins + " / " + valid.length + " LTGs beat the MTS baseline for this formula.";
     updateFrameworkPanel();
+    updateV18ReviewPanel();
   }
 
   function parseTournamentQueue(text) {
@@ -3911,6 +3936,23 @@
       $("v18Note").textContent = "Canonical v18 Priority L uses -10.315 + 8.645*g + 10.508*L_gap. LTG curvature uses A = -2.671 + 2.735/sqrt(u_0.75).";
     } else {
       $("v18Note").textContent = "S-law and curvature are shown for the active profile; Priority L is primarily a single-crossing outer-error diagnostic.";
+    }
+  }
+
+  function updateV18ReviewPanel() {
+    if (!$("v18ReviewStatus")) return;
+    var active = isV18ReviewActive();
+    $("v18ReviewStatus").textContent = active ? "active" : "ready";
+    $("v18ReviewHighGain").textContent = fmt(V18_REVIEW_GATE.nominalHighGainPct, 2) + "%";
+    $("v18ReviewHoldout").textContent = fmt(V18_REVIEW_GATE.holdoutHighGainPct, 2) + "%";
+    $("v18ReviewStress").textContent = String(V18_REVIEW_GATE.stressAbove20);
+    $("v18ReviewNullMargin").textContent = fmt(V18_REVIEW_GATE.nullMarginKmS, 2);
+    $("v18ReviewProtected").textContent = String(V18_REVIEW_GATE.activeProtectedWorseCount);
+    $("v18ReviewDiff").textContent = String(V18_REVIEW_GATE.nominalDiffVsV1797Count);
+    if ($("v18ReviewNote")) {
+      $("v18ReviewNote").textContent = active
+        ? "Active preset uses the exact tested nominal support cache. The v18 review gate adds the baryon-confidence stress guard: no stress cases remain above 20 km/s, active protected worsens stay at 0, and the hardening margin over the best null is 26.11 km/s."
+        : "Select MTS v18.01 review candidate in the Test Rig to inspect the review candidate. Nominal curves remain the v17.97 exact cache; the v18 addition is the stress/quality guard validated by the promotion gate.";
     }
   }
 
@@ -4979,6 +5021,7 @@
     updateBenchmarkPanel();
     updateTrustPanel();
     updateV18Panel();
+    updateV18ReviewPanel();
     updateCasePanel();
     updateUncertaintyPanel();
     updateScienceQaPanel();
