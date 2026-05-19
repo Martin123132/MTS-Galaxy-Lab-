@@ -153,6 +153,7 @@ DEFAULT_OBSERVED_STATE_STRESS_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-stat
 DEFAULT_OBSERVED_STATE_FINAL_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-final-stress-v17-99"
 DEFAULT_OBSERVED_STATE_BARYON_GUARD_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-baryon-guard-v18-00"
 DEFAULT_OBSERVED_STATE_BARYON_GUARD_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-baryon-guard-harden-v18-01"
+DEFAULT_OBSERVED_STATE_PROMOTION_GATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-promotion-gate-v18-02"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -53484,6 +53485,296 @@ def cmd_observedstatebaryonguardharden(args: argparse.Namespace) -> None:
     print(f"Wrote observed state baryon-guard hardening to {out_dir.resolve()}")
 
 
+def observed_state_promotion_track_eval(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+    track: str,
+    score_fn: Callable[[dict, dict, dict, float, float, float], dict],
+) -> tuple[dict, list[dict]]:
+    nominal_metrics, nominal_cases = observed_state_soft_gate_eval(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        soft_scale,
+        full_threshold,
+        score_fn=score_fn,
+    )
+    holdout_rows = []
+    for seed in OBSERVED_STATE_V1800_REPLAY_SEEDS:
+        _train_names, holdout_names = observed_state_split(clean_curves, seed, HOLDOUT_FRACTION)
+        holdout = [curve for curve in clean_curves if curve["name"] in holdout_names]
+        paired = []
+        for curve in holdout:
+            base = score_curve(curve)
+            cand = score_fn(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+            paired.append((curve, base, cand))
+        holdout_rows.append(observed_state_law_freeze_summary(seed, track, paired, high_names))
+    stress_rows = []
+    stress_case_rows = []
+    for stress_label, stress_curves in observed_state_v1801_stress_sets(clean_curves):
+        paired = []
+        for curve in stress_curves:
+            base = score_curve(curve)
+            cand = score_fn(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+            paired.append((curve, base, cand))
+        high_paired = [row for row in paired if row[0]["name"] in high_names]
+        protected_paired = [row for row in paired if row[0]["name"] not in high_names]
+        protected_regressions = [cand["rmse"] - base["rmse"] for _curve, base, cand in protected_paired]
+        stress_rows.append(
+            {
+                "track": track,
+                "stress": stress_label,
+                "highGainPct": pct_improvement(
+                    safe_mean(base["rmse"] for _curve, base, _cand in high_paired),
+                    safe_mean(cand["rmse"] for _curve, _base, cand in high_paired),
+                ),
+                "cleanGainPct": pct_improvement(
+                    safe_mean(base["rmse"] for _curve, base, _cand in paired),
+                    safe_mean(cand["rmse"] for _curve, _base, cand in paired),
+                ),
+                "highAbove20": sum(1 for _curve, _base, cand in high_paired if cand["rmse"] >= 20.0),
+                "highWorsened": sum(1 for _curve, base, cand in high_paired if cand["rmse"] > base["rmse"]),
+                "protectedRegressionCount": sum(1 for regression in protected_regressions if regression > 1e-9),
+                "maxProtectedRegression": max(protected_regressions) if protected_regressions else 0.0,
+            }
+        )
+        for curve, base, cand in high_paired:
+            if cand["rmse"] >= 20.0 or base["rmse"] - cand["rmse"] >= 5.0 or cand.get("observedStateBranch", ""):
+                stress_case_rows.append(
+                    {
+                        "track": track,
+                        "stress": stress_label,
+                        "galaxy": curve["name"],
+                        "baselineRmse": base["rmse"],
+                        "candidateRmse": cand["rmse"],
+                        "gainKmS": base["rmse"] - cand["rmse"],
+                        "branch": cand.get("observedStateBranch", ""),
+                        "baryonConfidence": cand.get("baryonConfidence", ""),
+                        "stillAbove20": cand["rmse"] >= 20.0,
+                    }
+                )
+    summary = {
+        "track": track,
+        "nominalHighGainPct": nominal_metrics["highGainPct"],
+        "nominalCleanGainPct": nominal_metrics["cleanGainPct"],
+        "nominalHighAbove20": nominal_metrics["highStillAbove20"],
+        "nominalProtectedRegressionCount": nominal_metrics["protectedRegressionCount"],
+        "nominalMaxProtectedRegression": nominal_metrics["maxProtectedRegression"],
+        "medianHoldoutHighGainPct": safe_median(parse_float(row["highGainPct"]) for row in holdout_rows),
+        "medianHoldoutCleanGainPct": safe_median(parse_float(row["cleanGainPct"]) for row in holdout_rows),
+        "maxHoldoutHighAbove20": max(int(parse_float(row["highStillAbove20"], 0.0)) for row in holdout_rows),
+        "maxHoldoutProtectedRegression": max(parse_float(row["maxProtectedRegression"], 0.0) for row in holdout_rows),
+        "maxStressHighAbove20": max(int(parse_float(row["highAbove20"], 0.0)) for row in stress_rows),
+        "minStressHighGainPct": min(parse_float(row["highGainPct"]) for row in stress_rows),
+        "maxStressProtectedRegression": max(parse_float(row["maxProtectedRegression"], 0.0) for row in stress_rows),
+    }
+    for row in holdout_rows:
+        row["track"] = track
+    return summary, holdout_rows + stress_rows + stress_case_rows
+
+
+def write_observed_state_promotion_gate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+    prefix = "mts_observed_state_promotion_gate"
+
+    tracks = [
+        ("v17.97-radial-repair", observed_state_score_curve_v1797_radial_repair),
+        ("v17.99-final-stress", observed_state_score_curve_v1799_stress_harden),
+        ("v18.00-baryon-guard", observed_state_score_curve_v1800_baryon_guard),
+        ("v18.01-hardened-baryon-guard", observed_state_score_curve_v1800_baryon_guard),
+    ]
+    track_rows = []
+    detail_rows = []
+    for track, score_fn in tracks:
+        summary, rows = observed_state_promotion_track_eval(
+            clean_curves,
+            high_names,
+            fit,
+            amp_cap,
+            soft_scale,
+            full_threshold,
+            track,
+            score_fn,
+        )
+        track_rows.append(summary)
+        for row in rows:
+            detail = {"sourceTrack": track}
+            detail.update(row)
+            detail_rows.append(detail)
+
+    hardening_dir = out_dir / "v18_01_hardening_detail"
+    hardening_capsule = write_observed_state_baryon_guard_harden_artifacts(hardening_dir)
+    hardening_summary = hardening_capsule["summary"]
+    hardening_nulls = read_csv_rows(hardening_dir / "mts_observed_state_baryon_guard_harden_null_summary.csv")
+
+    nominal_v1797 = {
+        curve["name"]: observed_state_score_curve_v1797_radial_repair(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        for curve in clean_curves
+    }
+    nominal_v1800 = {
+        curve["name"]: observed_state_score_curve_v1800_baryon_guard(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        for curve in clean_curves
+    }
+    nominal_diff_rows = [
+        {
+            "galaxy": name,
+            "set": "clean-high-rmse" if name in high_names else "clean-protected",
+            "v1797Rmse": nominal_v1797[name]["rmse"],
+            "v18Rmse": nominal_v1800[name]["rmse"],
+            "deltaKmS": nominal_v1800[name]["rmse"] - nominal_v1797[name]["rmse"],
+            "v1797Branch": nominal_v1797[name].get("observedStateBranch", ""),
+            "v18Branch": nominal_v1800[name].get("observedStateBranch", ""),
+        }
+        for name in sorted(nominal_v1797)
+        if abs(nominal_v1800[name]["rmse"] - nominal_v1797[name]["rmse"]) > 1e-9
+        or nominal_v1800[name].get("observedStateBranch", "") != nominal_v1797[name].get("observedStateBranch", "")
+    ]
+
+    v18_row = next(row for row in track_rows if row["track"] == "v18.01-hardened-baryon-guard")
+    promoted = (
+        v18_row["nominalHighAbove20"] == 0
+        and v18_row["maxStressHighAbove20"] == 0
+        and v18_row["medianHoldoutHighGainPct"] >= 60.0
+        and v18_row["maxHoldoutProtectedRegression"] <= 1.0
+        and parse_float(hardening_summary["candidateHighAbove20"]) == 0
+        and parse_float(hardening_summary["minNullHighAbove20"]) > 0
+        and parse_float(hardening_summary["activeTotalGainMarginVsBestNullKmS"]) >= 20.0
+        and parse_float(hardening_summary["candidateActiveProtectedWorseCount"]) == 0
+        and len(nominal_diff_rows) == 0
+    )
+    verdict = "v18 candidate ready for review" if promoted else "v18 candidate not ready"
+    browser_action = (
+        "keep v17.97 exact-cache browser preset for nominal curves; v18 baryon guard needs stress/quality UI before a browser toggle is meaningful"
+        if len(nominal_diff_rows) == 0
+        else "browser preset update required before review"
+    )
+
+    summary = {
+        "candidateId": "observed-state-response-v18.01-promotion-gate",
+        "verdict": verdict,
+        "browserAction": browser_action,
+        "nominalDiffVsV1797Count": len(nominal_diff_rows),
+        "nominalHighGainPct": v18_row["nominalHighGainPct"],
+        "nominalCleanGainPct": v18_row["nominalCleanGainPct"],
+        "medianHoldoutHighGainPct": v18_row["medianHoldoutHighGainPct"],
+        "medianHoldoutCleanGainPct": v18_row["medianHoldoutCleanGainPct"],
+        "maxStressHighAbove20": v18_row["maxStressHighAbove20"],
+        "minStressHighGainPct": v18_row["minStressHighGainPct"],
+        "hardeningPreviousHighAbove20": hardening_summary["previousHighAbove20"],
+        "hardeningCandidateHighAbove20": hardening_summary["candidateHighAbove20"],
+        "hardeningBestNullHighGainPct": hardening_summary["bestNullHighGainPct"],
+        "hardeningMinNullHighAbove20": hardening_summary["minNullHighAbove20"],
+        "hardeningActiveTotalGainMarginKmS": hardening_summary["activeTotalGainMarginVsBestNullKmS"],
+        "hardeningActiveProtectedWorseCount": hardening_summary["candidateActiveProtectedWorseCount"],
+    }
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_track_comparison.csv", track_rows)
+    write_csv(out_dir / f"{prefix}_detail_rows.csv", detail_rows)
+    write_csv(out_dir / f"{prefix}_nominal_diff_vs_v1797.csv", nominal_diff_rows)
+    write_csv(out_dir / f"{prefix}_null_summary.csv", hardening_nulls)
+    write_csv(
+        out_dir / f"{prefix}_browser_decision.csv",
+        [{"browserAction": browser_action, "nominalDiffVsV1797Count": len(nominal_diff_rows)}],
+    )
+
+    formula = {
+        "candidateId": summary["candidateId"],
+        "reviewCandidate": "observed-state-response-v18.01-hardened-baryon-guard",
+        "baseNominalDisplay": "v17.97 radial-repair exact cache",
+        "baryonConfidence": 0.88,
+        "promotionScope": "framework review candidate with stress/quality guard; canonical MTS constants remain locked",
+        "browserAction": browser_action,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics galaxies"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    report = [
+        "# MTS v18.01 Promotion Gate",
+        "",
+        "This gate compares the current observed-state candidate against the recent v17/v18 chain on nominal clean curves, holdout replay, stress grids, and the v18.01 null controls.",
+        "",
+        "## Decision",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Browser action: `{browser_action}`.",
+        f"- Nominal differences from v17.97: `{len(nominal_diff_rows)}`.",
+        f"- v18 nominal high-RMSE gain: `{fmt(v18_row['nominalHighGainPct'])}%`.",
+        f"- v18 holdout high-RMSE gain: `{fmt(v18_row['medianHoldoutHighGainPct'])}%`.",
+        f"- v18 max stress above-20 count: `{v18_row['maxStressHighAbove20']}`.",
+        f"- v18 min stress high-RMSE gain: `{fmt(v18_row['minStressHighGainPct'])}%`.",
+        f"- v18.01 active total gain margin over best null: `{fmt(hardening_summary['activeTotalGainMarginVsBestNullKmS'])}` km/s.",
+        f"- v18.01 active protected worsens: `{hardening_summary['candidateActiveProtectedWorseCount']}`.",
+        "",
+        "## Track Comparison",
+        "",
+    ]
+    for row in track_rows:
+        report.append(
+            f"- `{row['track']}`: nominal high gain `{fmt(row['nominalHighGainPct'])}%`, holdout high gain `{fmt(row['medianHoldoutHighGainPct'])}%`, max stress above 20 `{row['maxStressHighAbove20']}`, min stress high gain `{fmt(row['minStressHighGainPct'])}%`."
+        )
+    report.extend(["", "## Browser Note", ""])
+    report.append(
+        "The current browser preset is an exact nominal-curve cache. Since v18.01 changes only stress/quality-guard behavior and has zero nominal differences from v17.97, the browser should not be relabelled as a full v18 implementation until a stress/quality-control UI is added."
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-state-promotion-gate-v18-02",
+        "candidateId": summary["candidateId"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_track_comparison.csv",
+            f"{prefix}_detail_rows.csv",
+            f"{prefix}_nominal_diff_vs_v1797.csv",
+            f"{prefix}_null_summary.csv",
+            f"{prefix}_browser_decision.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatepromotiongate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_PROMOTION_GATE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_promotion_gate_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.01 promotion gate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"nominal_diff={summary['nominalDiffVsV1797Count']}",
+                f"high={fmt(summary['nominalHighGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"stress_above20={summary['maxStressHighAbove20']}",
+                f"stress_min_gain={fmt(summary['minStressHighGainPct'])}%",
+                f"null_margin_kms={fmt(summary['hardeningActiveTotalGainMarginKmS'])}",
+                f"protected_worse={summary['hardeningActiveProtectedWorseCount']}",
+            ]
+        )
+    )
+    print(f"browser_action={summary['browserAction']}")
+    print(f"Wrote observed state promotion gate to {out_dir.resolve()}")
+
+
 OBSERVED_STATE_SOFT_NEIGHBOR_SEEDS = list(range(SPLIT_SEED + 1000, SPLIT_SEED + 1011))
 OBSERVED_STATE_SOFT_SCALE_GRID = [0.03, 0.05, 0.08, 0.10]
 OBSERVED_STATE_SOFT_FULL_THRESHOLD_GRID = [1.0 / 12.0, 0.12, 0.16, 0.20, 0.30, 0.40]
@@ -64016,6 +64307,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatefinalstress",
             "observedstatebaryonguard",
             "observedstatebaryonguardharden",
+            "observedstatepromotiongate",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -64237,6 +64529,8 @@ def main() -> None:
         cmd_observedstatebaryonguard(args)
     elif args.mode == "observedstatebaryonguardharden":
         cmd_observedstatebaryonguardharden(args)
+    elif args.mode == "observedstatepromotiongate":
+        cmd_observedstatepromotiongate(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
