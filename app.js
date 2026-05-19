@@ -3962,6 +3962,9 @@
     $("v18ReviewNullMargin").textContent = fmt(gate.nullMarginKmS, 2);
     $("v18ReviewProtected").textContent = String(gate.activeProtectedWorseCount);
     $("v18ReviewDiff").textContent = String(gate.nominalDiffVsV1797Count);
+    if ($("v18ReviewArtifactCount")) $("v18ReviewArtifactCount").textContent = artifact && artifact.metadata ? String(artifact.metadata.curveCount) : "--";
+    if ($("v18ReviewCleanCount")) $("v18ReviewCleanCount").textContent = artifact && artifact.metadata ? String(artifact.metadata.cleanCurveCount) : "--";
+    if ($("v18ReviewWeakCount")) $("v18ReviewWeakCount").textContent = artifact && artifact.metadata ? String(artifact.metadata.weakSystematicsExcludedCount) : "--";
     if ($("v18ReviewNote")) {
       $("v18ReviewNote").textContent = active
         ? "Active preset uses the generated v18.01 artifact with " + artifactCount + " cached curves. The v18 review gate adds the baryon-confidence stress guard: no stress cases remain above 20 km/s, active protected worsens stay at 0, and the hardening margin over the best null is " + fmt(gate.nullMarginKmS, 2) + " km/s."
