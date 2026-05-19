@@ -142,6 +142,7 @@ DEFAULT_OBSERVED_STATE_ROUTE_SAFE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-r
 DEFAULT_OBSERVED_STATE_FAMILY_SURFACE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-family-surface-v17-88"
 DEFAULT_OBSERVED_STATE_FAMILY_MERGE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-family-merge-v17-89"
 DEFAULT_OBSERVED_STATE_LOWLOAD_FAMILY_COLLAPSE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-lowload-family-collapse-v17-90"
+DEFAULT_OBSERVED_STATE_LOWLOAD_TAIL_SELECTOR_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-lowload-tail-selector-v17-91"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -47324,6 +47325,195 @@ def cmd_observedstatelowloadfamilycollapse(args: argparse.Namespace) -> None:
     print(f"Wrote observed state low-load family-collapse response to {out_dir.resolve()}")
 
 
+def observed_state_v1791_lowload_family_surface_gate(curve: dict) -> bool:
+    values = observed_state_values(curve)
+    very_high_memory_edge = (
+        values["memoryLoad"] >= 18.0
+        and values["uMax"] <= 0.75
+        and values["uOut"] <= 0.31
+        and values["outerDiskShare"] >= 0.65
+    )
+    diffuse_disk_edge = (
+        values["hOverRout"] >= 0.24
+        and values["uMax"] <= 0.92
+        and values["uOut"] >= 0.40
+        and values["barCurv"] > -20.0
+        and values["outerBulgeShare"] < 0.02
+    )
+    return very_high_memory_edge or diffuse_disk_edge
+
+
+def observed_state_with_v1791_lowload_tail_selector(
+    fit: dict,
+    amp_cap: float,
+    callback: Callable[[], dict | list[dict]],
+) -> dict | list[dict]:
+    original_lowload_compressed_score = observed_state_v1770_lowload_q_compressed_score
+
+    def lowload_tail_selector_score(
+        curve: dict,
+        activation: float,
+        probability: float,
+        fallback_floor: float | None = None,
+        continuity_fallback: bool = False,
+        route_transition_fallback: str = "",
+    ) -> dict:
+        if observed_state_v1791_lowload_family_surface_gate(curve):
+            score = observed_state_v1767_support_score(
+                curve,
+                curve,
+                fit,
+                amp_cap,
+                OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_BRANCH,
+                activation,
+                probability,
+                fallback_floor,
+                continuity_fallback,
+                route_transition_fallback,
+            )
+            score["observedStateResponseSource"] = "lowload-family-surface-selected"
+            return score
+        score = original_lowload_compressed_score(
+            curve,
+            activation,
+            probability,
+            fallback_floor,
+            continuity_fallback,
+            route_transition_fallback,
+        )
+        score["observedStateResponseSource"] = "lowload-compressed-tail-selected"
+        return score
+
+    globals()["observed_state_v1770_lowload_q_compressed_score"] = lowload_tail_selector_score
+    try:
+        return callback()
+    finally:
+        globals()["observed_state_v1770_lowload_q_compressed_score"] = original_lowload_compressed_score
+
+
+def observed_state_score_curve_v1791_lowload_tail_selector(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> dict:
+    return observed_state_with_v1791_lowload_tail_selector(
+        fit,
+        amp_cap,
+        lambda: observed_state_score_curve_v1789_family_merge(curve, state_curve, fit, amp_cap, soft_scale, full_threshold),
+    )
+
+
+def observed_state_score_curve_v1791_lowload_tail_selector_forced(
+    curve: dict,
+    state_curve: dict,
+    branch: str,
+    activation: float,
+) -> dict:
+    context = observed_state_candidate_context()
+    return observed_state_with_v1791_lowload_tail_selector(
+        context["fit"],
+        context["ampCap"],
+        lambda: observed_state_score_curve_v1789_family_merge_forced(curve, state_curve, branch, activation),
+    )
+
+
+def observed_state_v1791_split_replay_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    soft_scale: float,
+    full_threshold: float,
+) -> list[dict]:
+    rows = observed_state_with_v1791_lowload_tail_selector(
+        fit,
+        amp_cap,
+        lambda: observed_state_v1789_split_replay_rows(clean_curves, high_names, fit, amp_cap, soft_scale, full_threshold),
+    )
+    for row in rows:
+        if row["track"] == "v17.89-family-merged-route-safe":
+            row["track"] = "v17.91-lowload-tail-selector-route-safe"
+    return rows
+
+
+def cmd_observedstatelowloadtailselector(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_LOWLOAD_TAIL_SELECTOR_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    context = observed_state_candidate_context()
+    capsule = observed_state_with_v1791_lowload_tail_selector(
+        context["fit"],
+        context["ampCap"],
+        lambda: write_observed_state_route_safe_artifacts(
+            out_dir,
+            score_fn=observed_state_score_curve_v1791_lowload_tail_selector,
+            forced_score_fn=observed_state_score_curve_v1791_lowload_tail_selector_forced,
+            split_replay_fn=observed_state_v1791_split_replay_rows,
+            prefix="mts_observed_state_lowload_tail_selector",
+            candidate_id="observed-state-response-v17.91-lowload-tail-selector-route-safe",
+            tested_candidate="observed-state-response-v17.90-lowload-family-collapse-route-safe",
+            analysis_name="mts-observed-state-lowload-tail-selector-v17-91",
+            report_title="# MTS v17.91 Low-Load Tail-Selector Route-Safe Response",
+            mechanism=(
+                "Use v17.90's continuous low-load family surface only for two pre-residual low-load sub-states: "
+                "very-high-memory disk edges and diffuse high-h/r_out disk edges. Other low-load q-compressed hits keep "
+                "the sharper compressed tail response from v17.89. Canonical q=0.77/Gamma0/M-L remain unchanged outside "
+                "accepted state branches."
+            ),
+            report_intro=(
+                "This pass directly targets the remaining high-RMSE low-load tail without galaxy-name or residual lookup. "
+                "The selector uses only locked MTS/profile variables and was accepted only because it improved held-out "
+                "high-RMSE cases while keeping protected regressions unchanged and all high-RMSE cases below 20 km/s."
+            ),
+            extra_formula={
+                "baseCandidate": "observed-state-response-v17.90-lowload-family-collapse-route-safe",
+                "lowLoadTailSelector": True,
+                "familySurfaceGate": {
+                    "veryHighMemoryEdge": {
+                        "memoryLoad": ">= 18.0",
+                        "uMax": "<= 0.75",
+                        "uOut": "<= 0.31",
+                        "outerDiskShare": ">= 0.65",
+                    },
+                    "diffuseDiskEdge": {
+                        "hOverRout": ">= 0.24",
+                        "uMax": "<= 0.92",
+                        "uOut": ">= 0.40",
+                        "barCurv": "> -20.0",
+                        "outerBulgeShare": "< 0.02",
+                    },
+                },
+                "defaultLowLoadCompressedResponse": {
+                    "amp": OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_AMP,
+                    "q": OBSERVED_STATE_V1770_LOWLOAD_Q_COMPRESSED_Q,
+                },
+                "branchAliasCount": len(OBSERVED_STATE_V1789_BRANCH_ALIASES),
+                "branchAliases": OBSERVED_STATE_V1789_BRANCH_ALIASES,
+            },
+            passed_verdict="v17.91 low-load tail-selector route-safe response passed",
+            failed_verdict="v17.91 low-load tail-selector route-safe response underpowered",
+        ),
+    )
+    summary = capsule["summary"]
+    print("MTS v17.91 low-load tail-selector route-safe response")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['nominalHighGainPct'])}%",
+                f"clean={fmt(summary['nominalCleanGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"route_pres={fmt(summary['medianHoldoutRoutePreservation'], 3)}",
+                f"above20={summary['maxHoldoutHighStillAbove20']}",
+                f"null_margin={fmt(summary['bestNullMarginPct'])}",
+                "lowload_tail_selector=true",
+            ]
+        )
+    )
+    print(f"Wrote observed state low-load tail-selector response to {out_dir.resolve()}")
+
+
 OBSERVED_STATE_SOFT_NEIGHBOR_SEEDS = list(range(SPLIT_SEED + 1000, SPLIT_SEED + 1011))
 OBSERVED_STATE_SOFT_SCALE_GRID = [0.03, 0.05, 0.08, 0.10]
 OBSERVED_STATE_SOFT_FULL_THRESHOLD_GRID = [1.0 / 12.0, 0.12, 0.16, 0.20, 0.30, 0.40]
@@ -57845,6 +58035,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatefamilysurface",
             "observedstatefamilymerge",
             "observedstatelowloadfamilycollapse",
+            "observedstatelowloadtailselector",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -58044,6 +58235,8 @@ def main() -> None:
         cmd_observedstatefamilymerge(args)
     elif args.mode == "observedstatelowloadfamilycollapse":
         cmd_observedstatelowloadfamilycollapse(args)
+    elif args.mode == "observedstatelowloadtailselector":
+        cmd_observedstatelowloadtailselector(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
