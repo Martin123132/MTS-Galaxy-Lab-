@@ -157,6 +157,7 @@ DEFAULT_OBSERVED_STATE_PROMOTION_GATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-sta
 DEFAULT_OBSERVED_STATE_V18_RELEASE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LAW_NATIVE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-law-native-v1"
 DEFAULT_OBSERVED_STATE_V18_BRANCH_PRUNE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-branch-prune-v1"
+DEFAULT_OBSERVED_STATE_V18_FAMILY_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-family-audit-v1"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
@@ -54378,6 +54379,435 @@ def cmd_observedstatev18branchprune(args: argparse.Namespace) -> None:
     print(f"Wrote v18 branch pruning audit to {out_dir.resolve()}")
 
 
+OBSERVED_STATE_V18_FAMILY_AUDIT_SEEDS = OBSERVED_STATE_V1800_REPLAY_SEEDS
+OBSERVED_STATE_V18_FAMILY_BOUNDARY_FEATURES = [
+    "memoryLoad",
+    "u075",
+    "uOut",
+    "uMax",
+    "LgapOverH",
+    "hOverRout",
+    "fGasOut",
+    "innerGasShare",
+    "midGasShare",
+    "outerGasShare",
+    "innerDiskShare",
+    "midDiskShare",
+    "outerDiskShare",
+    "innerBulgeShare",
+    "midBulgeShare",
+    "outerBulgeShare",
+    "barInnerOuter",
+    "barMidOuter",
+    "barCurv",
+    "pointDensity",
+]
+
+
+def observed_state_v18_family_name(row: dict) -> str:
+    return row.get("family") or "unfamilied"
+
+
+def observed_state_v18_state_values(curve: dict) -> dict:
+    values = observed_state_values(curve)
+    values.update(
+        {
+            "u075": curve.get("lockedModelU075", math.nan),
+            "uOut": curve.get("lockedModelUOut", values.get("uOut", math.nan)),
+            "uMax": curve.get("lockedModelUMax", values.get("uMax", math.nan)),
+            "fGasOut": curve.get("fGasOut", values.get("fGasOut", math.nan)),
+            "leffOverH": curve["leff"] / max(curve["h"], 1e-9),
+            "rOutOverH": curve["rOut"] / max(curve["h"], 1e-9),
+        }
+    )
+    return values
+
+
+def observed_state_v18_row_gain_pct(rows: list[dict]) -> float:
+    return pct_improvement(
+        safe_mean(parse_float(row["baselineRmse"]) for row in rows),
+        safe_mean(parse_float(row["lawNativeRmse"]) for row in rows),
+    )
+
+
+def observed_state_v18_family_null_rows(
+    case_rows: list[dict],
+    family: str,
+    seeds: list[int],
+) -> tuple[list[dict], dict]:
+    high_rows = [row for row in case_rows if row["set"] == "clean-high-rmse"]
+    family_high_rows = [
+        row
+        for row in high_rows
+        if row.get("branch") and observed_state_v18_family_name(row) == family
+    ]
+    if not family_high_rows:
+        return [], {
+            "family": family,
+            "actualHighGainPct": math.nan,
+            "medianSameCountNullGainPct": math.nan,
+            "sameCountNullMarginPct": math.nan,
+            "sameCountNullBeat": False,
+        }
+
+    actual_gain_pct = observed_state_v18_row_gain_pct(family_high_rows)
+    family_names = {row["galaxy"] for row in family_high_rows}
+    route_counts: dict[str, int] = {}
+    for row in family_high_rows:
+        route_counts[row["lockedRoute"]] = route_counts.get(row["lockedRoute"], 0) + 1
+    fallback_pool = [row for row in high_rows if row["galaxy"] not in family_names]
+    rows: list[dict] = []
+    for seed in seeds:
+        rng = random.Random(f"v18-family-null:{family}:{seed}")
+        selected: list[dict] = []
+        used: set[str] = set()
+        for route, count in sorted(route_counts.items()):
+            pool = [row for row in fallback_pool if row["lockedRoute"] == route and row["galaxy"] not in used]
+            rng.shuffle(pool)
+            selected.extend(pool[:count])
+            used.update(row["galaxy"] for row in pool[:count])
+        if len(selected) < len(family_high_rows):
+            remaining = [row for row in fallback_pool if row["galaxy"] not in used]
+            rng.shuffle(remaining)
+            selected.extend(remaining[: len(family_high_rows) - len(selected)])
+        null_gain_pct = observed_state_v18_row_gain_pct(selected)
+        rows.append(
+            {
+                "family": family,
+                "seed": seed,
+                "activeHighHitCount": len(family_high_rows),
+                "actualHighGainPct": actual_gain_pct,
+                "sameCountNullHighGainPct": null_gain_pct,
+                "sameCountNullMarginPct": actual_gain_pct - null_gain_pct,
+                "selectedGalaxies": "; ".join(sorted(row["galaxy"] for row in selected)),
+            }
+        )
+    margins = [parse_float(row["sameCountNullMarginPct"]) for row in rows]
+    summary = {
+        "family": family,
+        "actualHighGainPct": actual_gain_pct,
+        "medianSameCountNullGainPct": safe_median(row["sameCountNullHighGainPct"] for row in rows),
+        "sameCountNullMarginPct": safe_median(margins),
+        "sameCountNullBeat": safe_median(margins) >= 10.0,
+    }
+    return rows, summary
+
+
+def observed_state_v18_family_holdout_rows(case_rows: list[dict], family: str, clean_curves: list[dict], seeds: list[int]) -> tuple[list[dict], dict]:
+    family_high_by_name = {
+        row["galaxy"]: row
+        for row in case_rows
+        if row["set"] == "clean-high-rmse"
+        and row.get("branch")
+        and observed_state_v18_family_name(row) == family
+    }
+    rows: list[dict] = []
+    for seed in seeds:
+        _train_names, holdout_names = observed_state_split(clean_curves, seed, HOLDOUT_FRACTION)
+        holdout_family_rows = [row for name, row in family_high_by_name.items() if name in holdout_names]
+        rows.append(
+            {
+                "family": family,
+                "seed": seed,
+                "holdoutFamilyHighHitCount": len(holdout_family_rows),
+                "holdoutFamilyHighGainPct": observed_state_v18_row_gain_pct(holdout_family_rows),
+                "holdoutFamilyAbove20": sum(1 for row in holdout_family_rows if parse_float(row["lawNativeRmse"]) >= 20.0),
+                "holdoutFamilyGalaxies": "; ".join(sorted(row["galaxy"] for row in holdout_family_rows)),
+            }
+        )
+    summary = {
+        "family": family,
+        "holdoutPresenceRate": safe_mean(1.0 if row["holdoutFamilyHighHitCount"] > 0 else 0.0 for row in rows),
+        "medianHoldoutHighGainPct": safe_median(row["holdoutFamilyHighGainPct"] for row in rows if row["holdoutFamilyHighHitCount"] > 0),
+        "maxHoldoutAbove20": max([row["holdoutFamilyAbove20"] for row in rows] or [0]),
+    }
+    return rows, summary
+
+
+def observed_state_v18_family_boundary_rows(case_rows: list[dict], curves_by_name: dict[str, dict], families: list[str]) -> list[dict]:
+    rows: list[dict] = []
+    for family in families:
+        family_names = [
+            row["galaxy"]
+            for row in case_rows
+            if row["set"] != "weak/systematics"
+            and row.get("branch")
+            and observed_state_v18_family_name(row) == family
+        ]
+        for feature in OBSERVED_STATE_V18_FAMILY_BOUNDARY_FEATURES:
+            values = []
+            for name in family_names:
+                curve = curves_by_name.get(name)
+                if not curve:
+                    continue
+                value = observed_state_v18_state_values(curve).get(feature, math.nan)
+                if math.isfinite(parse_float(value, math.nan)):
+                    values.append(float(value))
+            if not values:
+                continue
+            rows.append(
+                {
+                    "family": family,
+                    "feature": feature,
+                    "hitCount": len(values),
+                    "min": min(values),
+                    "median": safe_median(values),
+                    "max": max(values),
+                }
+            )
+    return rows
+
+
+def write_observed_state_v18_family_audit_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_observed_v18_family_audit"
+    context = observed_state_candidate_context()
+    high_names = context["highNames"]
+    clean_curves = context["cleanCurves"]
+    curves_by_name = {curve["name"]: curve for curve in context["curves"]}
+    artifact_payload = read_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE")
+    case_rows, _parity_rows, law_summary = observed_state_v18_law_native_audit_rows(context, artifact_payload)
+    full_metric = observed_state_v18_prune_metric(case_rows, high_names, lambda _row: False)
+    full_high_above20 = int(full_metric["highAbove20"])
+    branch_rows = observed_state_v18_branch_summary_rows(case_rows)
+    active_families = sorted(
+        {
+            observed_state_v18_family_name(row)
+            for row in case_rows
+            if row["set"] != "weak/systematics"
+            and row.get("branch")
+            and row["galaxy"] in high_names
+        }
+    )
+
+    family_null_rows: list[dict] = []
+    family_null_summary_by_name: dict[str, dict] = {}
+    holdout_rows: list[dict] = []
+    holdout_summary_by_name: dict[str, dict] = {}
+    family_ledger_rows: list[dict] = []
+    for family in active_families:
+        null_rows, null_summary = observed_state_v18_family_null_rows(case_rows, family, OBSERVED_STATE_V18_FAMILY_AUDIT_SEEDS)
+        family_null_rows.extend(null_rows)
+        family_null_summary_by_name[family] = null_summary
+        rows, holdout_summary = observed_state_v18_family_holdout_rows(case_rows, family, clean_curves, OBSERVED_STATE_V18_FAMILY_AUDIT_SEEDS)
+        holdout_rows.extend(rows)
+        holdout_summary_by_name[family] = holdout_summary
+
+        active_rows = [
+            row
+            for row in case_rows
+            if row["set"] != "weak/systematics"
+            and row.get("branch")
+            and observed_state_v18_family_name(row) == family
+        ]
+        active_high_rows = [row for row in active_rows if row["galaxy"] in high_names]
+        active_protected_rows = [row for row in active_rows if row["set"] == "clean-protected"]
+        active_protected_regressions = [parse_float(row["lawNativeRmse"]) - parse_float(row["baselineRmse"]) for row in active_protected_rows]
+        metric = observed_state_v18_prune_metric(
+            case_rows,
+            high_names,
+            lambda row, item=family: bool(row.get("branch")) and observed_state_v18_family_name(row) == item,
+        )
+        high_above20_delta = int(metric["highAbove20"]) - full_high_above20
+        high_gain_loss = parse_float(full_metric["highGainPct"]) - parse_float(metric["highGainPct"])
+        null_margin = parse_float(null_summary.get("sameCountNullMarginPct"), math.nan)
+        holdout_presence = parse_float(holdout_summary.get("holdoutPresenceRate"), math.nan)
+        protected_max = max(active_protected_regressions or [0.0])
+        one_galaxy_patch = len(active_high_rows) <= 1
+        if one_galaxy_patch:
+            verdict = "too narrow"
+        elif protected_max > 3.0:
+            verdict = "protected-risk family"
+        elif null_margin < 10.0:
+            verdict = "fails null"
+        elif len(active_high_rows) < 3:
+            verdict = "edge-case family"
+        elif high_gain_loss >= 5.0 and high_above20_delta > 0 and holdout_presence >= 0.5:
+            verdict = "stable family"
+        elif high_gain_loss >= 5.0 or high_above20_delta > 0:
+            verdict = "edge-case family"
+        else:
+            verdict = "too narrow"
+        family_ledger_rows.append(
+            {
+                "family": family,
+                "verdict": verdict,
+                "branchCount": len({row["branch"] for row in active_rows}),
+                "activeCleanHitCount": len(active_rows),
+                "activeHighHitCount": len(active_high_rows),
+                "activeProtectedHitCount": len(active_protected_rows),
+                "activeHighMeanGainKmS": safe_mean(parse_float(row["lawGainKmS"]) for row in active_high_rows),
+                "activeHighGainPct": observed_state_v18_row_gain_pct(active_high_rows),
+                "ablationHighGainPct": metric["highGainPct"],
+                "highGainLossPct": high_gain_loss,
+                "ablationHighAbove20": metric["highAbove20"],
+                "highAbove20Delta": high_above20_delta,
+                "sameCountNullMarginPct": null_margin,
+                "sameCountNullBeat": null_margin >= 10.0,
+                "holdoutPresenceRate": holdout_presence,
+                "medianHoldoutHighGainPct": holdout_summary.get("medianHoldoutHighGainPct", math.nan),
+                "maxProtectedRegressionKmS": protected_max,
+                "protectedWorseCount": sum(1 for value in active_protected_regressions if value > 1e-9),
+                "oneGalaxyPatchFlag": one_galaxy_patch,
+                "branches": "; ".join(sorted({row["branch"] for row in active_rows})),
+                "highGalaxies": "; ".join(sorted(row["galaxy"] for row in active_high_rows)),
+                "protectedGalaxies": "; ".join(sorted(row["galaxy"] for row in active_protected_rows)),
+            }
+        )
+
+    boundary_rows = observed_state_v18_family_boundary_rows(case_rows, curves_by_name, active_families)
+    family_ledger_rows.sort(
+        key=lambda row: (
+            {"stable family": 0, "edge-case family": 1, "fails null": 2, "protected-risk family": 3, "too narrow": 4}.get(row["verdict"], 9),
+            -parse_float(row["activeHighHitCount"]),
+            row["family"],
+        )
+    )
+    stable_count = sum(1 for row in family_ledger_rows if row["verdict"] == "stable family")
+    edge_count = sum(1 for row in family_ledger_rows if row["verdict"] == "edge-case family")
+    fail_null_count = sum(1 for row in family_ledger_rows if row["verdict"] == "fails null")
+    too_narrow_count = sum(1 for row in family_ledger_rows if row["verdict"] == "too narrow")
+    protected_risk_count = sum(1 for row in family_ledger_rows if row["verdict"] == "protected-risk family")
+    active_high_hit_count = sum(int(parse_float(row["activeHighHitCount"], 0.0)) for row in family_ledger_rows)
+    high_rows = [row for row in case_rows if row["set"] == "clean-high-rmse"]
+    unbranched_high_count = sum(1 for row in high_rows if not row.get("branch"))
+    if stable_count >= 5 and fail_null_count == 0 and protected_risk_count == 0:
+        verdict = "v18 family structure defensible with edge-case tail" if edge_count or too_narrow_count else "v18 family structure defensible"
+    elif stable_count >= 4 and protected_risk_count == 0:
+        verdict = "v18 family structure partially defensible"
+    else:
+        verdict = "v18 family structure blocked"
+    summary = {
+        "candidateId": "observed-state-response-v18.01-family-audit",
+        "verdict": verdict,
+        "fullHighGainPct": full_metric["highGainPct"],
+        "fullCleanGainPct": full_metric["cleanGainPct"],
+        "fullHighAbove20": full_metric["highAbove20"],
+        "familyCount": len(active_families),
+        "stableFamilyCount": stable_count,
+        "edgeCaseFamilyCount": edge_count,
+        "failNullFamilyCount": fail_null_count,
+        "tooNarrowFamilyCount": too_narrow_count,
+        "protectedRiskFamilyCount": protected_risk_count,
+        "activeHighHitCount": active_high_hit_count,
+        "unbranchedHighCount": unbranched_high_count,
+        "activeBranchCount": sum(1 for row in branch_rows if row["branch"] != "unbranched canonical" and int(parse_float(row["highHitCount"], 0.0)) > 0),
+        "maxFamilyProtectedRegressionKmS": max([parse_float(row["maxProtectedRegressionKmS"], 0.0) for row in family_ledger_rows] or [0.0]),
+        "minFamilyNullMarginPct": min([parse_float(row["sameCountNullMarginPct"], math.nan) for row in family_ledger_rows] or [math.nan]),
+        "weakSystematicsLeakage": law_summary["weakSystematicsLeakage"],
+        "cleanParityMismatchCount": law_summary["cleanParityMismatchCount"],
+    }
+
+    artifact_payload.setdefault("metadata", {})["familyAudit"] = {
+        "verdict": verdict,
+        "familyCount": len(active_families),
+        "stableFamilyCount": stable_count,
+        "edgeCaseFamilyCount": edge_count,
+        "failNullFamilyCount": fail_null_count,
+        "tooNarrowFamilyCount": too_narrow_count,
+        "protectedRiskFamilyCount": protected_risk_count,
+        "activeHighHitCount": active_high_hit_count,
+        "unbranchedHighCount": unbranched_high_count,
+        "weakSystematicsLeakage": law_summary["weakSystematicsLeakage"],
+        "cleanParityMismatchCount": law_summary["cleanParityMismatchCount"],
+    }
+    write_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+    write_window_json_assignment(out_dir / f"{prefix}_browser_artifact.js", "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_family_ledger.csv", family_ledger_rows)
+    write_csv(out_dir / f"{prefix}_family_nulls.csv", family_null_rows)
+    write_csv(out_dir / f"{prefix}_holdout_stability.csv", holdout_rows)
+    write_csv(out_dir / f"{prefix}_state_boundaries.csv", boundary_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+
+    report = [
+        "# MTS v18.01 Family Audit",
+        "",
+        "This audit keeps the v18.01 law frozen and asks whether its essential high-RMSE repairs form repeatable state families rather than one-galaxy patches.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Full high-RMSE gain: `{fmt(summary['fullHighGainPct'])}%`.",
+        f"- Full clean-set gain: `{fmt(summary['fullCleanGainPct'])}%`.",
+        f"- High-RMSE cases still above 20 km/s: `{summary['fullHighAbove20']}`.",
+        f"- Active families: `{summary['familyCount']}`.",
+        f"- Stable families: `{stable_count}`.",
+        f"- Edge-case families: `{edge_count}`.",
+        f"- Families failing same-count null: `{fail_null_count}`.",
+        f"- Too-narrow families: `{too_narrow_count}`.",
+        f"- Active high-RMSE branch hits: `{active_high_hit_count}`.",
+        f"- Unbranched high-RMSE cases: `{unbranched_high_count}`.",
+        f"- Max family protected regression: `{fmt(summary['maxFamilyProtectedRegressionKmS'])}` km/s.",
+        f"- Weak/systematics leakage: `{summary['weakSystematicsLeakage']}`.",
+        "",
+        "## Family Ledger",
+        "",
+        "| Family | Verdict | Branches | High hits | Gain loss | Null margin | Holdout presence | Protected max |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in family_ledger_rows:
+        report.append(
+            f"| {row['family']} | {row['verdict']} | {row['branchCount']} | {row['activeHighHitCount']} | "
+            f"{fmt(row['highGainLossPct'])} | {fmt(row['sameCountNullMarginPct'])} | {fmt(row['holdoutPresenceRate'], 3)} | {fmt(row['maxProtectedRegressionKmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "A family is treated as stable only when ablating it reopens high-RMSE failures, it beats same-active-count branch-target nulls by at least 10 percentage points, it appears in route-stratified holdouts, and it does not introduce protected regressions.",
+            "The audit does not change the v18 law. It strengthens or weakens the case that the existing branches are framework structure rather than target lookup.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-v18-family-audit-v1",
+        "candidateId": summary["candidateId"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_family_ledger.csv",
+            f"{prefix}_family_nulls.csv",
+            f"{prefix}_holdout_stability.csv",
+            f"{prefix}_state_boundaries.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_browser_artifact.js",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatev18familyaudit(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_FAMILY_AUDIT_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_family_audit_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.01 family audit")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['fullHighGainPct'])}%",
+                f"clean={fmt(summary['fullCleanGainPct'])}%",
+                f"above20={summary['fullHighAbove20']}",
+                f"families={summary['familyCount']}",
+                f"stable={summary['stableFamilyCount']}",
+                f"edge={summary['edgeCaseFamilyCount']}",
+                f"fails_null={summary['failNullFamilyCount']}",
+                f"protected={fmt(summary['maxFamilyProtectedRegressionKmS'])}",
+                f"weak_leakage={summary['weakSystematicsLeakage']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 family audit to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_candidate_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     context = observed_state_candidate_context()
@@ -65166,6 +65596,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18releasecandidate",
             "observedstatev18lawnative",
             "observedstatev18branchprune",
+            "observedstatev18familyaudit",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -65395,6 +65826,8 @@ def main() -> None:
         cmd_observedstatev18lawnative(args)
     elif args.mode == "observedstatev18branchprune":
         cmd_observedstatev18branchprune(args)
+    elif args.mode == "observedstatev18familyaudit":
+        cmd_observedstatev18familyaudit(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":

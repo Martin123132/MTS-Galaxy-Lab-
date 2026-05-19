@@ -60,6 +60,17 @@ if (artifact.metadata.branchPrune) {
     fail(`branch-prune minimal above-20 count ${artifact.metadata.branchPrune.minimalHighAbove20}`);
   }
 }
+if (artifact.metadata.familyAudit) {
+  if (!String(artifact.metadata.familyAudit.verdict || "").includes("v18 family")) {
+    fail(`unexpected family-audit verdict ${artifact.metadata.familyAudit.verdict}`);
+  }
+  if (artifact.metadata.familyAudit.weakSystematicsLeakage !== 0) {
+    fail(`family-audit weak/systematics leakage ${artifact.metadata.familyAudit.weakSystematicsLeakage}`);
+  }
+  if (!Number.isInteger(artifact.metadata.familyAudit.familyCount) || artifact.metadata.familyAudit.familyCount < 1) {
+    fail(`invalid v18 family count ${artifact.metadata.familyAudit.familyCount}`);
+  }
+}
 
 const indexHtml = readText(indexPath);
 const appJs = readText(appPath);
@@ -76,6 +87,8 @@ if (!appJs.includes("v18ReviewLawNative")) fail("app.js does not populate v18 la
 if (!indexHtml.includes("v18ReviewLawNative")) fail("index.html does not expose v18 law-native status");
 if (!appJs.includes("v18ReviewBranchPrune")) fail("app.js does not populate v18 branch-prune status");
 if (!indexHtml.includes("v18ReviewBranchPrune")) fail("index.html does not expose v18 branch-prune status");
+if (!appJs.includes("v18ReviewFamilyAudit")) fail("app.js does not populate v18 family-audit status");
+if (!indexHtml.includes("v18ReviewFamilyAudit")) fail("index.html does not expose v18 family-audit status");
 
 console.log(
   [
