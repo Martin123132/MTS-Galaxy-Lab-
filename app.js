@@ -14,7 +14,7 @@
 
   var V17STATE_EXACT_TOKEN = "__MTS_V17_97_RADIAL_REPAIR_STATE_RESPONSE__";
   var V18REVIEW_TOKEN = "__MTS_V18_01_PROMOTION_GATE_REVIEW__";
-  var V18_REVIEW_GATE = {
+  var V18_REVIEW_GATE_FALLBACK = {
     candidateId: "observed-state-response-v18.01-promotion-gate",
     verdict: "v18 candidate ready for review",
     nominalHighGainPct: 68.07867961334428,
@@ -26,6 +26,11 @@
     activeProtectedWorseCount: 0,
     nominalDiffVsV1797Count: 0
   };
+  var V18_REVIEW_GATE = (
+    window.MTS_V18_01_REVIEW_CANDIDATE &&
+    window.MTS_V18_01_REVIEW_CANDIDATE.metadata &&
+    window.MTS_V18_01_REVIEW_CANDIDATE.metadata.reviewGate
+  ) || V18_REVIEW_GATE_FALLBACK;
   var V17STATE_LEGACY_TOKENS = {
     "__MTS_V17_96_REMAINING_STRESS_STATE_RESPONSE__": true,
     "__MTS_V17_95_STRESS_POLISH_STATE_RESPONSE__": true,
@@ -1880,9 +1885,14 @@
     return CONST.gamma0 * leff * (1 - Math.exp(-Math.pow(point.r / leff, q)));
   }
 
-  function v17ExactCacheEntry(curve) {
+  function v17ExactCacheEntry(curve, compiled) {
+    if (!curve || !curve.name) return null;
+    if (compiled && compiled.reviewGate) {
+      var v18 = window.MTS_V18_01_REVIEW_CANDIDATE;
+      if (v18 && v18.curves && v18.curves[curve.name]) return v18.curves[curve.name];
+    }
     var cache = window.MTS_V17_97_SUPPORT_CACHE || window.MTS_V17_96_SUPPORT_CACHE || window.MTS_V17_95_SUPPORT_CACHE || window.MTS_V17_94_SUPPORT_CACHE || window.MTS_V17_93_SUPPORT_CACHE || window.MTS_V17_92_SUPPORT_CACHE || window.MTS_V17_91_SUPPORT_CACHE || window.MTS_V17_90_SUPPORT_CACHE || window.MTS_V17_89_SUPPORT_CACHE || window.MTS_V17_88_SUPPORT_CACHE || window.MTS_V17_87_SUPPORT_CACHE || window.MTS_V17_86_SUPPORT_CACHE || window.MTS_V17_85_SUPPORT_CACHE;
-    if (!cache || !cache.curves || !curve || !curve.name) return null;
+    if (!cache || !cache.curves) return null;
     return cache.curves[curve.name] || null;
   }
 
@@ -2043,7 +2053,7 @@
     var invalid = 0;
     var exactCacheHits = 0;
     var exactCacheFallbacks = 0;
-    var exactCacheEntry = compiled && compiled.kind === "v17state-exact-cache" ? v17ExactCacheEntry(curve) : null;
+    var exactCacheEntry = compiled && compiled.kind === "v17state-exact-cache" ? v17ExactCacheEntry(curve, compiled) : null;
     var scoredPoints = [];
     var customPoints = [];
     var bands = {
@@ -3942,17 +3952,20 @@
   function updateV18ReviewPanel() {
     if (!$("v18ReviewStatus")) return;
     var active = isV18ReviewActive();
+    var artifact = window.MTS_V18_01_REVIEW_CANDIDATE || null;
+    var gate = (artifact && artifact.metadata && artifact.metadata.reviewGate) || V18_REVIEW_GATE;
+    var artifactCount = artifact && artifact.metadata ? artifact.metadata.curveCount : 0;
     $("v18ReviewStatus").textContent = active ? "active" : "ready";
-    $("v18ReviewHighGain").textContent = fmt(V18_REVIEW_GATE.nominalHighGainPct, 2) + "%";
-    $("v18ReviewHoldout").textContent = fmt(V18_REVIEW_GATE.holdoutHighGainPct, 2) + "%";
-    $("v18ReviewStress").textContent = String(V18_REVIEW_GATE.stressAbove20);
-    $("v18ReviewNullMargin").textContent = fmt(V18_REVIEW_GATE.nullMarginKmS, 2);
-    $("v18ReviewProtected").textContent = String(V18_REVIEW_GATE.activeProtectedWorseCount);
-    $("v18ReviewDiff").textContent = String(V18_REVIEW_GATE.nominalDiffVsV1797Count);
+    $("v18ReviewHighGain").textContent = fmt(gate.nominalHighGainPct, 2) + "%";
+    $("v18ReviewHoldout").textContent = fmt(gate.holdoutHighGainPct, 2) + "%";
+    $("v18ReviewStress").textContent = String(gate.stressAbove20);
+    $("v18ReviewNullMargin").textContent = fmt(gate.nullMarginKmS, 2);
+    $("v18ReviewProtected").textContent = String(gate.activeProtectedWorseCount);
+    $("v18ReviewDiff").textContent = String(gate.nominalDiffVsV1797Count);
     if ($("v18ReviewNote")) {
       $("v18ReviewNote").textContent = active
-        ? "Active preset uses the exact tested nominal support cache. The v18 review gate adds the baryon-confidence stress guard: no stress cases remain above 20 km/s, active protected worsens stay at 0, and the hardening margin over the best null is 26.11 km/s."
-        : "Select MTS v18.01 review candidate in the Test Rig to inspect the review candidate. Nominal curves remain the v17.97 exact cache; the v18 addition is the stress/quality guard validated by the promotion gate.";
+        ? "Active preset uses the generated v18.01 artifact with " + artifactCount + " cached curves. The v18 review gate adds the baryon-confidence stress guard: no stress cases remain above 20 km/s, active protected worsens stay at 0, and the hardening margin over the best null is " + fmt(gate.nullMarginKmS, 2) + " km/s."
+        : "Select MTS v18.01 review candidate in the Test Rig to inspect the generated artifact. Nominal curves remain the v17.97 exact cache; the v18 addition is the stress/quality guard validated by the promotion gate.";
     }
   }
 

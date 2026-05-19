@@ -154,6 +154,8 @@ DEFAULT_OBSERVED_STATE_FINAL_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-state
 DEFAULT_OBSERVED_STATE_BARYON_GUARD_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-baryon-guard-v18-00"
 DEFAULT_OBSERVED_STATE_BARYON_GUARD_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-baryon-guard-harden-v18-01"
 DEFAULT_OBSERVED_STATE_PROMOTION_GATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-state-promotion-gate-v18-02"
+DEFAULT_OBSERVED_STATE_V18_RELEASE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-candidate-v1"
+V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -53775,6 +53777,284 @@ def cmd_observedstatepromotiongate(args: argparse.Namespace) -> None:
     print(f"Wrote observed state promotion gate to {out_dir.resolve()}")
 
 
+def read_window_json_assignment(path: Path, variable_name: str) -> dict:
+    text = path.read_text(encoding="utf-8")
+    prefix = f"window.{variable_name} = "
+    if not text.startswith(prefix):
+        raise ValueError(f"{path} does not start with {prefix!r}")
+    payload = text[len(prefix):].strip()
+    if payload.endswith(";"):
+        payload = payload[:-1]
+    return json.loads(payload)
+
+
+def write_window_json_assignment(path: Path, variable_name: str, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = json.dumps(json_clean(payload), sort_keys=True, separators=(",", ":"))
+    path.write_text(f"window.{variable_name} = {body};\n", encoding="utf-8")
+
+
+def observed_state_supports_from_score(curve: dict, score: dict) -> list[float]:
+    q_value = parse_float(score.get("observedStateQ", score.get("q", Q_DEFAULT)), Q_DEFAULT)
+    if "threeZoneInnerAmp" in score:
+        inner_amp = parse_float(score.get("threeZoneInnerAmp"), 1.0)
+        mid_amp = parse_float(score.get("threeZoneMidAmp"), inner_amp)
+        outer_amp = parse_float(score.get("threeZoneOuterAmp"), mid_amp)
+
+        def zone_amp(point: dict) -> float:
+            if point["x"] < 0.33:
+                return inner_amp
+            if point["x"] < 0.66:
+                return mid_amp
+            return outer_amp
+
+        return [
+            GAMMA0 * curve["leff"] * (1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * zone_amp(point)
+            for point in curve["points"]
+        ]
+    amp = parse_float(score.get("observedStateAmp", score.get("amp", 1.0)), 1.0)
+    return [
+        GAMMA0 * curve["leff"] * (1.0 - math.exp(-((point["r"] / curve["leff"]) ** q_value))) * amp
+        for point in curve["points"]
+    ]
+
+
+def write_observed_state_v18_release_candidate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    curves = context["curves"]
+    weak_names = context["weakNames"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    soft_scale = 0.08
+    full_threshold = 1.0 / 12.0
+    prefix = "mts_observed_v18_release"
+
+    promotion_dir = out_dir / "promotion_gate_detail"
+    promotion_capsule = write_observed_state_promotion_gate_artifacts(promotion_dir)
+    promotion_summary = promotion_capsule["summary"]
+
+    v17_cache_path = ROOT / "data" / "v17-97-support-cache.js"
+    v17_cache = read_window_json_assignment(v17_cache_path, "MTS_V17_97_SUPPORT_CACHE")
+    v17_curve_cache = v17_cache.get("curves", {})
+    artifact_curves: dict[str, dict] = {}
+    parity_rows: list[dict] = []
+    case_rows: list[dict] = []
+
+    for curve in curves:
+        name = curve["name"]
+        set_name = "weak/systematics" if name in weak_names else ("clean-high-rmse" if name in high_names else "clean-protected")
+        baseline = score_curve(curve)
+        python_score = observed_state_score_curve_v1800_baryon_guard(curve, curve, fit, amp_cap, soft_scale, full_threshold)
+        cached = dict(v17_curve_cache.get(name, {}))
+        cached_support = cached.get("support2", [])
+        support_source = "v17.97 exact nominal cache"
+        if not isinstance(cached_support, list) or len(cached_support) != len(curve["points"]):
+            cached_support = observed_state_supports_from_score(curve, python_score)
+            support_source = "python v18 nominal fallback"
+        supports = [float(value) for value in cached_support]
+        artifact_score = observed_state_score_curve_from_supports(curve, supports)
+        rmse_diff = artifact_score["rmse"] - python_score["rmse"]
+        route_match = artifact_score["candidateRoute"] == python_score["candidateRoute"]
+        parity_claimed = name not in weak_names
+        parity_pass = (not parity_claimed) or (abs(rmse_diff) <= 1e-8 and route_match)
+        branch = python_score.get("observedStateBranch", "")
+        family = python_score.get("observedStateFamily", "")
+        baryon_confidence = python_score.get("baryonConfidence", "")
+        artifact_entry = dict(cached)
+        artifact_entry.update(
+            {
+                "candidateId": "observed-state-response-v18.01-review-candidate",
+                "supportSource": support_source,
+                "support2": supports,
+                "set": set_name,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "observedRoute": curve.get("route", ""),
+                "baselineRmse": baseline["rmse"],
+                "v18Rmse": artifact_score["rmse"],
+                "v18PythonRmse": python_score["rmse"],
+                "v18RmseDiffVsPython": rmse_diff,
+                "v18Branch": branch,
+                "v18Family": family,
+                "v18ResponseSource": python_score.get("observedStateResponseSource", ""),
+                "v18CandidateRoute": python_score["candidateRoute"],
+                "v18ArtifactRoute": artifact_score["candidateRoute"],
+                "baryonConfidence": baryon_confidence,
+                "reviewGate": "weak/systematics excluded" if name in weak_names else "clean framework-facing",
+                "browserParityPass": parity_pass,
+            }
+        )
+        artifact_curves[name] = artifact_entry
+        parity_rows.append(
+            {
+                "galaxy": name,
+                "set": set_name,
+                "supportSource": support_source,
+                "baselineRmse": baseline["rmse"],
+                "pythonV18Rmse": python_score["rmse"],
+                "artifactRmse": artifact_score["rmse"],
+                "artifactMinusPythonRmse": rmse_diff,
+                "pythonRoute": python_score["candidateRoute"],
+                "artifactRoute": artifact_score["candidateRoute"],
+                "routeMatch": route_match,
+                "branch": branch,
+                "baryonConfidence": baryon_confidence,
+                "parityClaimed": parity_claimed,
+                "parityPass": parity_pass,
+            }
+        )
+        case_rows.append(
+            {
+                "galaxy": name,
+                "set": set_name,
+                "baselineRmse": baseline["rmse"],
+                "candidateRmse": artifact_score["rmse"],
+                "gainKmS": baseline["rmse"] - artifact_score["rmse"],
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "candidateRoute": artifact_score["candidateRoute"],
+                "branch": branch,
+                "family": family,
+                "responseSource": python_score.get("observedStateResponseSource", ""),
+                "baryonConfidence": baryon_confidence,
+                "weakSystematicsExcluded": name in weak_names,
+                "stillAbove20": artifact_score["rmse"] >= 20.0 if name in high_names else "",
+            }
+        )
+
+    clean_rows = [row for row in case_rows if row["set"] != "weak/systematics"]
+    high_rows = [row for row in case_rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [row for row in case_rows if row["set"] == "clean-protected"]
+    clean_parity_rows = [row for row in parity_rows if row["parityClaimed"]]
+    protected_regressions = [row["candidateRmse"] - row["baselineRmse"] for row in protected_rows]
+    clean_parity_mismatch_count = sum(1 for row in clean_parity_rows if not row["parityPass"])
+    max_clean_rmse_diff = max([abs(parse_float(row["artifactMinusPythonRmse"], 0.0)) for row in clean_parity_rows] or [0.0])
+
+    artifact_payload = {
+        "metadata": {
+            "candidateId": "observed-state-response-v18.01-review-candidate",
+            "source": "scripts/mts-failure-lab.py observedstatev18releasecandidate",
+            "supportCacheBasis": "v17.97 exact nominal cache; v18.01 adds baryon-confidence stress/quality guard metadata",
+            "curveCount": len(artifact_curves),
+            "cleanCurveCount": len(clean_rows),
+            "weakSystematicsExcludedCount": len(weak_names),
+            "reviewGate": {
+                "verdict": promotion_summary["verdict"],
+                "nominalHighGainPct": parse_float(promotion_summary["nominalHighGainPct"]),
+                "nominalCleanGainPct": parse_float(promotion_summary["nominalCleanGainPct"]),
+                "holdoutHighGainPct": parse_float(promotion_summary["medianHoldoutHighGainPct"]),
+                "stressAbove20": int(parse_float(promotion_summary["maxStressHighAbove20"], 0.0)),
+                "stressMinHighGainPct": parse_float(promotion_summary["minStressHighGainPct"]),
+                "nullMarginKmS": parse_float(promotion_summary["hardeningActiveTotalGainMarginKmS"]),
+                "activeProtectedWorseCount": int(parse_float(promotion_summary["hardeningActiveProtectedWorseCount"], 0.0)),
+                "nominalDiffVsV1797Count": int(parse_float(promotion_summary["nominalDiffVsV1797Count"], 0.0)),
+            },
+            "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics training"],
+        },
+        "curves": artifact_curves,
+    }
+    out_artifact = out_dir / "mts_observed_v18_release_browser_artifact.js"
+    write_window_json_assignment(out_artifact, "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+    write_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+
+    clean_high_gain = pct_improvement(safe_mean(row["baselineRmse"] for row in high_rows), safe_mean(row["candidateRmse"] for row in high_rows))
+    clean_gain = pct_improvement(safe_mean(row["baselineRmse"] for row in clean_rows), safe_mean(row["candidateRmse"] for row in clean_rows))
+    clean_high_above20 = sum(1 for row in high_rows if row["candidateRmse"] >= 20.0)
+    release_ready = (
+        promotion_summary["verdict"] == "v18 candidate ready for review"
+        and clean_parity_mismatch_count == 0
+        and clean_high_above20 == 0
+        and max(protected_regressions or [0.0]) <= 4.0
+    )
+    verdict = "v18 browser release candidate ready" if release_ready else "v18 browser release candidate blocked"
+    summary = {
+        "candidateId": "observed-state-response-v18.01-review-candidate",
+        "verdict": verdict,
+        "artifactPath": str(V18_BROWSER_ARTIFACT_PATH),
+        "artifactCurveCount": len(artifact_curves),
+        "cleanCurveCount": len(clean_rows),
+        "weakSystematicsExcludedCount": len(weak_names),
+        "cleanHighGainPct": clean_high_gain,
+        "cleanGainPct": clean_gain,
+        "cleanHighAbove20": clean_high_above20,
+        "maxProtectedRegressionKmS": max(protected_regressions or [0.0]),
+        "cleanParityMismatchCount": clean_parity_mismatch_count,
+        "maxCleanArtifactMinusPythonRmseAbs": max_clean_rmse_diff,
+        "promotionGateVerdict": promotion_summary["verdict"],
+        "promotionGateNullMarginKmS": promotion_summary["hardeningActiveTotalGainMarginKmS"],
+    }
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_browser_parity.csv", parity_rows)
+
+    report = [
+        "# MTS v18.01 Browser Release Candidate",
+        "",
+        "This mode turns the passed v18.01 promotion gate into a browser-loadable candidate artifact. The nominal support arrays intentionally reuse the exact v17.97 cache because the v18.01 change is the baryon-confidence stress/quality guard, not a nominal-curve change.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Artifact path: `{V18_BROWSER_ARTIFACT_PATH}`.",
+        f"- Artifact curves: `{len(artifact_curves)}`.",
+        f"- Clean high-RMSE gain: `{fmt(clean_high_gain)}%`.",
+        f"- Clean-set gain: `{fmt(clean_gain)}%`.",
+        f"- Clean high-RMSE cases above 20 km/s: `{clean_high_above20}`.",
+        f"- Max protected regression: `{fmt(summary['maxProtectedRegressionKmS'])}` km/s.",
+        f"- Clean Python/artifact parity mismatches: `{clean_parity_mismatch_count}`.",
+        f"- Max clean artifact-Python RMSE difference: `{fmt(max_clean_rmse_diff, 9)}` km/s.",
+        f"- Promotion-gate verdict: `{promotion_summary['verdict']}`.",
+        f"- Promotion-gate active total gain margin over best null: `{promotion_summary['hardeningActiveTotalGainMarginKmS']}` km/s.",
+        "",
+        "## Browser Semantics",
+        "",
+        "- `MTS v18.01 review candidate` now reads `data/v18-01-review-candidate.js`.",
+        "- The visible curve is the exact tested nominal support cache.",
+        "- The review panel carries the v18.01 stress/quality guard result: stress above-20 count 0, active protected worsens 0, and the null margin from the hardening gate.",
+        "- Weak/systematics galaxies are carried for display only and remain excluded from framework-facing claims.",
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-observed-v18-release-candidate-v1",
+        "verdict": verdict,
+        "summary": summary,
+        "artifactPath": str(V18_BROWSER_ARTIFACT_PATH),
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_browser_parity.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+            "mts_observed_v18_release_browser_artifact.js",
+            "promotion_gate_detail/",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatev18releasecandidate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_RELEASE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_release_candidate_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.01 browser release candidate")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['cleanHighGainPct'])}%",
+                f"clean={fmt(summary['cleanGainPct'])}%",
+                f"above20={summary['cleanHighAbove20']}",
+                f"protected={fmt(summary['maxProtectedRegressionKmS'])}",
+                f"parity_mismatch={summary['cleanParityMismatchCount']}",
+                f"artifact={summary['artifactPath']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 release candidate to {out_dir.resolve()}")
+
+
 OBSERVED_STATE_SOFT_NEIGHBOR_SEEDS = list(range(SPLIT_SEED + 1000, SPLIT_SEED + 1011))
 OBSERVED_STATE_SOFT_SCALE_GRID = [0.03, 0.05, 0.08, 0.10]
 OBSERVED_STATE_SOFT_FULL_THRESHOLD_GRID = [1.0 / 12.0, 0.12, 0.16, 0.20, 0.30, 0.40]
@@ -64308,6 +64588,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatebaryonguard",
             "observedstatebaryonguardharden",
             "observedstatepromotiongate",
+            "observedstatev18releasecandidate",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -64531,6 +64812,8 @@ def main() -> None:
         cmd_observedstatebaryonguardharden(args)
     elif args.mode == "observedstatepromotiongate":
         cmd_observedstatepromotiongate(args)
+    elif args.mode == "observedstatev18releasecandidate":
+        cmd_observedstatev18releasecandidate(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
