@@ -172,6 +172,7 @@ DEFAULT_OBSERVED_STATE_V18_SURFACE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed
 DEFAULT_OBSERVED_STATE_V18_SURFACE_SMOOTH_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-surface-smooth-v1"
 DEFAULT_OBSERVED_STATE_V18_PROMOTION_GATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-promotion-gate-v1"
 DEFAULT_OBSERVED_STATE_V18_NATIVE_PARITY_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-native-parity-v1"
+DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-lock-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -59330,6 +59331,398 @@ def cmd_observedstatev18promotiongate(args: argparse.Namespace) -> None:
     print(f"Wrote v18 promotion gate to {out_dir.resolve()}")
 
 
+def write_observed_state_v18_release_lock_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_observed_v18_release_lock"
+
+    context = observed_state_candidate_context()
+    curves = context["curves"]
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    weak_names = context["weakNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+
+    family_dir = DEFAULT_OBSERVED_STATE_V18_FAMILY_SURFACE_OUT
+    family_scores_path = family_dir / "mts_observed_v18_family_surface_scores.csv"
+    if not family_scores_path.exists():
+        write_observed_state_v18_family_surface_artifacts(family_dir)
+
+    release_dir = DEFAULT_OBSERVED_STATE_V18_RELEASE_STRESS_OUT
+    release_scores_path = release_dir / "mts_observed_v18_release_stress_scores.csv"
+    if not release_scores_path.exists():
+        write_observed_state_v18_release_stress_artifacts(release_dir)
+
+    smooth_dir = DEFAULT_OBSERVED_STATE_V18_SURFACE_SMOOTH_OUT
+    smooth_scores_path = smooth_dir / "mts_observed_v18_surface_smooth_scores.csv"
+    if not smooth_scores_path.exists():
+        write_observed_state_v18_surface_smooth_artifacts(smooth_dir)
+
+    promotion_dir = DEFAULT_OBSERVED_STATE_V18_PROMOTION_GATE_OUT
+    promotion_scores_path = promotion_dir / "mts_observed_v18_promotion_gate_scores.csv"
+    if not promotion_scores_path.exists():
+        write_observed_state_v18_promotion_gate_artifacts(promotion_dir)
+
+    # Regenerate this one because it is the implementation lock that can drift
+    # when the browser expression is tightened.
+    native_capsule = write_observed_state_v18_native_parity_artifacts(DEFAULT_OBSERVED_STATE_V18_NATIVE_PARITY_OUT)
+    native_summary = native_capsule["summary"]
+
+    family_summary = read_csv_rows(family_scores_path)[0]
+    release_summary = read_csv_rows(release_scores_path)[0]
+    smooth_summary = read_csv_rows(smooth_scores_path)[0]
+    promotion_summary = read_csv_rows(promotion_scores_path)[0]
+
+    artifact_payload = read_window_json_assignment(
+        V18_SURFACE_SMOOTH_ARTIFACT_PATH,
+        "MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE",
+    )
+    artifact_curves = artifact_payload.get("curves", {}) if isinstance(artifact_payload, dict) else {}
+    metadata = artifact_payload.get("metadata", {}) if isinstance(artifact_payload, dict) else {}
+
+    all_baseline_mean = safe_mean(score_curve(curve)["rmse"] for curve in curves)
+    clean_baseline_scores = {curve["name"]: score_curve(curve) for curve in clean_curves}
+    case_rows: list[dict] = []
+    paired: list[tuple[dict, dict, dict]] = []
+    cache_mismatch_rows: list[dict] = []
+
+    for curve in clean_curves:
+        name = curve["name"]
+        baseline = clean_baseline_scores[name]
+        cache_entry = artifact_curves.get(name, {})
+        support = cache_entry.get("support2", []) if isinstance(cache_entry, dict) else []
+        support_valid = isinstance(support, list) and len(support) == len(curve["points"])
+        if support_valid:
+            candidate = observed_state_score_curve_from_supports(curve, [float(value) for value in support])
+        else:
+            candidate = observed_state_v1807_family_surface_score_curve(curve, fit, amp_cap)
+            cache_mismatch_rows.append(
+                {
+                    "galaxy": name,
+                    "issue": "missing-or-wrong-length-cache-support",
+                    "expectedPointCount": len(curve["points"]),
+                    "actualPointCount": len(support) if isinstance(support, list) else "",
+                }
+            )
+        paired.append((curve, baseline, candidate))
+        set_name = "clean-high-rmse" if name in high_names else "clean-protected"
+        protected_regression = max(0.0, candidate["rmse"] - baseline["rmse"]) if name not in high_names else 0.0
+        branch = cache_entry.get("v18Branch", cache_entry.get("branch", "")) if isinstance(cache_entry, dict) else ""
+        family = cache_entry.get("v18Family", cache_entry.get("family", "")) if isinstance(cache_entry, dict) else ""
+        case_rows.append(
+            {
+                "galaxy": name,
+                "set": set_name,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "baselineRoute": baseline.get("candidateRoute", ""),
+                "candidateRoute": candidate.get("candidateRoute", ""),
+                "routeTransition": "" if candidate.get("candidateRoute", "") == baseline.get("candidateRoute", "") else f"{baseline.get('candidateRoute', '')} -> {candidate.get('candidateRoute', '')}",
+                "baselineRmse": baseline["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "gainKmS": baseline["rmse"] - candidate["rmse"],
+                "gainPct": pct_improvement(baseline["rmse"], candidate["rmse"]),
+                "stillAbove20": candidate["rmse"] >= 20.0 if name in high_names else "",
+                "protectedRegressionKmS": protected_regression,
+                "responseFamily": family,
+                "diagnosticBranch": branch,
+                "supportCacheValid": support_valid,
+                "browserCacheParityPass": cache_entry.get("browserParityPass", "") if isinstance(cache_entry, dict) else "",
+                "supportSource": cache_entry.get("supportSource", "v18.09 exact support cache") if isinstance(cache_entry, dict) else "",
+                "nativeFormulaUsed": False,
+            }
+        )
+
+    candidate_summary = observed_state_v1803_track_summary(paired, high_names)
+    high_rows = [row for row in case_rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [row for row in case_rows if row["set"] == "clean-protected"]
+    clean_candidate_mean = safe_mean(row["candidateRmse"] for row in case_rows)
+    clean_baseline_mean = safe_mean(row["baselineRmse"] for row in case_rows)
+    high_baseline_mean = safe_mean(row["baselineRmse"] for row in high_rows)
+    high_candidate_mean = safe_mean(row["candidateRmse"] for row in high_rows)
+    max_protected_regression = max([parse_float(row["protectedRegressionKmS"], 0.0) for row in protected_rows] or [0.0])
+    protected_regression_count = sum(1 for row in protected_rows if parse_float(row["protectedRegressionKmS"], 0.0) > 1e-9)
+    high_above20 = sum(1 for row in high_rows if row["stillAbove20"])
+    weak_leakage = sum(1 for curve in clean_curves if curve["name"] in weak_names)
+
+    native_can_replace = bool(native_summary.get("nativeFormulaCanReplaceCache"))
+    if isinstance(native_summary.get("nativeFormulaCanReplaceCache"), str):
+        native_can_replace = native_summary.get("nativeFormulaCanReplaceCache", "").lower() == "true"
+    browser_cache_current = bool(native_summary.get("browserCacheIsCurrent"))
+    if isinstance(native_summary.get("browserCacheIsCurrent"), str):
+        browser_cache_current = native_summary.get("browserCacheIsCurrent", "").lower() == "true"
+    native_mismatch_count = int(parse_float(native_summary.get("nativeFormulaParityMismatchCount"), 0.0))
+    browser_cache_mismatch_count = int(parse_float(native_summary.get("browserCacheParityMismatchCount"), 0.0)) + len(cache_mismatch_rows)
+
+    null_rows = [
+        {
+            "nullTrack": "same-route same-family active-count random target",
+            "source": str(family_scores_path),
+            "actualHighGainPct": parse_float(family_summary.get("nominalHighGainPct")),
+            "medianNullGainPct": parse_float(family_summary.get("nominalHighGainPct")) - parse_float(family_summary.get("medianFamilySurfaceNullMarginPct")),
+            "marginPct": parse_float(family_summary.get("medianFamilySurfaceNullMarginPct")),
+            "pass": parse_float(family_summary.get("medianFamilySurfaceNullMarginPct")) >= 10.0,
+        },
+        {
+            "nullTrack": "release branch-label shuffle",
+            "source": str(release_scores_path),
+            "actualHighGainPct": parse_float(release_summary.get("nominalHighGainPct")),
+            "medianNullGainPct": parse_float(release_summary.get("medianBranchShuffleNullHighGainPct")),
+            "marginPct": parse_float(release_summary.get("medianBranchShuffleNullMarginPct")),
+            "pass": parse_float(release_summary.get("medianBranchShuffleNullMarginPct")) >= 10.0,
+        },
+        {
+            "nullTrack": "state-respecting edge null",
+            "source": str(release_scores_path),
+            "actualHighGainPct": "",
+            "medianNullGainPct": "",
+            "marginPct": parse_float(release_summary.get("medianEdgeNullMarginPct")),
+            "pass": parse_float(release_summary.get("medianEdgeNullMarginPct")) >= 10.0,
+        },
+    ]
+
+    guardrail_rows = [
+        {
+            "guardrail": "all-galaxy locked-MTS mean RMSE remains 21.90",
+            "observed": round(all_baseline_mean, 2),
+            "pass": abs(round(all_baseline_mean, 2) - 21.90) <= 0.01,
+            "source": "build_curves + canonical score_curve",
+        },
+        {
+            "guardrail": "v18.09 high-RMSE gain remains at least 68%",
+            "observed": candidate_summary["highGainPct"],
+            "pass": candidate_summary["highGainPct"] >= 68.0,
+            "source": "v18.09 exact support cache",
+        },
+        {
+            "guardrail": "v18.09 clean-set gain remains at least 43%",
+            "observed": candidate_summary["cleanGainPct"],
+            "pass": candidate_summary["cleanGainPct"] >= 43.0,
+            "source": "v18.09 exact support cache",
+        },
+        {
+            "guardrail": "clean high-RMSE cases above 20 after v18.09 equals 0",
+            "observed": high_above20,
+            "pass": high_above20 == 0,
+            "source": "v18.09 exact support cache",
+        },
+        {
+            "guardrail": "protected regression remains 0.00 km/s",
+            "observed": max_protected_regression,
+            "pass": max_protected_regression <= 1e-9 and protected_regression_count == 0,
+            "source": "v18.09 exact support cache",
+        },
+        {
+            "guardrail": "weak/systematics leakage equals 0",
+            "observed": weak_leakage,
+            "pass": weak_leakage == 0,
+            "source": "observed_state_weak_names exclusion",
+        },
+        {
+            "guardrail": "browser support cache parity mismatch equals 0",
+            "observed": browser_cache_mismatch_count,
+            "pass": browser_cache_mismatch_count == 0 and browser_cache_current,
+            "source": str(DEFAULT_OBSERVED_STATE_V18_NATIVE_PARITY_OUT / "mts_observed_v18_native_parity_scores.csv"),
+        },
+        {
+            "guardrail": "native formula replacement blocked until native mismatch equals 0",
+            "observed": native_mismatch_count,
+            "pass": (native_mismatch_count == 0 and native_can_replace) or (native_mismatch_count > 0 and not native_can_replace),
+            "source": str(DEFAULT_OBSERVED_STATE_V18_NATIVE_PARITY_OUT / "mts_observed_v18_native_parity_scores.csv"),
+        },
+        {
+            "guardrail": "family/null margin at least 10 points",
+            "observed": parse_float(family_summary.get("medianFamilySurfaceNullMarginPct")),
+            "pass": parse_float(family_summary.get("medianFamilySurfaceNullMarginPct")) >= 10.0,
+            "source": str(family_scores_path),
+        },
+        {
+            "guardrail": "branch/null margin at least 10 points",
+            "observed": parse_float(release_summary.get("medianBranchShuffleNullMarginPct")),
+            "pass": parse_float(release_summary.get("medianBranchShuffleNullMarginPct")) >= 10.0,
+            "source": str(release_scores_path),
+        },
+    ]
+    guardrails_pass = all(bool(row["pass"]) for row in guardrail_rows)
+    verdict = (
+        "v18.09 release lock passed with exact cache"
+        if guardrails_pass
+        else "v18.09 release lock blocked"
+    )
+
+    summary = {
+        "candidateId": "observed-state-response-v18.09-release-lock",
+        "lockedCandidate": "observed-state-response-v18.09-surface-persistence",
+        "verdict": verdict,
+        "lawChanged": False,
+        "canonicalMtsChanged": False,
+        "allGalaxyLockedMtsMeanRmse": all_baseline_mean,
+        "cleanSetLockedMtsMeanRmse": clean_baseline_mean,
+        "cleanSetV1809MeanRmse": clean_candidate_mean,
+        "cleanHighLockedMtsMeanRmse": high_baseline_mean,
+        "cleanHighV1809MeanRmse": high_candidate_mean,
+        "cleanHighGainPct": candidate_summary["highGainPct"],
+        "cleanGainPct": candidate_summary["cleanGainPct"],
+        "cleanHighAbove20AfterCandidate": high_above20,
+        "protectedRegressionCount": protected_regression_count,
+        "maxProtectedRegressionKmS": max_protected_regression,
+        "weakSystematicsExcludedCount": len(weak_names),
+        "weakSystematicsLeakage": weak_leakage,
+        "browserCacheParityMismatchCount": browser_cache_mismatch_count,
+        "nativeFormulaParityMismatchCount": native_mismatch_count,
+        "nativeFormulaCanReplaceCache": native_can_replace,
+        "exactSupportCacheRemainsSourceOfTruth": not native_can_replace,
+        "familySurfaceNullMarginPct": parse_float(family_summary.get("medianFamilySurfaceNullMarginPct")),
+        "releaseBranchShuffleNullMarginPct": parse_float(release_summary.get("medianBranchShuffleNullMarginPct")),
+        "edgeNullMarginPct": parse_float(release_summary.get("medianEdgeNullMarginPct")),
+        "surfaceStressMaxAbove20": int(parse_float(smooth_summary.get("maxStressHighAbove20"), 0.0)),
+        "surfaceStressFragileHighCount": int(parse_float(smooth_summary.get("fragileHighGalaxyCount"), 0.0)),
+        "promotionGateVerdict": promotion_summary.get("verdict", ""),
+        "artifactCandidateId": metadata.get("candidateId", ""),
+        "artifactDisplayName": metadata.get("displayName", ""),
+        "forbiddenFormulaInputsUsed": False,
+    }
+
+    formula = {
+        "candidateId": summary["lockedCandidate"],
+        "releaseLockCandidateId": summary["candidateId"],
+        "mechanism": "frozen v18.09 surface-persistence observed-state response",
+        "lawChangedInThisMode": False,
+        "browserRuntime": "use exact support cache until nativeFormulaParityMismatchCount is zero",
+        "nativeFormulaCanReplaceCache": native_can_replace,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+        "qDefault": Q_DEFAULT,
+        "gamma0": GAMMA0,
+        "mlDisk": ML_DISK,
+        "mlBulge": ML_BULGE,
+    }
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_nulls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_guardrails.csv", guardrail_rows)
+    if cache_mismatch_rows:
+        write_csv(out_dir / f"{prefix}_cache_mismatches.csv", cache_mismatch_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    top_repairs = sorted(high_rows, key=lambda row: parse_float(row["gainKmS"], 0.0), reverse=True)[:16]
+    worst_protected = sorted(protected_rows, key=lambda row: parse_float(row["protectedRegressionKmS"], 0.0), reverse=True)[:10]
+    report = [
+        "# MTS v18.09 Release Lock",
+        "",
+        "This mode does not change the law. It locks the tested v18.09 surface-persistence candidate, checks the exact browser support cache, and blocks native-formula replacement unless parity is exact.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Law changed in this mode: `False`.",
+        f"- All-galaxy locked-MTS mean RMSE: `{fmt(summary['allGalaxyLockedMtsMeanRmse'])}`.",
+        f"- Clean locked-MTS mean RMSE: `{fmt(summary['cleanSetLockedMtsMeanRmse'])}`.",
+        f"- Clean v18.09 mean RMSE: `{fmt(summary['cleanSetV1809MeanRmse'])}`.",
+        f"- High-RMSE gain: `{fmt(summary['cleanHighGainPct'])}%`.",
+        f"- Clean-set gain: `{fmt(summary['cleanGainPct'])}%`.",
+        f"- Clean high-RMSE cases above 20 after v18.09: `{summary['cleanHighAbove20AfterCandidate']}`.",
+        f"- Protected regressions: `{summary['protectedRegressionCount']}`; max `{fmt(summary['maxProtectedRegressionKmS'])}` km/s.",
+        f"- Weak/systematics leakage: `{summary['weakSystematicsLeakage']}`.",
+        f"- Family null margin: `{fmt(summary['familySurfaceNullMarginPct'])}` points.",
+        f"- Branch-shuffle null margin: `{fmt(summary['releaseBranchShuffleNullMarginPct'])}` points.",
+        f"- Edge null margin: `{fmt(summary['edgeNullMarginPct'])}` points.",
+        f"- Browser cache mismatches: `{summary['browserCacheParityMismatchCount']}`.",
+        f"- Native formula mismatches: `{summary['nativeFormulaParityMismatchCount']}`.",
+        f"- Exact cache remains browser source of truth: `{summary['exactSupportCacheRemainsSourceOfTruth']}`.",
+        "",
+        "## Largest High-RMSE Repairs",
+        "",
+        "| Galaxy | Canonical | v18.09 | Gain | Family | Branch |",
+        "| --- | ---: | ---: | ---: | --- | --- |",
+    ]
+    for row in top_repairs:
+        report.append(
+            f"| {row['galaxy']} | {fmt(row['baselineRmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['gainKmS'])} | {row['responseFamily']} | {row['diagnosticBranch']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Protected Regressions",
+            "",
+        ]
+    )
+    if any(parse_float(row["protectedRegressionKmS"], 0.0) > 1e-9 for row in worst_protected):
+        for row in worst_protected:
+            if parse_float(row["protectedRegressionKmS"], 0.0) > 1e-9:
+                report.append(f"- `{row['galaxy']}`: `{fmt(row['protectedRegressionKmS'])}` km/s.")
+    else:
+        report.append("- None.")
+    report.extend(
+        [
+            "",
+            "## Guardrails",
+            "",
+            "| Guardrail | Observed | Pass |",
+            "| --- | ---: | --- |",
+        ]
+    )
+    for row in guardrail_rows:
+        report.append(f"| {row['guardrail']} | {row['observed']} | {row['pass']} |")
+    report.extend(
+        [
+            "",
+            "## Browser Lock",
+            "",
+            "The browser must keep using `data/v18-09-surface-persistence-candidate.js` as the exact tested support cache until the native formula mismatch count is zero. Current native mismatch count is not zero, so no native replacement is allowed.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-v18-release-lock-v1",
+        "candidateId": summary["candidateId"],
+        "lockedCandidate": summary["lockedCandidate"],
+        "verdict": verdict,
+        "summary": summary,
+        "guardrails": guardrail_rows,
+        "nulls": null_rows,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_nulls.csv",
+            f"{prefix}_guardrails.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    if cache_mismatch_rows:
+        capsule["outputFiles"].append(f"{prefix}_cache_mismatches.csv")
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatev18releaselock(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_release_lock_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.09 release lock")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"baseline={fmt(summary['allGalaxyLockedMtsMeanRmse'])}",
+                f"clean={fmt(summary['cleanSetLockedMtsMeanRmse'])}",
+                f"high_gain={fmt(summary['cleanHighGainPct'])}%",
+                f"clean_gain={fmt(summary['cleanGainPct'])}%",
+                f"above20={summary['cleanHighAbove20AfterCandidate']}",
+                f"protected={fmt(summary['maxProtectedRegressionKmS'])}",
+                f"family_null={fmt(summary['familySurfaceNullMarginPct'])}",
+                f"branch_null={fmt(summary['releaseBranchShuffleNullMarginPct'])}",
+                f"cache_mismatch={summary['browserCacheParityMismatchCount']}",
+                f"native_mismatch={summary['nativeFormulaParityMismatchCount']}",
+                f"weak_leakage={summary['weakSystematicsLeakage']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 release lock to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_paper_section_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     evidence_dir = DEFAULT_OBSERVED_STATE_V18_EVIDENCE_EXPORT_OUT
@@ -70867,6 +71260,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18surfacesmooth",
             "observedstatev18promotiongate",
             "observedstatev18nativeparity",
+            "observedstatev18releaselock",
             "observedstatev18papersection",
             "observedstatev18docxbundle",
             "observedstatev18integrateddocx",
@@ -71124,6 +71518,8 @@ def main() -> None:
         cmd_observedstatev18promotiongate(args)
     elif args.mode == "observedstatev18nativeparity":
         cmd_observedstatev18nativeparity(args)
+    elif args.mode == "observedstatev18releaselock":
+        cmd_observedstatev18releaselock(args)
     elif args.mode == "observedstatev18papersection":
         cmd_observedstatev18papersection(args)
     elif args.mode == "observedstatev18docxbundle":
