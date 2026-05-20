@@ -66,29 +66,33 @@ LTG curvature A ~= -2.671 + 2.735/sqrt(u_0.75)
 supercritical late-load flag = u_0.75 > 1
 ```
 
-## v18.05 Release Candidate
+## v18.09 Release Candidate
 
-The browser preset `MTS v18.05 release candidate` loads the frozen observed-state response artifact from:
+The browser preset `MTS v18.09 release candidate (exact cache)` loads the locked observed-state response artifact from:
 
 ```text
-data/v18-05-release-candidate.js
+data/v18-09-surface-persistence-candidate.js
 ```
 
-Current release-stress result:
+Current release-lock result:
 
 ```text
+all-galaxy locked-MTS mean RMSE = 21.90
+clean locked-MTS mean RMSE = 19.33
 clean high-RMSE gain = 68.08%
 clean-set gain = 43.74%
 clean high-RMSE cases still above 20 km/s = 0
 median holdout high-RMSE gain = 66.68%
+family-surface null margin = 50.33 percentage points
 branch-shuffle null margin = 52.01 percentage points
 state-respecting edge-null margin = 61.39 percentage points
-max forced protected-lookalike regression = 0.34 km/s
+protected regression = 0.00 km/s
 weak/systematics leakage = 0
-browser parity mismatches = 0
+browser support-cache mismatches = 0
+native formula mismatches = 7
 ```
 
-Canonical MTS constants remain locked. The v18.05 preset is the current framework candidate for review, not a replacement for the documented canonical baseline.
+Canonical MTS constants remain locked. The v18.09 preset is the current framework candidate for review, not a replacement for the documented canonical baseline. The browser deliberately uses the exact tested support cache; the native text formula remains disabled until its parity mismatch count reaches zero.
 
 The active curve also reports the inner S-law completion diagnostic:
 

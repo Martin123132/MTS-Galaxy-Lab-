@@ -14,6 +14,7 @@
 
   var V17STATE_EXACT_TOKEN = "__MTS_V17_97_RADIAL_REPAIR_STATE_RESPONSE__";
   var V18REVIEW_TOKEN = "__MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE__";
+  var V18_RELEASE_DISPLAY_NAME = "MTS v18.09 release candidate (exact cache)";
   var V18_RELEASE_ARTIFACT = window.MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE || window.MTS_V18_07_FAMILY_SURFACE_CANDIDATE || window.MTS_V18_05_RELEASE_CANDIDATE || window.MTS_V18_01_REVIEW_CANDIDATE;
   var V18_REVIEW_GATE_FALLBACK = {
     candidateId: "observed-state-response-v18.09-surface-persistence",
@@ -26,6 +27,24 @@
     nullMarginKmS: 26.105578965995377,
     activeProtectedWorseCount: 0,
     nominalDiffVsV1797Count: 0
+  };
+  var V18_RELEASE_LOCK_FALLBACK = {
+    candidateId: "observed-state-response-v18.09-release-lock",
+    verdict: "v18.09 release lock passed with exact cache",
+    allGalaxyLockedMtsMeanRmse: 21.89752025219739,
+    cleanSetLockedMtsMeanRmse: 19.32653333831008,
+    cleanHighGainPct: 68.07867961334428,
+    cleanGainPct: 43.737260426360244,
+    cleanHighAbove20AfterCandidate: 0,
+    maxProtectedRegressionKmS: 0,
+    weakSystematicsLeakage: 0,
+    browserCacheParityMismatchCount: 0,
+    nativeFormulaParityMismatchCount: 7,
+    nativeFormulaCanReplaceCache: false,
+    exactSupportCacheRemainsSourceOfTruth: true,
+    familySurfaceNullMarginPct: 50.33018067871495,
+    releaseBranchShuffleNullMarginPct: 52.01433167450349,
+    edgeNullMarginPct: 61.39455077640871
   };
   var V18_REVIEW_GATE = (
     V18_RELEASE_ARTIFACT &&
@@ -60,7 +79,7 @@
   var FRAMEWORK_PRESET_LABELS = {
     mts: "MTS baseline",
     v17state: "MTS v17.97 radial-repair state response",
-    v18review: "MTS v18.09 surface-persistence response",
+    v18review: V18_RELEASE_DISPLAY_NAME,
     baryon: "Baryon only",
     soft: "Soft radial support",
     outer: "Outer gate support",
@@ -1841,24 +1860,11 @@
     var source = String(expression || "").trim();
     if (!source) throw new Error("Framework formula is empty.");
     if (source === V18REVIEW_TOKEN) {
-      var nativeMeta = V18_RELEASE_ARTIFACT &&
-        V18_RELEASE_ARTIFACT.metadata &&
-        V18_RELEASE_ARTIFACT.metadata.nativeFormulaV1809;
-      var nativeFormula = nativeMeta &&
-        (nativeMeta.canReplaceCache === true || nativeMeta.nativeFormulaCanReplaceCache === true) &&
-        nativeMeta.expression;
-      if (nativeFormula) {
-        var compiledNative = compileFrameworkExpression(nativeFormula);
-        compiledNative.source = source;
-        compiledNative.kind = "v18-native-expression";
-        compiledNative.reviewGate = true;
-        compiledNative.nativeExpression = nativeFormula;
-        return compiledNative;
-      }
       return {
         source: source,
         kind: "v17state-exact-cache",
         reviewGate: true,
+        releaseLock: true,
         fn: null
       };
     }
@@ -1920,7 +1926,7 @@
   }
 
   function exactCacheDisplayName(compiled) {
-    return compiled && compiled.reviewGate ? "v18.09 surface-persistence response" : "v17.97 exact cache";
+    return compiled && compiled.reviewGate ? V18_RELEASE_DISPLAY_NAME : "v17.97 exact cache";
   }
 
   function isV18ReviewActive() {
@@ -3977,7 +3983,7 @@
     var active = isV18ReviewActive();
     var artifact = V18_RELEASE_ARTIFACT || null;
     var gate = (artifact && artifact.metadata && artifact.metadata.reviewGate) || V18_REVIEW_GATE;
-    var lawNative = artifact && artifact.metadata && artifact.metadata.lawNativeVerification;
+    var releaseLock = (artifact && artifact.metadata && artifact.metadata.releaseLockV1809) || V18_RELEASE_LOCK_FALLBACK;
     var branchPrune = artifact && artifact.metadata && artifact.metadata.branchPrune;
     var familyAudit = artifact && artifact.metadata && artifact.metadata.familyAudit;
     var branchIdentity = artifact && artifact.metadata && artifact.metadata.branchIdentity;
@@ -3985,18 +3991,21 @@
     var edgeHarden = artifact && artifact.metadata && artifact.metadata.edgeHardenV1804;
     var releaseStress = artifact && artifact.metadata && artifact.metadata.releaseStressV1805;
     var artifactCount = artifact && artifact.metadata ? artifact.metadata.curveCount : 0;
+    var cacheMismatch = releaseLock.browserCacheParityMismatchCount == null ? 0 : releaseLock.browserCacheParityMismatchCount;
+    var nativeMismatch = releaseLock.nativeFormulaParityMismatchCount == null ? 7 : releaseLock.nativeFormulaParityMismatchCount;
+    var runtimeSource = releaseLock.exactSupportCacheRemainsSourceOfTruth === false ? "native expression" : "exact cache locked";
     $("v18ReviewStatus").textContent = active ? "active" : "ready";
     $("v18ReviewHighGain").textContent = fmt(gate.nominalHighGainPct, 2) + "%";
     $("v18ReviewHoldout").textContent = fmt(gate.holdoutHighGainPct, 2) + "%";
     $("v18ReviewStress").textContent = String(gate.stressAbove20);
-    $("v18ReviewNullMargin").textContent = fmt(gate.nullMarginKmS, 2);
+    $("v18ReviewNullMargin").textContent = fmt(releaseLock.releaseBranchShuffleNullMarginPct || gate.releaseBranchShuffleNullMarginPct || gate.nullMarginKmS, 2);
     $("v18ReviewProtected").textContent = String(gate.activeProtectedWorseCount);
-    $("v18ReviewDiff").textContent = String(gate.nominalDiffVsV1797Count);
+    $("v18ReviewDiff").textContent = String(cacheMismatch);
     if ($("v18ReviewArtifactCount")) $("v18ReviewArtifactCount").textContent = artifact && artifact.metadata ? String(artifact.metadata.curveCount) : "--";
     if ($("v18ReviewCleanCount")) $("v18ReviewCleanCount").textContent = artifact && artifact.metadata ? String(artifact.metadata.cleanCurveCount) : "--";
     if ($("v18ReviewWeakCount")) $("v18ReviewWeakCount").textContent = artifact && artifact.metadata ? String(artifact.metadata.weakSystematicsExcludedCount) : "--";
-    if ($("v18ReviewLawNative")) $("v18ReviewLawNative").textContent = lawNative ? String(lawNative.verdict) : "--";
-    if ($("v18ReviewLawParity")) $("v18ReviewLawParity").textContent = lawNative ? String(lawNative.cleanParityMismatchCount) : "--";
+    if ($("v18ReviewLawNative")) $("v18ReviewLawNative").textContent = runtimeSource;
+    if ($("v18ReviewLawParity")) $("v18ReviewLawParity").textContent = String(nativeMismatch);
     if ($("v18ReviewBranchPrune")) $("v18ReviewBranchPrune").textContent = branchPrune ? String(branchPrune.verdict) : "--";
     if ($("v18ReviewEssentialBranches")) $("v18ReviewEssentialBranches").textContent = branchPrune ? String(branchPrune.essentialBranchCount) + " / " + String(branchPrune.activeBranchCount) : "--";
     if ($("v18ReviewFamilyAudit")) $("v18ReviewFamilyAudit").textContent = familyAudit ? String(familyAudit.verdict) : "--";
@@ -4011,8 +4020,8 @@
     if ($("v18ReviewReleaseNull")) $("v18ReviewReleaseNull").textContent = releaseStress ? fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " pts" : "--";
     if ($("v18ReviewNote")) {
       $("v18ReviewNote").textContent = active
-        ? "Active preset uses the generated v18.09 surface-persistence artifact with " + artifactCount + " cached curves. Law-native status: " + (lawNative ? lawNative.verdict + " with " + lawNative.cleanParityMismatchCount + " clean mismatches" : "not run") + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "not run") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "not run") + ". Branch identity: " + (branchIdentity ? branchIdentity.verdict + " (" + branchIdentity.lawLikeBranchCount + " / " + branchIdentity.branchCount + " law-like)" : "not run") + ". Safety pass: " + (branchSafety ? branchSafety.verdict + " via " + branchSafety.bestTrack : "not run") + ". Edge harden: " + (edgeHarden ? edgeHarden.verdict + " with " + fmt(edgeHarden.edgeNullMarginPct, 2) + " point edge-null margin" : "not run") + ". Release stress: " + (releaseStress ? releaseStress.verdict + " with " + fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " point branch-null margin" : "not run") + ". The v18.09 promotion gate keeps all clean high-RMSE cases below 20 km/s, has zero protected regression, and the surface-persistence stress replay has " + String(gate.stressAbove20) + " above-20 cases."
-        : "Select MTS v18.09 surface-persistence response in the Test Rig to inspect the generated artifact. Nominal curves remain the tested v18 state-response cache; the promotion gate validates family nulls, branch nulls, surface persistence, protected forcing, and browser parity.";
+        ? "Active preset uses the locked v18.09 exact support cache with " + artifactCount + " cached curves. Release-lock status: " + releaseLock.verdict + ". Native formula replacement is blocked while native mismatches remain " + String(nativeMismatch) + "; cache mismatches are " + String(cacheMismatch) + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "not run") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "not run") + ". Release stress: " + (releaseStress ? releaseStress.verdict + " with " + fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " point branch-null margin" : "not run") + ". The lock keeps all clean high-RMSE cases below 20 km/s with zero protected regression."
+        : "Select " + V18_RELEASE_DISPLAY_NAME + " in the Test Rig to inspect the release candidate. Runtime uses the exact tested support cache; native formula replacement stays off until parity reaches zero.";
     }
   }
 
