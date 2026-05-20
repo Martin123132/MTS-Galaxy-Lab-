@@ -13,10 +13,11 @@
   };
 
   var V17STATE_EXACT_TOKEN = "__MTS_V17_97_RADIAL_REPAIR_STATE_RESPONSE__";
-  var V18REVIEW_TOKEN = "__MTS_V18_01_PROMOTION_GATE_REVIEW__";
+  var V18REVIEW_TOKEN = "__MTS_V18_05_RELEASE_CANDIDATE__";
+  var V18_RELEASE_ARTIFACT = window.MTS_V18_05_RELEASE_CANDIDATE || window.MTS_V18_01_REVIEW_CANDIDATE;
   var V18_REVIEW_GATE_FALLBACK = {
-    candidateId: "observed-state-response-v18.01-promotion-gate",
-    verdict: "v18 candidate ready for review",
+    candidateId: "observed-state-response-v18.05-release-candidate",
+    verdict: "v18.05 release candidate passes stress gate",
     nominalHighGainPct: 68.07867961334428,
     nominalCleanGainPct: 43.737260426360244,
     holdoutHighGainPct: 66.67923997034711,
@@ -27,9 +28,9 @@
     nominalDiffVsV1797Count: 0
   };
   var V18_REVIEW_GATE = (
-    window.MTS_V18_01_REVIEW_CANDIDATE &&
-    window.MTS_V18_01_REVIEW_CANDIDATE.metadata &&
-    window.MTS_V18_01_REVIEW_CANDIDATE.metadata.reviewGate
+    V18_RELEASE_ARTIFACT &&
+    V18_RELEASE_ARTIFACT.metadata &&
+    V18_RELEASE_ARTIFACT.metadata.reviewGate
   ) || V18_REVIEW_GATE_FALLBACK;
   var V17STATE_LEGACY_TOKENS = {
     "__MTS_V17_96_REMAINING_STRESS_STATE_RESPONSE__": true,
@@ -59,7 +60,7 @@
   var FRAMEWORK_PRESET_LABELS = {
     mts: "MTS baseline",
     v17state: "MTS v17.97 radial-repair state response",
-    v18review: "MTS v18.01 review candidate",
+    v18review: "MTS v18.05 release candidate",
     baryon: "Baryon only",
     soft: "Soft radial support",
     outer: "Outer gate support",
@@ -1888,7 +1889,7 @@
   function v17ExactCacheEntry(curve, compiled) {
     if (!curve || !curve.name) return null;
     if (compiled && compiled.reviewGate) {
-      var v18 = window.MTS_V18_01_REVIEW_CANDIDATE;
+      var v18 = V18_RELEASE_ARTIFACT;
       if (v18 && v18.curves && v18.curves[curve.name]) return v18.curves[curve.name];
     }
     var cache = window.MTS_V17_97_SUPPORT_CACHE || window.MTS_V17_96_SUPPORT_CACHE || window.MTS_V17_95_SUPPORT_CACHE || window.MTS_V17_94_SUPPORT_CACHE || window.MTS_V17_93_SUPPORT_CACHE || window.MTS_V17_92_SUPPORT_CACHE || window.MTS_V17_91_SUPPORT_CACHE || window.MTS_V17_90_SUPPORT_CACHE || window.MTS_V17_89_SUPPORT_CACHE || window.MTS_V17_88_SUPPORT_CACHE || window.MTS_V17_87_SUPPORT_CACHE || window.MTS_V17_86_SUPPORT_CACHE || window.MTS_V17_85_SUPPORT_CACHE;
@@ -1897,7 +1898,7 @@
   }
 
   function exactCacheDisplayName(compiled) {
-    return compiled && compiled.reviewGate ? "v18.01 review candidate" : "v17.97 exact cache";
+    return compiled && compiled.reviewGate ? "v18.05 release candidate" : "v17.97 exact cache";
   }
 
   function isV18ReviewActive() {
@@ -3952,7 +3953,7 @@
   function updateV18ReviewPanel() {
     if (!$("v18ReviewStatus")) return;
     var active = isV18ReviewActive();
-    var artifact = window.MTS_V18_01_REVIEW_CANDIDATE || null;
+    var artifact = V18_RELEASE_ARTIFACT || null;
     var gate = (artifact && artifact.metadata && artifact.metadata.reviewGate) || V18_REVIEW_GATE;
     var lawNative = artifact && artifact.metadata && artifact.metadata.lawNativeVerification;
     var branchPrune = artifact && artifact.metadata && artifact.metadata.branchPrune;
@@ -3988,8 +3989,8 @@
     if ($("v18ReviewReleaseNull")) $("v18ReviewReleaseNull").textContent = releaseStress ? fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " pts" : "--";
     if ($("v18ReviewNote")) {
       $("v18ReviewNote").textContent = active
-        ? "Active preset uses the generated v18.01 artifact with " + artifactCount + " cached curves. Law-native status: " + (lawNative ? lawNative.verdict + " with " + lawNative.cleanParityMismatchCount + " clean mismatches" : "not run") + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "not run") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "not run") + ". Branch identity: " + (branchIdentity ? branchIdentity.verdict + " (" + branchIdentity.lawLikeBranchCount + " / " + branchIdentity.branchCount + " law-like)" : "not run") + ". Safety pass: " + (branchSafety ? branchSafety.verdict + " via " + branchSafety.bestTrack : "not run") + ". Edge harden: " + (edgeHarden ? edgeHarden.verdict + " with " + fmt(edgeHarden.edgeNullMarginPct, 2) + " point edge-null margin" : "not run") + ". Release stress: " + (releaseStress ? releaseStress.verdict + " with " + fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " point branch-null margin" : "not run") + ". The v18 review gate adds the baryon-confidence stress guard: no stress cases remain above 20 km/s, active protected worsens stay at 0, and the hardening margin over the best null is " + fmt(gate.nullMarginKmS, 2) + " km/s."
-        : "Select MTS v18.01 review candidate in the Test Rig to inspect the generated artifact. Nominal curves remain the v17.97 exact cache; the v18 addition is the stress/quality guard validated by the promotion gate.";
+        ? "Active preset uses the generated v18.05 release artifact with " + artifactCount + " cached curves. Law-native status: " + (lawNative ? lawNative.verdict + " with " + lawNative.cleanParityMismatchCount + " clean mismatches" : "not run") + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "not run") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "not run") + ". Branch identity: " + (branchIdentity ? branchIdentity.verdict + " (" + branchIdentity.lawLikeBranchCount + " / " + branchIdentity.branchCount + " law-like)" : "not run") + ". Safety pass: " + (branchSafety ? branchSafety.verdict + " via " + branchSafety.bestTrack : "not run") + ". Edge harden: " + (edgeHarden ? edgeHarden.verdict + " with " + fmt(edgeHarden.edgeNullMarginPct, 2) + " point edge-null margin" : "not run") + ". Release stress: " + (releaseStress ? releaseStress.verdict + " with " + fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " point branch-null margin" : "not run") + ". The v18.05 release gate keeps all clean high-RMSE cases below 20 km/s, active protected worsens stay at 0, and the hardening margin over the best null is " + fmt(gate.nullMarginKmS, 2) + " km/s."
+        : "Select MTS v18.05 release candidate in the Test Rig to inspect the generated artifact. Nominal curves remain the tested v18 state-response cache; the release stress gate validates branch nulls, edge hardening, protected forcing, and browser parity.";
     }
   }
 

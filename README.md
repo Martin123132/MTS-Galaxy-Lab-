@@ -66,6 +66,30 @@ LTG curvature A ~= -2.671 + 2.735/sqrt(u_0.75)
 supercritical late-load flag = u_0.75 > 1
 ```
 
+## v18.05 Release Candidate
+
+The browser preset `MTS v18.05 release candidate` loads the frozen observed-state response artifact from:
+
+```text
+data/v18-05-release-candidate.js
+```
+
+Current release-stress result:
+
+```text
+clean high-RMSE gain = 68.08%
+clean-set gain = 43.74%
+clean high-RMSE cases still above 20 km/s = 0
+median holdout high-RMSE gain = 66.68%
+branch-shuffle null margin = 52.01 percentage points
+state-respecting edge-null margin = 61.39 percentage points
+max forced protected-lookalike regression = 0.34 km/s
+weak/systematics leakage = 0
+browser parity mismatches = 0
+```
+
+Canonical MTS constants remain locked. The v18.05 preset is the current framework candidate for review, not a replacement for the documented canonical baseline.
+
 The active curve also reports the inner S-law completion diagnostic:
 
 ```text

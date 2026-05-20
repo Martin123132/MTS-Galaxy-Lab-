@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const artifactPath = path.join(root, "data", "v18-01-review-candidate.js");
+const artifactPath = path.join(root, "data", "v18-05-release-candidate.js");
 const indexPath = path.join(root, "index.html");
 const appPath = path.join(root, "app.js");
 
@@ -29,8 +29,8 @@ try {
   fail(`artifact does not execute as browser data: ${err.message}`);
 }
 
-const artifact = context.window.MTS_V18_01_REVIEW_CANDIDATE;
-if (!artifact || !artifact.metadata || !artifact.curves) fail("MTS_V18_01_REVIEW_CANDIDATE missing metadata or curves");
+const artifact = context.window.MTS_V18_05_RELEASE_CANDIDATE;
+if (!artifact || !artifact.metadata || !artifact.curves) fail("MTS_V18_05_RELEASE_CANDIDATE missing metadata or curves");
 if (artifact.metadata.curveCount !== 175) fail(`expected 175 artifact curves, found ${artifact.metadata.curveCount}`);
 if (artifact.metadata.cleanCurveCount !== 160) fail(`expected 160 clean curves, found ${artifact.metadata.cleanCurveCount}`);
 if (artifact.metadata.weakSystematicsExcludedCount !== 15) {
@@ -124,13 +124,13 @@ if (artifact.metadata.releaseStressV1805) {
 
 const indexHtml = readText(indexPath);
 const appJs = readText(appPath);
-if (!indexHtml.includes("data/v18-01-review-candidate.js")) fail("index.html does not load the v18 artifact");
-if (!indexHtml.includes('<option value="v18review">MTS v18.01 review candidate</option>')) {
-  fail("index.html is missing the v18 framework preset option");
+if (!indexHtml.includes("data/v18-05-release-candidate.js")) fail("index.html does not load the v18.05 artifact");
+if (!indexHtml.includes('<option value="v18review">MTS v18.05 release candidate</option>')) {
+  fail("index.html is missing the v18.05 framework preset option");
 }
-if (!appJs.includes("window.MTS_V18_01_REVIEW_CANDIDATE")) fail("app.js does not read the v18 artifact");
+if (!appJs.includes("window.MTS_V18_05_RELEASE_CANDIDATE")) fail("app.js does not read the v18.05 artifact");
 if (!appJs.includes("v17ExactCacheEntry(curve, compiled)")) fail("app.js is not passing compiled preset state into exact-cache lookup");
-if (!appJs.includes("generated v18.01 artifact")) fail("app.js v18 panel does not describe the generated artifact");
+if (!appJs.includes("generated v18.05 release artifact")) fail("app.js v18 panel does not describe the generated artifact");
 if (!appJs.includes("v18ReviewArtifactCount")) fail("app.js does not populate v18 artifact count");
 if (!indexHtml.includes("v18ReviewArtifactCount")) fail("index.html does not expose v18 artifact count");
 if (!appJs.includes("v18ReviewLawNative")) fail("app.js does not populate v18 law-native status");
@@ -154,6 +154,6 @@ console.log(
     `curves=${artifact.metadata.curveCount}`,
     `clean=${artifact.metadata.cleanCurveCount}`,
     `weakExcluded=${artifact.metadata.weakSystematicsExcludedCount}`,
-    `verdict=${artifact.metadata.reviewGate.verdict}`,
+    `verdict=${artifact.metadata.releaseStressV1805?.verdict || artifact.metadata.reviewGate.verdict}`,
   ].join("\t"),
 );

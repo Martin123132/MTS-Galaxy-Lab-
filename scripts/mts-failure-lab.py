@@ -163,6 +163,7 @@ DEFAULT_OBSERVED_STATE_V18_SAFETY_DEPENDENCY_OUT = OUTPUT_PACK_ROOT / "mts-obser
 DEFAULT_OBSERVED_STATE_V18_EDGE_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-edge-harden-v1"
 DEFAULT_OBSERVED_STATE_V18_RELEASE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-stress-v1"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
+V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -53801,6 +53802,30 @@ def write_window_json_assignment(path: Path, variable_name: str, payload: dict) 
     path.write_text(f"window.{variable_name} = {body};\n", encoding="utf-8")
 
 
+def observed_state_v1805_release_payload(payload: dict) -> dict:
+    release_payload = json.loads(json.dumps(json_clean(payload)))
+    metadata = release_payload.setdefault("metadata", {})
+    metadata["candidateId"] = "observed-state-response-v18.05-release-candidate"
+    metadata["displayName"] = "MTS v18.05 release candidate"
+    metadata["source"] = "scripts/mts-failure-lab.py observedstatev18releasestress"
+    metadata["supportCacheBasis"] = "v18.05 release-stress candidate artifact; support arrays are the tested v18 state-response curves"
+    metadata["releaseCandidateBasis"] = "v18.05 stress gate passed with zero clean above-20 high-RMSE cases, zero protected regressions, and branch/null hardening"
+    for curve_payload in release_payload.get("curves", {}).values():
+        if isinstance(curve_payload, dict):
+            curve_payload["candidateId"] = "observed-state-response-v18.05-release-candidate"
+            curve_payload["releaseCandidate"] = "MTS v18.05 release candidate"
+    return release_payload
+
+
+def write_observed_state_v1805_release_artifact_files(payload: dict, out_dir: Path | None = None, prefix: str = "") -> dict:
+    release_payload = observed_state_v1805_release_payload(payload)
+    write_window_json_assignment(V18_RELEASE_CANDIDATE_ARTIFACT_PATH, "MTS_V18_05_RELEASE_CANDIDATE", release_payload)
+    write_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE", release_payload)
+    if out_dir is not None and prefix:
+        write_window_json_assignment(out_dir / f"{prefix}_release_candidate_artifact.js", "MTS_V18_05_RELEASE_CANDIDATE", release_payload)
+    return release_payload
+
+
 def observed_state_supports_from_score(curve: dict, score: dict) -> list[float]:
     q_value = parse_float(score.get("observedStateQ", score.get("q", Q_DEFAULT)), Q_DEFAULT)
     if "threeZoneInnerAmp" in score:
@@ -56671,7 +56696,7 @@ def write_observed_state_v18_release_stress_artifacts(out_dir: Path) -> dict:
         "cleanParityMismatchCount": summary["cleanParityMismatchCount"],
         "weakSystematicsLeakage": 0,
     }
-    write_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+    artifact_payload = write_observed_state_v1805_release_artifact_files(artifact_payload, out_dir, prefix)
     write_window_json_assignment(out_dir / f"{prefix}_browser_artifact.js", "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
 
     formula = {
@@ -56765,6 +56790,7 @@ def write_observed_state_v18_release_stress_artifacts(out_dir: Path) -> dict:
             f"{prefix}_browser_parity.csv",
             f"{prefix}_formula.json",
             f"{prefix}_browser_artifact.js",
+            f"{prefix}_release_candidate_artifact.js",
             f"{prefix}_report.md",
             f"{prefix}_capsule.json",
         ],
