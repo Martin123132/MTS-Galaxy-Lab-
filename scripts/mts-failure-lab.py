@@ -162,6 +162,7 @@ DEFAULT_OBSERVED_STATE_V18_BRANCH_IDENTITY_OUT = OUTPUT_PACK_ROOT / "mts-observe
 DEFAULT_OBSERVED_STATE_V18_SAFETY_DEPENDENCY_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-safety-dependency-v1"
 DEFAULT_OBSERVED_STATE_V18_EDGE_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-edge-harden-v1"
 DEFAULT_OBSERVED_STATE_V18_RELEASE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-stress-v1"
+DEFAULT_OBSERVED_STATE_V18_EVIDENCE_EXPORT_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-paper-evidence-v1"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
@@ -56823,6 +56824,383 @@ def cmd_observedstatev18releasestress(args: argparse.Namespace) -> None:
     print(f"Wrote v18 release stress gate to {out_dir.resolve()}")
 
 
+def observed_state_v1805_svg_bar_chart(
+    title: str,
+    rows: list[dict],
+    label_key: str,
+    series: list[tuple[str, str, str]],
+    max_value: float | None = None,
+    width: int = 1160,
+    row_height: int = 24,
+) -> str:
+    margin_left = 210
+    margin_right = 120
+    margin_top = 76
+    margin_bottom = 48
+    plot_width = width - margin_left - margin_right
+    height = margin_top + margin_bottom + max(1, len(rows)) * row_height
+    values = [
+        parse_float(row.get(key), 0.0)
+        for row in rows
+        for _label, key, _color in series
+    ]
+    xmax = max_value if max_value and max_value > 0 else max(values or [1.0])
+    xmax = max(xmax, 1.0)
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#fbfaf7"/>',
+        f'<text x="{margin_left}" y="32" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#111">{html.escape(title)}</text>',
+    ]
+    for tick in range(0, 6):
+        value = xmax * tick / 5.0
+        x = margin_left + plot_width * tick / 5.0
+        parts.append(f'<line x1="{x:.2f}" y1="{margin_top - 16}" x2="{x:.2f}" y2="{height - margin_bottom + 8}" stroke="#e2ded6" stroke-width="1"/>')
+        parts.append(f'<text x="{x:.2f}" y="{height - 18}" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="#555">{fmt(value, 0)}</text>')
+    legend_x = margin_left
+    for label, _key, color in series:
+        parts.append(f'<rect x="{legend_x}" y="46" width="12" height="12" fill="{color}"/>')
+        parts.append(f'<text x="{legend_x + 18}" y="56" font-family="Arial, sans-serif" font-size="12" fill="#333">{html.escape(label)}</text>')
+        legend_x += 150
+    band_height = max(4, row_height / max(1, len(series)) - 3)
+    for idx, row in enumerate(rows):
+        y_base = margin_top + idx * row_height
+        label = str(row.get(label_key, ""))
+        parts.append(f'<text x="{margin_left - 10}" y="{y_base + row_height * 0.67:.2f}" font-family="Arial, sans-serif" font-size="12" text-anchor="end" fill="#222">{html.escape(label)}</text>')
+        for sidx, (_label, key, color) in enumerate(series):
+            value = max(0.0, parse_float(row.get(key), 0.0))
+            bar_w = plot_width * value / xmax
+            y = y_base + 2 + sidx * (band_height + 2)
+            parts.append(f'<rect x="{margin_left}" y="{y:.2f}" width="{bar_w:.2f}" height="{band_height:.2f}" fill="{color}" rx="2"/>')
+            if sidx == len(series) - 1:
+                parts.append(f'<text x="{margin_left + bar_w + 5:.2f}" y="{y + band_height:.2f}" font-family="Arial, sans-serif" font-size="10" fill="#444">{fmt(value)}</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def observed_state_v1805_svg_null_chart(rows: list[dict], width: int = 900, height: int = 460) -> str:
+    margin_left = 80
+    margin_right = 40
+    margin_top = 70
+    margin_bottom = 100
+    plot_width = width - margin_left - margin_right
+    plot_height = height - margin_top - margin_bottom
+    max_value = max([parse_float(row.get("gainPct"), 0.0) for row in rows] + [1.0])
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#fbfaf7"/>',
+        f'<text x="{margin_left}" y="34" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#111">v18.05 null comparison</text>',
+    ]
+    for tick in range(0, 6):
+        value = max_value * tick / 5.0
+        y = margin_top + plot_height - plot_height * tick / 5.0
+        parts.append(f'<line x1="{margin_left}" y1="{y:.2f}" x2="{width - margin_right}" y2="{y:.2f}" stroke="#e2ded6" stroke-width="1"/>')
+        parts.append(f'<text x="{margin_left - 8}" y="{y + 4:.2f}" font-family="Arial, sans-serif" font-size="11" text-anchor="end" fill="#555">{fmt(value, 0)}%</text>')
+    slot = plot_width / max(1, len(rows))
+    for idx, row in enumerate(rows):
+        value = parse_float(row.get("gainPct"), 0.0)
+        bar_h = plot_height * value / max_value
+        x = margin_left + idx * slot + slot * 0.18
+        y = margin_top + plot_height - bar_h
+        color = row.get("color", "#2f7fbf")
+        label = str(row.get("label", ""))
+        parts.append(f'<rect x="{x:.2f}" y="{y:.2f}" width="{slot * 0.64:.2f}" height="{bar_h:.2f}" fill="{color}" rx="4"/>')
+        parts.append(f'<text x="{x + slot * 0.32:.2f}" y="{y - 6:.2f}" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="#222">{fmt(value)}%</text>')
+        parts.append(f'<text x="{x + slot * 0.32:.2f}" y="{height - 62}" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="#333">{html.escape(label)}</text>')
+    parts.append(f'<text x="{margin_left}" y="{height - 26}" font-family="Arial, sans-serif" font-size="12" fill="#555">Higher is better. Nulls are controls, not framework candidates.</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def write_observed_state_v18_evidence_export_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_05_evidence"
+    source_dir = DEFAULT_OBSERVED_STATE_V18_RELEASE_STRESS_OUT
+    required = source_dir / "mts_observed_v18_release_stress_scores.csv"
+    if not required.exists():
+        write_observed_state_v18_release_stress_artifacts(source_dir)
+
+    score = read_csv_rows(source_dir / "mts_observed_v18_release_stress_scores.csv")[0]
+    case_rows = read_csv_rows(source_dir / "mts_observed_v18_release_stress_case_ledger.csv")
+    branch_ablation_rows = read_csv_rows(source_dir / "mts_observed_v18_release_stress_branch_ablation.csv")
+    protected_rows = read_csv_rows(source_dir / "mts_observed_v18_release_stress_protected_stress.csv")
+    null_rows = read_csv_rows(source_dir / "mts_observed_v18_release_stress_null_controls.csv")
+    seed_rows = read_csv_rows(source_dir / "mts_observed_v18_release_stress_seed_replay.csv")
+    artifact = read_window_json_assignment(V18_RELEASE_CANDIDATE_ARTIFACT_PATH, "MTS_V18_05_RELEASE_CANDIDATE")
+
+    high_rows = [
+        {
+            "galaxy": row["galaxy"],
+            "lockedRoute": row["lockedRoute"],
+            "baselineRmse": parse_float(row["baselineRmse"]),
+            "v18_05Rmse": parse_float(row["candidateRmse"]),
+            "gainKmS": parse_float(row["gainKmS"]),
+            "gainPct": pct_improvement(parse_float(row["baselineRmse"]), parse_float(row["candidateRmse"])),
+            "branch": row.get("branch", ""),
+            "family": row.get("family", ""),
+            "stillAbove20": row.get("stillAbove20", ""),
+        }
+        for row in case_rows
+        if row.get("set") == "clean-high-rmse"
+    ]
+    high_rows.sort(key=lambda row: (-row["baselineRmse"], row["galaxy"]))
+
+    branch_ablation_by_branch = {row["branch"]: row for row in branch_ablation_rows}
+    branch_groups: dict[str, list[dict]] = {}
+    for row in high_rows:
+        branch_groups.setdefault(row["branch"] or "unbranched", []).append(row)
+    branch_rows: list[dict] = []
+    for branch, rows in branch_groups.items():
+        baseline_mean = safe_mean(row["baselineRmse"] for row in rows)
+        candidate_mean = safe_mean(row["v18_05Rmse"] for row in rows)
+        ablation = branch_ablation_by_branch.get(branch, {})
+        branch_rows.append(
+            {
+                "branch": branch,
+                "highCaseCount": len(rows),
+                "highGalaxies": "; ".join(row["galaxy"] for row in rows),
+                "baselineMeanRmse": baseline_mean,
+                "v18_05MeanRmse": candidate_mean,
+                "meanGainKmS": baseline_mean - candidate_mean,
+                "gainPct": pct_improvement(baseline_mean, candidate_mean),
+                "totalGainKmS": sum(row["gainKmS"] for row in rows),
+                "ablationHighGainLossPct": parse_float(ablation.get("highGainLossPct", math.nan)),
+                "ablationHighAbove20": ablation.get("ablationHighAbove20", ""),
+                "branchReleaseStatus": ablation.get("branchReleaseStatus", ""),
+            }
+        )
+    branch_rows.sort(key=lambda row: (-parse_float(row["totalGainKmS"], 0.0), row["branch"]))
+
+    protected_table = [
+        {
+            "branch": row.get("branch", ""),
+            "protectedGalaxy": row.get("protectedGalaxy", ""),
+            "nearestHighBranchGalaxy": row.get("nearestHighBranchGalaxy", ""),
+            "stateDistance": parse_float(row.get("stateDistance")),
+            "baselineRmse": parse_float(row.get("baselineRmse")),
+            "forcedRmse": parse_float(row.get("forcedRmse")),
+            "forcedRegressionKmS": parse_float(row.get("forcedRegressionKmS")),
+            "vetoedBranch": row.get("vetoedBranch", ""),
+            "vetoReason": row.get("vetoReason", ""),
+            "edgeRulePass": row.get("edgeRulePass", ""),
+            "forcedEdgeApplied": row.get("forcedEdgeApplied", ""),
+        }
+        for row in protected_rows
+    ]
+    protected_table.sort(key=lambda row: (-parse_float(row["forcedRegressionKmS"], 0.0), row["branch"], row["protectedGalaxy"]))
+
+    branch_shuffle = [row for row in null_rows if row.get("nullType") == "same-route same-active-count branch-label shuffle"]
+    edge_null = [row for row in null_rows if row.get("nullType") == "state-respecting edge null"]
+    release_meta = artifact.get("metadata", {}).get("releaseStressV1805", {})
+    edge_meta = artifact.get("metadata", {}).get("edgeHardenV1804", {})
+    null_table = [
+        {
+            "comparison": "v18.05 clean high-RMSE candidate",
+            "gainPct": parse_float(release_meta.get("nominalHighGainPct")),
+            "marginPct": "",
+            "maxRegressionKmS": parse_float(release_meta.get("nominalMaxProtectedRegressionKmS", 0.0)),
+            "notes": "framework candidate",
+        },
+        {
+            "comparison": "branch-label shuffled null median",
+            "gainPct": safe_median(parse_float(row.get("nullHighGainPct")) for row in branch_shuffle),
+            "marginPct": safe_median(parse_float(row.get("nullMarginPct")) for row in branch_shuffle),
+            "maxRegressionKmS": max([parse_float(row.get("maxNullRegressionKmS"), 0.0) for row in branch_shuffle] or [0.0]),
+            "notes": "same-route same-active-count shuffled branch control",
+        },
+        {
+            "comparison": "disk-shear edge actual increment",
+            "gainPct": parse_float(edge_meta.get("edgeActualIncrementGainPct")),
+            "marginPct": parse_float(edge_meta.get("edgeNullMarginPct")),
+            "maxRegressionKmS": parse_float(edge_meta.get("maxProtectedForcedEdgeRegressionKmS", 0.0)),
+            "notes": "UGC11557 edge branch increment over no-edge v18.03",
+        },
+        {
+            "comparison": "state-respecting disk-shear edge null median",
+            "gainPct": safe_median(parse_float(row.get("nullHighGainPct")) for row in edge_null),
+            "marginPct": safe_median(parse_float(row.get("nullMarginPct")) for row in edge_null),
+            "maxRegressionKmS": max([parse_float(row.get("maxNullRegressionKmS"), 0.0) for row in edge_null] or [0.0]),
+            "notes": "same-active-count edge null with the full v18.04 state gate",
+        },
+    ]
+
+    seed_table = [
+        {
+            "seed": row.get("seed", ""),
+            "holdoutCount": row.get("holdoutCount", ""),
+            "highHoldoutCount": row.get("highHoldoutCount", ""),
+            "highGainPct": parse_float(row.get("highGainPct")),
+            "cleanGainPct": parse_float(row.get("cleanGainPct")),
+            "highStillAbove20": row.get("highStillAbove20", ""),
+            "maxProtectedRegressionKmS": parse_float(row.get("maxProtectedRegression")),
+        }
+        for row in seed_rows
+    ]
+
+    manifest_rows = [
+        {"file": f"{prefix}_high_rmse_before_after.csv", "type": "csv", "purpose": "all 52 clean high-RMSE cases before/after v18.05"},
+        {"file": f"{prefix}_branch_contributions.csv", "type": "csv", "purpose": "branch-level contribution table"},
+        {"file": f"{prefix}_protected_stress_table.csv", "type": "csv", "purpose": "protected-lookalike forced branch stress rows"},
+        {"file": f"{prefix}_null_comparison.csv", "type": "csv", "purpose": "candidate versus null controls"},
+        {"file": f"{prefix}_seed_replay_table.csv", "type": "csv", "purpose": "route-stratified holdout seed replay"},
+        {"file": f"{prefix}_high_rmse_before_after.svg", "type": "svg", "purpose": "before/after RMSE figure"},
+        {"file": f"{prefix}_branch_contributions.svg", "type": "svg", "purpose": "branch total-gain figure"},
+        {"file": f"{prefix}_null_comparison.svg", "type": "svg", "purpose": "candidate/null gain figure"},
+        {"file": f"{prefix}_paper_tables.md", "type": "markdown", "purpose": "copy-ready compact tables"},
+    ]
+
+    write_csv(out_dir / f"{prefix}_high_rmse_before_after.csv", high_rows)
+    write_csv(out_dir / f"{prefix}_branch_contributions.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_protected_stress_table.csv", protected_table)
+    write_csv(out_dir / f"{prefix}_null_comparison.csv", null_table)
+    write_csv(out_dir / f"{prefix}_seed_replay_table.csv", seed_table)
+    write_csv(out_dir / f"{prefix}_manifest.csv", manifest_rows)
+
+    high_svg_rows = sorted(high_rows, key=lambda row: (-row["baselineRmse"], row["galaxy"]))
+    (out_dir / f"{prefix}_high_rmse_before_after.svg").write_text(
+        observed_state_v1805_svg_bar_chart(
+            "v18.05 high-RMSE before/after",
+            high_svg_rows,
+            "galaxy",
+            [("canonical", "baselineRmse", "#a94a3a"), ("v18.05", "v18_05Rmse", "#2374a6")],
+            max_value=max([row["baselineRmse"] for row in high_svg_rows] or [1.0]),
+            width=1240,
+            row_height=22,
+        ),
+        encoding="utf-8",
+    )
+    (out_dir / f"{prefix}_branch_contributions.svg").write_text(
+        observed_state_v1805_svg_bar_chart(
+            "v18.05 branch contribution",
+            branch_rows[:20],
+            "branch",
+            [("total gain km/s", "totalGainKmS", "#2f7f5f")],
+            max_value=max([parse_float(row["totalGainKmS"], 0.0) for row in branch_rows] or [1.0]),
+            width=1280,
+            row_height=26,
+        ),
+        encoding="utf-8",
+    )
+    null_svg_rows = [
+        {"label": "v18.05", "gainPct": null_table[0]["gainPct"], "color": "#2374a6"},
+        {"label": "branch null", "gainPct": null_table[1]["gainPct"], "color": "#b88d2e"},
+        {"label": "edge actual", "gainPct": null_table[2]["gainPct"], "color": "#2f7f5f"},
+        {"label": "edge null", "gainPct": null_table[3]["gainPct"], "color": "#a94a3a"},
+    ]
+    (out_dir / f"{prefix}_null_comparison.svg").write_text(observed_state_v1805_svg_null_chart(null_svg_rows), encoding="utf-8")
+
+    top_high = sorted(high_rows, key=lambda row: -row["gainKmS"])[:12]
+    top_branch = branch_rows[:12]
+    paper = [
+        "# MTS v18.05 Candidate Evidence Tables",
+        "",
+        "## Release Gate Numbers",
+        "",
+        f"- Clean high-RMSE gain: `{fmt(parse_float(score['nominalHighGainPct']))}%`.",
+        f"- Clean-set gain: `{fmt(parse_float(score['nominalCleanGainPct']))}%`.",
+        f"- High-RMSE cases still above 20 km/s: `{score['nominalHighAbove20']}`.",
+        f"- Median holdout high-RMSE gain: `{fmt(parse_float(score['medianHoldoutHighGainPct']))}%`.",
+        f"- Branch-shuffle null margin: `{fmt(parse_float(score['medianBranchShuffleNullMarginPct']))}` percentage points.",
+        f"- Edge-null margin: `{fmt(parse_float(score['medianEdgeNullMarginPct']))}` percentage points.",
+        f"- Max forced protected-lookalike regression: `{fmt(parse_float(score['maxProtectedForcedRegressionKmS']))}` km/s.",
+        f"- Browser parity mismatches: `{score['cleanParityMismatchCount']}`.",
+        "",
+        "## Largest High-RMSE Repairs",
+        "",
+        "| Galaxy | Canonical RMSE | v18.05 RMSE | Gain | Branch |",
+        "| --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in top_high:
+        paper.append(f"| {row['galaxy']} | {fmt(row['baselineRmse'])} | {fmt(row['v18_05Rmse'])} | {fmt(row['gainKmS'])} | {row['branch']} |")
+    paper.extend(
+        [
+            "",
+            "## Branch Contributions",
+            "",
+            "| Branch | High cases | Total gain | Mean gain | Ablation loss |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in top_branch:
+        paper.append(
+            f"| {row['branch']} | {row['highCaseCount']} | {fmt(row['totalGainKmS'])} | {fmt(row['meanGainKmS'])} | {fmt(row['ablationHighGainLossPct'])} |"
+        )
+    paper.extend(
+        [
+            "",
+            "## Nulls",
+            "",
+            "| Comparison | Gain | Margin | Max regression | Notes |",
+            "| --- | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for row in null_table:
+        paper.append(f"| {row['comparison']} | {fmt(row['gainPct'])}% | {fmt(row['marginPct'])} | {fmt(row['maxRegressionKmS'])} | {row['notes']} |")
+    (out_dir / f"{prefix}_paper_tables.md").write_text("\n".join(paper), encoding="utf-8")
+
+    summary = {
+        "candidateId": "observed-state-response-v18.05-release-candidate",
+        "sourceDir": str(source_dir),
+        "highRmseCaseCount": len(high_rows),
+        "branchCount": len(branch_rows),
+        "protectedStressRows": len(protected_table),
+        "nullComparisonRows": len(null_table),
+        "nominalHighGainPct": parse_float(score["nominalHighGainPct"]),
+        "nominalCleanGainPct": parse_float(score["nominalCleanGainPct"]),
+        "nominalHighAbove20": int(parse_float(score["nominalHighAbove20"], 0.0)),
+        "medianHoldoutHighGainPct": parse_float(score["medianHoldoutHighGainPct"]),
+        "branchShuffleNullMarginPct": parse_float(score["medianBranchShuffleNullMarginPct"]),
+        "edgeNullMarginPct": parse_float(score["medianEdgeNullMarginPct"]),
+        "maxProtectedForcedRegressionKmS": parse_float(score["maxProtectedForcedRegressionKmS"]),
+        "weakSystematicsLeakage": int(parse_float(score["weakSystematicsLeakage"], 0.0)),
+    }
+    report = [
+        "# MTS v18.05 Evidence Export",
+        "",
+        "This pack contains tables and SVG figures for the frozen v18.05 release candidate.",
+        "",
+        f"- High-RMSE rows exported: `{summary['highRmseCaseCount']}`.",
+        f"- Branch contribution rows exported: `{summary['branchCount']}`.",
+        f"- Protected stress rows exported: `{summary['protectedStressRows']}`.",
+        f"- Null comparison rows exported: `{summary['nullComparisonRows']}`.",
+        f"- Clean high-RMSE gain: `{fmt(summary['nominalHighGainPct'])}%`.",
+        f"- Clean-set gain: `{fmt(summary['nominalCleanGainPct'])}%`.",
+        f"- High-RMSE above 20: `{summary['nominalHighAbove20']}`.",
+        f"- Branch null margin: `{fmt(summary['branchShuffleNullMarginPct'])}` percentage points.",
+        f"- Edge null margin: `{fmt(summary['edgeNullMarginPct'])}` percentage points.",
+        "",
+        "Use the CSV files as source tables and the SVG files as figure drafts.",
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-observed-v18-paper-evidence-v1",
+        "summary": summary,
+        "outputFiles": [row["file"] for row in manifest_rows] + [f"{prefix}_report.md", f"{prefix}_capsule.json"],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatev18evidenceexport(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_EVIDENCE_EXPORT_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_evidence_export_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.05 evidence export")
+    print(
+        "\t".join(
+            [
+                f"high_rows={summary['highRmseCaseCount']}",
+                f"branches={summary['branchCount']}",
+                f"high={fmt(summary['nominalHighGainPct'])}%",
+                f"clean={fmt(summary['nominalCleanGainPct'])}%",
+                f"above20={summary['nominalHighAbove20']}",
+                f"branch_null_margin={fmt(summary['branchShuffleNullMarginPct'])}",
+                f"edge_null_margin={fmt(summary['edgeNullMarginPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 evidence export to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_candidate_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     context = observed_state_candidate_context()
@@ -67616,6 +67994,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18safetydependency",
             "observedstatev18edgeharden",
             "observedstatev18releasestress",
+            "observedstatev18evidenceexport",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -67855,6 +68234,8 @@ def main() -> None:
         cmd_observedstatev18edgeharden(args)
     elif args.mode == "observedstatev18releasestress":
         cmd_observedstatev18releasestress(args)
+    elif args.mode == "observedstatev18evidenceexport":
+        cmd_observedstatev18evidenceexport(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
