@@ -164,6 +164,8 @@ DEFAULT_OBSERVED_STATE_V18_EDGE_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-v1
 DEFAULT_OBSERVED_STATE_V18_RELEASE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-stress-v1"
 DEFAULT_OBSERVED_STATE_V18_EVIDENCE_EXPORT_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-paper-evidence-v1"
 DEFAULT_OBSERVED_STATE_V18_PAPER_SECTION_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-paper-section-v1"
+DEFAULT_OBSERVED_STATE_V18_DOCX_BUNDLE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-docx-bundle-v1"
+DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
@@ -57468,6 +57470,251 @@ def cmd_observedstatev18papersection(args: argparse.Namespace) -> None:
     print(f"Wrote v18 paper section to {out_dir.resolve()}")
 
 
+def docx_xml_text(text: object) -> str:
+    return html.escape("" if text is None else str(text), quote=True)
+
+
+def docx_paragraph(text: str, style: str | None = None, bold: bool = False) -> str:
+    style_xml = f'<w:pPr><w:pStyle w:val="{docx_xml_text(style)}"/></w:pPr>' if style else ""
+    bold_xml = "<w:rPr><w:b/></w:rPr>" if bold else ""
+    return f"<w:p>{style_xml}<w:r>{bold_xml}<w:t>{docx_xml_text(text)}</w:t></w:r></w:p>"
+
+
+def docx_table(rows: list[list[object]]) -> str:
+    if not rows:
+        return ""
+    cells = []
+    for ridx, row in enumerate(rows):
+        row_cells = []
+        for value in row:
+            cell_text = docx_xml_text(value)
+            bold_xml = "<w:rPr><w:b/></w:rPr>" if ridx == 0 else ""
+            row_cells.append(
+                "<w:tc><w:tcPr><w:tcW w:w=\"0\" w:type=\"auto\"/></w:tcPr>"
+                f"<w:p><w:r>{bold_xml}<w:t>{cell_text}</w:t></w:r></w:p></w:tc>"
+            )
+        cells.append("<w:tr>" + "".join(row_cells) + "</w:tr>")
+    return (
+        "<w:tbl>"
+        "<w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>"
+        "<w:top w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"B7B7B7\"/>"
+        "<w:left w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"B7B7B7\"/>"
+        "<w:bottom w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"B7B7B7\"/>"
+        "<w:right w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"B7B7B7\"/>"
+        "<w:insideH w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"D9D9D9\"/>"
+        "<w:insideV w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"D9D9D9\"/>"
+        "</w:tblBorders></w:tblPr>"
+        + "".join(cells)
+        + "</w:tbl>"
+    )
+
+
+def docx_page_break() -> str:
+    return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>'
+
+
+def append_docx_body_xml(source_docx: Path, dest_docx: Path, appended_xml: str) -> None:
+    if not source_docx.exists():
+        raise FileNotFoundError(f"Source DOCX not found: {source_docx}")
+    dest_docx.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(source_docx, "r") as zin, zipfile.ZipFile(dest_docx, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        document_xml = zin.read("word/document.xml").decode("utf-8")
+        body_end = document_xml.rfind("</w:body>")
+        if body_end < 0:
+            raise ValueError("word/document.xml has no </w:body> marker")
+        sect_start = document_xml.rfind("<w:sectPr", 0, body_end)
+        insert_at = sect_start if sect_start >= 0 else body_end
+        updated_xml = document_xml[:insert_at] + appended_xml + document_xml[insert_at:]
+        for item in zin.infolist():
+            if item.filename == "word/document.xml":
+                zout.writestr(item, updated_xml.encode("utf-8"))
+            else:
+                zout.writestr(item, zin.read(item.filename))
+
+
+def write_observed_state_v18_docx_bundle_artifacts(out_dir: Path, source_docx: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paper_dir = DEFAULT_OBSERVED_STATE_V18_PAPER_SECTION_OUT
+    evidence_dir = DEFAULT_OBSERVED_STATE_V18_EVIDENCE_EXPORT_OUT
+    if not (paper_dir / "mts_v18_05_paper_section_capsule.json").exists():
+        write_observed_state_v18_paper_section_artifacts(paper_dir)
+
+    capsule = json.loads((paper_dir / "mts_v18_05_paper_section_capsule.json").read_text(encoding="utf-8"))
+    summary = capsule["summary"]
+    result_rows = read_csv_rows(paper_dir / "mts_v18_05_results_table.csv")
+    high_rows = read_csv_rows(evidence_dir / "mts_v18_05_evidence_high_rmse_before_after.csv")
+    branch_rows = read_csv_rows(evidence_dir / "mts_v18_05_evidence_branch_contributions.csv")
+    null_rows = read_csv_rows(evidence_dir / "mts_v18_05_evidence_null_comparison.csv")
+
+    figures_dir = out_dir / "figures"
+    tables_dir = out_dir / "tables"
+    figures_dir.mkdir(exist_ok=True)
+    tables_dir.mkdir(exist_ok=True)
+
+    copied_rows: list[dict] = []
+    copy_map = [
+        (evidence_dir / "mts_v18_05_evidence_high_rmse_before_after.svg", figures_dir / "figure_1_v18_05_high_rmse_before_after.svg", "figure"),
+        (evidence_dir / "mts_v18_05_evidence_branch_contributions.svg", figures_dir / "figure_2_v18_05_branch_contributions.svg", "figure"),
+        (evidence_dir / "mts_v18_05_evidence_null_comparison.svg", figures_dir / "figure_3_v18_05_null_comparison.svg", "figure"),
+        (evidence_dir / "mts_v18_05_evidence_high_rmse_before_after.csv", tables_dir / "table_high_rmse_before_after.csv", "table"),
+        (evidence_dir / "mts_v18_05_evidence_branch_contributions.csv", tables_dir / "table_branch_contributions.csv", "table"),
+        (evidence_dir / "mts_v18_05_evidence_null_comparison.csv", tables_dir / "table_null_comparison.csv", "table"),
+        (paper_dir / "mts_v18_05_paper_section.md", tables_dir / "paper_section_source.md", "paper-section"),
+        (paper_dir / "mts_v18_05_methods_box.md", tables_dir / "methods_box_source.md", "paper-section"),
+        (paper_dir / "mts_v18_05_limitations_box.md", tables_dir / "limitations_box_source.md", "paper-section"),
+    ]
+    for src, dst, kind in copy_map:
+        shutil.copy2(src, dst)
+        copied_rows.append(
+            {
+                "kind": kind,
+                "sourcePath": str(src.resolve()),
+                "bundlePath": str(dst.relative_to(out_dir)),
+                "sha256": hashlib.sha256(dst.read_bytes()).hexdigest(),
+            }
+        )
+
+    top_repairs = sorted(high_rows, key=lambda row: -parse_float(row.get("gainKmS"), 0.0))[:10]
+    top_branches = sorted(branch_rows, key=lambda row: -parse_float(row.get("totalGainKmS"), 0.0))[:8]
+    result_table = [["Metric", "Value", "Unit"]]
+    for row in result_rows:
+        value = parse_float(row.get("value"))
+        result_table.append([row.get("metric", ""), fmt(value) if math.isfinite(value) else row.get("value", ""), row.get("unit", "")])
+    repair_table = [["Galaxy", "Canonical RMSE", "v18.05 RMSE", "Gain", "Branch"]]
+    for row in top_repairs:
+        repair_table.append(
+            [
+                row.get("galaxy", ""),
+                fmt(parse_float(row.get("baselineRmse"))),
+                fmt(parse_float(row.get("v18_05Rmse"))),
+                fmt(parse_float(row.get("gainKmS"))),
+                row.get("branch", ""),
+            ]
+        )
+    branch_table = [["Branch", "High cases", "Total gain", "Mean gain", "Status"]]
+    for row in top_branches:
+        branch_table.append(
+            [
+                row.get("branch", ""),
+                row.get("highCaseCount", ""),
+                fmt(parse_float(row.get("totalGainKmS"))),
+                fmt(parse_float(row.get("meanGainKmS"))),
+                row.get("branchReleaseStatus", ""),
+            ]
+        )
+    null_table = [["Comparison", "Gain", "Margin", "Notes"]]
+    for row in null_rows:
+        null_table.append([row.get("comparison", ""), f"{fmt(parse_float(row.get('gainPct')))}%", fmt(parse_float(row.get("marginPct"))), row.get("notes", "")])
+
+    docx_parts = [
+        docx_page_break(),
+        docx_paragraph("MTS v18.05 Observed-State Response Candidate", "Heading1"),
+        docx_paragraph(
+            "This section is appended by the MTS harness from the frozen v18.05 release-candidate evidence pack. It is a review candidate section, not a replacement for the locked canonical MTS baseline."
+        ),
+        docx_paragraph("Candidate definition", "Heading2"),
+        docx_paragraph(
+            "MTS v18.05 is a deterministic observed-state response candidate for the clean high-RMSE SPARC failures. It keeps q=0.77, Gamma0=809.956, and the fixed disk/bulge M/L convention locked, then applies state/profile response branches only where the clean framework-facing state gate is satisfied. It does not use galaxy names, raw residual lookup, raw RMSE as a formula input, or weak/systematics galaxies in fitting."
+        ),
+        docx_paragraph("Validation protocol", "Heading2"),
+        docx_paragraph(
+            "The candidate was tested on the clean SPARC validation chain with the 15 weak/systematics galaxies held out from framework-facing scoring. The release stress pack includes clean high-RMSE performance, full clean-set performance, route-stratified holdout replay, branch ablation, protected-lookalike forced-branch stress, branch-label shuffled nulls, and a state-respecting disk-shear edge null."
+        ),
+        docx_paragraph("Key results", "Heading2"),
+        docx_table(result_table),
+        docx_paragraph(
+            f"The clean high-RMSE gain is {fmt(summary['cleanHighGainPct'])}%, the clean-set gain is {fmt(summary['cleanSetGainPct'])}%, and {summary['highRmseAbove20']} high-RMSE cases remain above 20 km/s after applying the candidate. The median holdout high-RMSE gain is {fmt(summary['medianHoldoutHighGainPct'])}%."
+        ),
+        docx_paragraph(
+            f"The branch-shuffle null margin is {fmt(summary['branchShuffleNullMarginPct'])} percentage points. The disk-shear edge-null margin is {fmt(summary['edgeNullMarginPct'])} percentage points. The maximum forced protected-lookalike regression is {fmt(summary['maxForcedProtectedRegressionKmS'])} km/s."
+        ),
+        docx_paragraph("Largest high-RMSE repairs", "Heading2"),
+        docx_table(repair_table),
+        docx_paragraph("Branch evidence", "Heading2"),
+        docx_table(branch_table),
+        docx_paragraph("Null and protection checks", "Heading2"),
+        docx_table(null_table),
+        docx_paragraph("Figure bundle", "Heading2"),
+        docx_paragraph("Figure 1: v18.05 high-RMSE before/after. File: figures/figure_1_v18_05_high_rmse_before_after.svg."),
+        docx_paragraph("Figure 2: v18.05 branch contributions. File: figures/figure_2_v18_05_branch_contributions.svg."),
+        docx_paragraph("Figure 3: v18.05 null comparison. File: figures/figure_3_v18_05_null_comparison.svg."),
+        docx_paragraph("Limitations", "Heading2"),
+        docx_paragraph(
+            "v18.05 is a release candidate, not canonical MTS. The weak/systematics SPARC cases remain protected/excluded from transport-law fitting. Non-SPARC full baryonic validation remains blocked by missing native radial component tables. The claim should remain a clean-set framework-candidate repair of high-RMSE rotation curves, not a broad cosmology claim."
+        ),
+    ]
+    draft_docx = out_dir / "MTS_Galaxy_Law_v16_v18_05_candidate_draft.docx"
+    append_docx_body_xml(source_docx, draft_docx, "".join(docx_parts))
+
+    copied_rows.append(
+        {
+            "kind": "docx",
+            "sourcePath": str(source_docx.resolve()),
+            "bundlePath": str(draft_docx.relative_to(out_dir)),
+            "sha256": hashlib.sha256(draft_docx.read_bytes()).hexdigest(),
+        }
+    )
+    write_csv(out_dir / "mts_v18_05_docx_bundle_manifest.csv", copied_rows)
+    report = [
+        "# MTS v18.05 DOCX Bundle",
+        "",
+        f"- Source DOCX: `{source_docx.resolve()}`.",
+        f"- Draft DOCX: `{draft_docx.name}`.",
+        f"- Clean high-RMSE gain: `{fmt(summary['cleanHighGainPct'])}%`.",
+        f"- Clean-set gain: `{fmt(summary['cleanSetGainPct'])}%`.",
+        f"- High-RMSE above 20 km/s: `{summary['highRmseAbove20']}`.",
+        f"- Branch null margin: `{fmt(summary['branchShuffleNullMarginPct'])}` percentage points.",
+        f"- Edge null margin: `{fmt(summary['edgeNullMarginPct'])}` percentage points.",
+        f"- Max forced protected regression: `{fmt(summary['maxForcedProtectedRegressionKmS'])}` km/s.",
+        "",
+        "The original DOCX is preserved. The appended draft section is generated from the tested v18.05 evidence pack.",
+    ]
+    (out_dir / "mts_v18_05_docx_bundle_report.md").write_text("\n".join(report), encoding="utf-8")
+    capsule_out = {
+        "analysisName": "mts-observed-v18-docx-bundle-v1",
+        "summary": {
+            **summary,
+            "sourceDocx": str(source_docx.resolve()),
+            "draftDocx": draft_docx.name,
+            "bundleFileCount": len(copied_rows),
+            "draftDocxSha256": hashlib.sha256(draft_docx.read_bytes()).hexdigest(),
+        },
+        "outputFiles": [
+            "MTS_Galaxy_Law_v16_v18_05_candidate_draft.docx",
+            "figures/",
+            "tables/",
+            "mts_v18_05_docx_bundle_manifest.csv",
+            "mts_v18_05_docx_bundle_report.md",
+            "mts_v18_05_docx_bundle_capsule.json",
+        ],
+    }
+    (out_dir / "mts_v18_05_docx_bundle_capsule.json").write_text(
+        json.dumps(json_clean(capsule_out), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return capsule_out
+
+
+def cmd_observedstatev18docxbundle(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_DOCX_BUNDLE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_docx = Path(args.source_docx) if args.source_docx else DEFAULT_MTS_LAW_DOCX
+    capsule = write_observed_state_v18_docx_bundle_artifacts(out_dir, source_docx)
+    summary = capsule["summary"]
+    print("MTS v18.05 DOCX bundle")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['cleanHighGainPct'])}%",
+                f"clean={fmt(summary['cleanSetGainPct'])}%",
+                f"above20={summary['highRmseAbove20']}",
+                f"branch_null_margin={fmt(summary['branchShuffleNullMarginPct'])}",
+                f"docx={summary['draftDocx']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 DOCX bundle to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_candidate_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     context = observed_state_candidate_context()
@@ -68263,6 +68510,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18releasestress",
             "observedstatev18evidenceexport",
             "observedstatev18papersection",
+            "observedstatev18docxbundle",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -68294,6 +68542,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", default=str(DEFAULT_OUT))
     parser.add_argument("--metadata-file", default="")
     parser.add_argument("--source-dir", default="")
+    parser.add_argument("--source-docx", default="")
     parser.add_argument("--source-cache", default="")
     parser.add_argument("--external-baryon-file", default="")
     parser.add_argument("--component-reconstruct-dir", default="")
@@ -68506,6 +68755,8 @@ def main() -> None:
         cmd_observedstatev18evidenceexport(args)
     elif args.mode == "observedstatev18papersection":
         cmd_observedstatev18papersection(args)
+    elif args.mode == "observedstatev18docxbundle":
+        cmd_observedstatev18docxbundle(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
