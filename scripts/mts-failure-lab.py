@@ -41938,6 +41938,14 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         "(lockedRouteLow > 0.5 && memory > 12 && fGasOut < 0.08 && hOverRout < 0.08 "
         "&& outerBulgeShare > 0.05 && outerBulgeShare < 0.12 && barCurv > 0 && pointDensity < 0.45)"
     )
+    compact_bulge_edge_drive = (
+        "min(max(0.25 + 0.75 * "
+        "min(min(min(min(max(0, min(1, (memory - 11) / 3)), max(0, min(1, (0.075 - fGasOut) / 0.035))), "
+        "max(0, min(1, (0.090 - hOverRout) / 0.030))), max(0, min(1, (outerDiskShare - 0.78) / 0.12))), "
+        "max(0, min(1, (0.95 - lockedUMax) / 0.22))) * max(0.65, max(0, min(1, (barCurv + 5) / 20))), 0), 1)"
+    )
+    compact_bulge_edge_floor = f"(1 + ({compact_bulge_edge_drive}) * 1.25)"
+    compact_bulge_edge_q = f"(q + ({compact_bulge_edge_drive}) * (0.55 - q))"
     lowload_compact_lowgas_disk_support_gate = (
         "(lockedRouteLow > 0.5 && memory > 2.4 && memory < 3.4 && fGasOut < 0.08 "
         "&& outerGasShare < 0.08 && outerBulgeShare < 0.01 && hOverRout > 0.28 "
@@ -41969,6 +41977,10 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         "&& pointDensity > 0.6 && pointDensity < 1.75 && fGasOut > 0.13 && fGasOut < 0.25 "
         "&& lockedUOut > 0.29 && lockedUOut < 0.45 && barInnerOuter > 1.2)"
     )
+    bulge_disk_shoulder_high_floor_gate = (
+        f"({bulge_disk_shoulder_gate} && memory > 8.0 && lockedUMax > 1.60 && outerGasShare < 0.18 "
+        "&& outerBulgeShare > 0.20 && pointDensity > 1.0)"
+    )
     gas_disk_dense_support_gate = (
         "(lockedRouteSingle > 0.5 && memory > 5.5 && fGasOut > 0.25 && fGasOut < 0.65 "
         "&& outerGasShare > 0.24 && pointDensity > 2.2 && outerBulgeShare < 0.01 && lockedUOut < 0.31)"
@@ -41999,11 +42011,95 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         "(lockedRouteSingle > 0.5 && memory > 7.5 && memory < 8.8 && fGasOut > 0.1 && fGasOut < 0.18 "
         "&& outerBulgeShare < 0.01 && pointDensity > 2 && lockedUOut > 0.33 && lockedUOut < 0.38 && barCurv < -15)"
     )
+    lowload_q_tail_lift_gate = (
+        "(lockedRouteLow > 0.5 && fGasOut >= 0.16 && fGasOut <= 0.24 && memory >= 5.5 && memory <= 7.2 "
+        "&& lockedUOut >= 0.33 && lockedUOut <= 0.39 && outerBulgeShare < 0.02 "
+        "&& pointDensity >= 0.45 && pointDensity <= 0.70 && barCurv > -20)"
+    )
+    lowload_q_compressed_transfer_gate = (
+        "(lockedRouteLow > 0.5 && fGasOut <= 0.30 && outerDiskShare >= 0.65 && ("
+        "(hOverRout > 0.18 && memory < 5.0 && pointDensity > 0.90 && outerBulgeShare < 0.02) || "
+        "(memory > 9.0 && lockedUMax < 0.95 && lockedUOut < 0.33 && outerDiskShare >= 0.68 && pointDensity < 0.80) || "
+        f"{lowload_q_tail_lift_gate}))"
+    )
+    compact_memory_q_protected_lookalike_gate = (
+        "(fGasOut >= 0.18 && fGasOut <= 0.30 && midGasShare >= 0.11 && midGasShare <= 0.20 "
+        "&& outerGasShare >= 0.18 && outerGasShare <= 0.30 && barCurv < -25 "
+        "&& lockedUOut < 0.33 && lGapOverH > 0.28)"
+    )
+    compact_memory_q_gate = (
+        f"(!{compact_memory_q_protected_lookalike_gate} && lockedRouteLow > 0.5 && outerDiskShare >= 0.65 "
+        "&& lockedUMax <= 0.90 && memory > 6 && lockedUMax < 0.82 && pointDensity < 0.45 && outerBulgeShare < 0.02)"
+    )
+    sparse_tail_polish_gate = (
+        "(lockedRouteLow > 0.5 && fGasOut < 0.08 && hOverRout > 0.20 && pointDensity < 0.70 "
+        "&& outerDiskShare > 0.94)"
+    )
+    negative_tail_polish_gate = (
+        "(lockedRouteLow > 0.5 && memory > 7.0 && fGasOut < 0.20 && outerGasShare < 0.20 "
+        "&& lockedUOut < 0.34 && pointDensity > 0.75 && hOverRout < 0.13 && lockedUMax < 0.85 && barCurv < -20)"
+    )
+    gas_memory_compressed_gate = (
+        "((lockedRouteSingle > 0.5 && fGasOut >= 0.35 && fGasOut <= 0.55 && pointDensity >= 1.20 "
+        "&& pointDensity <= 1.70 && midGasShare < 0.30 && barCurv < -15 && outerBulgeShare < 0.02 && lockedUMax <= 1.45) || "
+        "(lockedRouteLow > 0.5 && fGasOut >= 0.40 && fGasOut <= 0.70 && hOverRout >= 0.14 "
+        "&& outerGasShare >= 0.40 && midGasShare < 0.35 && innerGasShare < 0.12 && pointDensity <= 1.50 && lockedUMax <= 0.90) || "
+        "(lockedRouteLow > 0.5 && fGasOut > 0.78 && memory < 1.20 && outerGasShare > 0.75 && pointDensity <= 1.50 && lockedUMax <= 0.90))"
+    )
+    gas_memory_dwarf_tail_gate = (
+        "(lockedRouteLow > 0.5 && fGasOut > 0.78 && memory < 1.20 && outerGasShare > 0.75)"
+    )
+    shelf_edge_compressed_gate = (
+        "(lockedRouteSingle > 0.5 && fGasOut >= 0.30 && fGasOut <= 0.40 && pointDensity < 1.0 "
+        "&& hOverRout > 0.12 && outerDiskShare >= 0.60 && outerGasShare <= 0.32 && lockedUMax <= 1.25)"
+    )
+    dominant_bulge_tail_gate = (
+        "(lockedRouteSingle > 0.5 && outerBulgeShare > 0.60 && innerBulgeShare > 0.80 "
+        "&& outerGasShare < 0.08 && pointDensity >= 0.70 && pointDensity <= 1.20)"
+    )
+    extreme_umax_tail_gate = (
+        "(lockedRouteSingle > 0.5 && lockedUMax > 5.0 && hOverRout > 0.18 && outerBulgeShare > 0.10 "
+        "&& outerGasShare < 0.10)"
+    )
+    dense_positive_tail_gate = (
+        "(lockedRouteSingle > 0.5 && outerBulgeShare > 0.40 && innerBulgeShare > 0.70 "
+        "&& pointDensity > 1.50 && barCurv > 40 && fGasOut < 0.20)"
+    )
+    positive_bulge_radial_gate = (
+        "(lockedRouteSingle > 0.5 && memory > 7.3 && memory < 8.0 && outerBulgeShare > 0.20 "
+        "&& outerBulgeShare < 0.23 && pointDensity < 0.55 && hOverRout > 0.09 && hOverRout < 0.11 "
+        "&& fGasOut > 0.20 && fGasOut < 0.25 && barCurv > 38 && barCurv < 48)"
+    )
+    positive_bulge_radial_zone = "((x < 0.33) ? 4.5 : ((x < 0.66) ? 2.75 : 1.5))"
+    dense_positive_radial_gate = (
+        "(lockedRouteSingle > 0.5 && memory > 7.1 && memory < 7.55 && fGasOut > 0.11 && fGasOut < 0.16 "
+        "&& outerBulgeShare > 0.45 && pointDensity > 1.8 && hOverRout > 0.11 && hOverRout < 0.13 "
+        "&& lockedUMax < 2.05 && barCurv > 60 && barCurv < 70)"
+    )
+    dense_positive_radial_zone = "((x < 0.33) ? 8.0 : ((x < 0.66) ? 4.0 : 3.5))"
+    lowload_high_memory_fallback_gate = (
+        "(lockedRouteLow > 0.5 && memory > 5.0 && hOverRout < 0.17 && fGasOut < 0.42 "
+        "&& lockedUOut < 0.43 && lockedUMax < 1.05 && outerBulgeShare < 0.12 "
+        "&& outerGasShare > 0.06 && outerGasShare < 0.36 && pointDensity < 1.25 && barCurv < 5)"
+    )
+    lowload_gas_disk_fallback_gate = (
+        "(lockedRouteLow > 0.5 && memory > 1.7 && memory < 2.8 && fGasOut > 0.36 && fGasOut < 0.72 "
+        "&& outerGasShare > 0.35 && lockedUOut > 0.36 && pointDensity > 1.35 && lGapOverH < 0.75)"
+    )
+    buffered_dense_fallback_gate = (
+        "(lockedRouteSingle > 0.5 && memory > 4.0 && lockedUMax > 1.10 && pointDensity > 0.40 "
+        "&& fGasOut < 0.45 && lockedUOut > 0.24 && outerBulgeShare < 0.42)"
+    )
+    buffered_gas_rich_fallback_gate = (
+        "(lockedRouteSingle > 0.5 && memory < 2.1 && fGasOut > 0.50 && outerGasShare > 0.45 "
+        "&& hOverRout > 0.20 && pointDensity < 1.20 && outerBulgeShare < 0.02)"
+    )
     compact_curvature_floor = (
         "min(max(1.3 + (8 * hOverRout) + (0.02 * max(0, -barCurv - 15)) "
         "+ ((2 * max(0, hOverRout - 0.14)) / 0.06) "
         "- ((0.75 * max(0, outerGasShare - 0.2)) / 0.2), 1.7), 4.5)"
     )
+    compact_memory_q_floor = f"min(max({compact_curvature_floor} - 0.10, 1.70), 2.70)"
     shelf_curvature_floor = (
         "min(max(2.25 "
         "+ (0.7 * min(1, max(0, (memory - 6) / 3)) * min(1, max(0, (0.16 - fGasOut) / 0.16))) "
@@ -42061,6 +42157,21 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         "- (0.02 * min(1, max(0, (pointDensity - 2) / 1) * max(0, (0.18 - fGasOut) / 0.1) * max(0, (-barCurv - 15) / 20))), 0.1), 1.6)"
     )
     q_cases = [
+        (positive_bulge_radial_gate, "1.50"),
+        (dense_positive_radial_gate, "1.50"),
+        (extreme_umax_tail_gate, "2.00"),
+        (dominant_bulge_tail_gate, "1.05"),
+        (dense_positive_tail_gate, "0.95"),
+        (sparse_tail_polish_gate, "0.45"),
+        (negative_tail_polish_gate, "0.40"),
+        (compact_memory_q_gate, "0.10"),
+        (compact_bulge_shear_edge_gate, compact_bulge_edge_q),
+        (lowload_q_tail_lift_gate, "0.85"),
+        (lowload_q_compressed_transfer_gate, "0.85"),
+        (gas_memory_dwarf_tail_gate, "0.85"),
+        (gas_memory_compressed_gate, "0.65"),
+        (shelf_edge_compressed_gate, "0.65"),
+        (sparse_stellar_shelf_gate, "1.40"),
         (dense_bulge_gate, "0.50"),
         (buffered_gas_bulge_route_safe_ridge_gate, "1.85"),
         (buffered_disk_shear_high_q_shape_gate, "2.75"),
@@ -42127,7 +42238,8 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         f"|| {disk_shelf_transition_gate} || {gas_rich_high_shear_transition_gate} || {midgas_memory_transition_gate} "
         f"|| {sparse_gas_transition_gate} || {outer_rising_transition_gate} || {outer_negative_transition_gate} "
         f"|| {gas_envelope_support_gate} || {gas_disk_edge_v2_gate} || {compact_bulge_shear_edge_gate} "
-        f"|| {lowload_compact_lowgas_disk_support_gate} || {gas_extended_saturation_gate}) && !({over_gate} || {gas_envelope_suppression_gate})) ? 1 : {uncapped})"
+        f"|| {lowload_compact_lowgas_disk_support_gate} || {gas_extended_saturation_gate} "
+        f"|| {lowload_high_memory_fallback_gate} || {lowload_gas_disk_fallback_gate}) && !({over_gate} || {gas_envelope_suppression_gate})) ? 1 : {uncapped})"
     )
     disk_edge_branch_cap = f"(({buffered_disk_edge_support_gate}) ? 1.5 : {uncapped})"
     gas_bulge_route_safe_ridge_cap = uncapped
@@ -42136,6 +42248,21 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
     lowload_lowgas_disk_support_zone = "((x < 0.33) ? 2.0 : ((x < 0.66) ? 3.0 : 1.5))"
     lowload_lowgas_disk_support_cap = f"(({lowload_compact_lowgas_disk_support_gate}) ? {lowload_lowgas_disk_support_zone} : {uncapped})"
     floor_cases = [
+        (positive_bulge_radial_gate, positive_bulge_radial_zone),
+        (dense_positive_radial_gate, dense_positive_radial_zone),
+        (extreme_umax_tail_gate, "5.0"),
+        (dominant_bulge_tail_gate, "4.5"),
+        (dense_positive_tail_gate, "4.0"),
+        (sparse_tail_polish_gate, "3.0"),
+        (negative_tail_polish_gate, "2.5"),
+        (compact_memory_q_gate, compact_memory_q_floor),
+        (compact_bulge_shear_edge_gate, compact_bulge_edge_floor),
+        (lowload_q_tail_lift_gate, "3.0"),
+        (lowload_q_compressed_transfer_gate, "2.10"),
+        (gas_memory_dwarf_tail_gate, "1.6"),
+        (gas_memory_compressed_gate, "2.0"),
+        (shelf_edge_compressed_gate, "2.2"),
+        (bulge_disk_shoulder_high_floor_gate, "3.25"),
         (lowload_compact_lowgas_disk_support_gate, lowload_lowgas_disk_support_zone),
         (sparse_gas_transition_gate, f"max({lowload_transition_floor}, 2.55)"),
         (early_bulge_transition_gate, f"max({lowload_transition_floor}, 2.1)"),
@@ -42188,6 +42315,10 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         (dense_bulge_high_umax_shoulder_gate, "2.0"),
         (extreme_umax_bulge_core_gate, "2.4"),
         (dense_lowgas_disk_curvature_gate, "2.0"),
+        (lowload_high_memory_fallback_gate, "1.65"),
+        (lowload_gas_disk_fallback_gate, "1.18"),
+        (buffered_dense_fallback_gate, "1.50"),
+        (buffered_gas_rich_fallback_gate, "1.18"),
     ]
     shape_floor = "1"
     for cond, value in reversed(floor_cases):
