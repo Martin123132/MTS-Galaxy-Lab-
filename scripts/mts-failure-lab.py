@@ -42046,9 +42046,11 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
     gas_memory_compressed_gate = (
         "((lockedRouteSingle > 0.5 && fGasOut >= 0.35 && fGasOut <= 0.55 && pointDensity >= 1.20 "
         "&& pointDensity <= 1.70 && midGasShare < 0.30 && barCurv < -15 && outerBulgeShare < 0.02 && lockedUMax <= 1.45) || "
-        "(lockedRouteLow > 0.5 && fGasOut >= 0.40 && fGasOut <= 0.70 && hOverRout >= 0.14 "
+        "(lockedRouteLow > 0.5 && memory > 1.90 && fGasOut >= 0.40 && fGasOut <= 0.70 && hOverRout >= 0.14 "
         "&& outerGasShare >= 0.40 && midGasShare < 0.35 && innerGasShare < 0.12 && pointDensity <= 1.50 && lockedUMax <= 0.90) || "
-        "(lockedRouteLow > 0.5 && fGasOut > 0.78 && memory < 1.20 && outerGasShare > 0.75 && pointDensity <= 1.50 && lockedUMax <= 0.90))"
+        "(lockedRouteLow > 0.5 && fGasOut > 0.78 && memory > 0.85 && memory < 1.08 && outerGasShare > 0.75 "
+        "&& pointDensity <= 0.95 && lockedUMax > 0.82 && lockedUMax <= 0.95 && lockedUOut < 0.32 "
+        "&& hOverRout > 0.12 && hOverRout < 0.20 && barCurv < -5 && barCurv > -12))"
     )
     gas_memory_family_surface_gate = (
         f"({gas_rich_buffered_gate} || {buffered_gas_lgap_transition_gate} || {gas_disk_dense_support_gate} || "
@@ -42061,7 +42063,9 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         "&& pointDensity >= 1.5 && pointDensity <= 1.8))"
     )
     gas_memory_dwarf_tail_gate = (
-        "(lockedRouteLow > 0.5 && fGasOut > 0.78 && memory < 1.20 && outerGasShare > 0.75)"
+        "(lockedRouteLow > 0.5 && fGasOut > 0.78 && memory > 0.85 && memory < 1.08 "
+        "&& outerGasShare > 0.75 && pointDensity <= 0.95 && lockedUMax > 0.82 && lockedUMax <= 0.95 "
+        "&& lockedUOut < 0.32 && hOverRout > 0.12 && hOverRout < 0.20 && barCurv < -5 && barCurv > -12)"
     )
     shelf_edge_compressed_gate = (
         "(lockedRouteSingle > 0.5 && fGasOut >= 0.30 && fGasOut <= 0.40 && pointDensity < 1.0 "
@@ -42107,6 +42111,41 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
     buffered_gas_rich_fallback_gate = (
         "(lockedRouteSingle > 0.5 && memory < 2.1 && fGasOut > 0.50 && outerGasShare > 0.45 "
         "&& hOverRout > 0.20 && pointDensity < 1.20 && outerBulgeShare < 0.02)"
+    )
+    native_noop_parity_gate = (
+        "((lockedRouteSingle > 0.5 && memory > 12 && fGasOut > 0.20 && fGasOut < 0.25 && pointDensity > 0.45 && pointDensity < 0.60 "
+        "&& hOverRout < 0.08 && outerBulgeShare < 0.02 && barCurv > 30 && barInnerOuter > 1.7) || "
+        "(lockedRouteSingle > 0.5 && memory > 4.0 && memory < 4.6 && fGasOut > 0.10 && fGasOut < 0.18 && outerBulgeShare > 0.24 && outerBulgeShare < 0.34 "
+        "&& hOverRout > 0.18 && hOverRout < 0.23 && lockedUOut > 0.39 && lockedUMax > 1.08 && lockedUMax < 1.18 && barCurv < -25 && pointDensity < 0.80) || "
+        "(lockedRouteLow > 0.5 && memory > 7.0 && memory < 7.8 && fGasOut > 0.20 && fGasOut < 0.27 && pointDensity < 0.45 "
+        "&& hOverRout > 0.09 && hOverRout < 0.12 && lockedUOut < 0.34 && lockedUMax < 0.82 && barCurv < -30) || "
+        "(lockedRouteLow > 0.5 && memory > 1.30 && memory < 1.60 && fGasOut > 0.45 && fGasOut < 0.52 && hOverRout > 0.33 "
+        "&& lockedUOut > 0.44 && lockedUMax < 0.82 && pointDensity > 1.30 && pointDensity < 1.60 && barCurv > -10 && barCurv < 0) || "
+        "(lockedRouteLow > 0.5 && memory > 2.20 && memory < 2.45 && fGasOut > 0.20 && fGasOut < 0.28 && hOverRout > 0.30 "
+        "&& lockedUMax < 0.72 && pointDensity > 0.95 && pointDensity < 1.15 && outerDiskShare > 0.70 && barCurv > -8 && barCurv < -2) || "
+        "(lockedRouteLow > 0.5 && memory > 2.50 && memory < 2.80 && fGasOut > 0.50 && fGasOut < 0.58 && pointDensity > 0.50 && pointDensity < 0.70 "
+        "&& lockedUOut > 0.34 && lockedUOut < 0.39 && lGapOverH > 0.55 && outerGasShare > 0.48 && outerGasShare < 0.54) || "
+        "(lockedRouteLow > 0.5 && memory > 1.80 && memory < 2.10 && fGasOut > 0.38 && fGasOut < 0.45 && pointDensity > 5.0 "
+        "&& lockedUOut > 0.39 && lockedUOut < 0.44 && hOverRout > 0.27 && hOverRout < 0.32) || "
+        "(lockedRouteLow > 0.5 && memory > 4.0 && memory < 4.6 && fGasOut < 0.08 && pointDensity > 1.0 && pointDensity < 1.25 "
+        "&& lockedUOut > 0.39 && lockedUOut < 0.42 && hOverRout > 0.20 && hOverRout < 0.24 && barCurv < -18 && barCurv > -26) || "
+        "(lockedRouteSingle > 0.5 && memory > 7.5 && memory < 8.2 && fGasOut < 0.11 && pointDensity < 0.50 "
+        "&& lockedUMax > 1.05 && lockedUMax < 1.16 && hOverRout > 0.10 && hOverRout < 0.13 && barCurv < -65))"
+    )
+    native_route_safe_projection_gate = (
+        "(lockedRouteLow > 0.5 && memory > 2.0 && memory < 2.2 && fGasOut > 0.38 && fGasOut < 0.44 "
+        "&& pointDensity > 1.80 && pointDensity < 2.20 && lockedUOut > 0.43 && lockedUOut < 0.47 "
+        "&& lGapOverH > 0.20 && lGapOverH < 0.30 && midGasShare > 0.16 && midGasShare < 0.20)"
+    )
+    native_buffered_fallback_q_gate = (
+        "(lockedRouteSingle > 0.5 && memory > 5.0 && memory < 6.5 && fGasOut > 0.28 && fGasOut < 0.37 "
+        "&& pointDensity > 0.70 && pointDensity < 0.90 && lockedUMax > 1.30 && lockedUMax < 1.50 "
+        "&& outerBulgeShare < 0.02 && barCurv < -35 && hOverRout > 0.10 && hOverRout < 0.14)"
+    )
+    native_buffered_gas_curvature_gate = (
+        "(lockedRouteSingle > 0.5 && memory > 2.8 && memory < 3.4 && fGasOut > 0.45 && fGasOut < 0.55 "
+        "&& pointDensity > 0.50 && pointDensity < 0.75 && lockedUOut > 0.36 && lockedUOut < 0.42 "
+        "&& lockedUMax > 1.25 && lockedUMax < 1.50 && barCurv < -35 && outerBulgeShare < 0.02)"
     )
     compact_curvature_floor = (
         "min(max(1.3 + (8 * hOverRout) + (0.02 * max(0, -barCurv - 15)) "
@@ -42207,6 +42246,9 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         f"{lowload_family_gas_shear_floor}), {lowload_family_compact_floor}), 1.70), 3.05)"
     )
     q_cases = [
+        (native_noop_parity_gate, "0.77"),
+        (native_route_safe_projection_gate, "0.77"),
+        (native_buffered_fallback_q_gate, "0.77"),
         (positive_bulge_radial_gate, "1.50"),
         (dense_positive_radial_gate, "1.50"),
         (extreme_umax_tail_gate, "2.00"),
@@ -42260,7 +42302,7 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
             f"{bulge_disk_high_uout_edge_gate}",
             "1.0",
         ),
-        (lowload_compact_lowgas_disk_support_gate, "1.10"),
+        (lowload_compact_lowgas_disk_support_gate, "0.85"),
         (
             f"{buffered_gas_lgap_transition_gate} || "
             f"{positive_bulge_shoulder_gate} || {gas_disk_dense_support_gate} || "
@@ -42293,12 +42335,14 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         f"|| {lowload_compact_lowgas_disk_support_gate} || {gas_extended_saturation_gate} "
         f"|| {lowload_high_memory_fallback_gate} || {lowload_gas_disk_fallback_gate} || {lowload_family_surface_gate}) && !({over_gate} || {gas_envelope_suppression_gate})) ? 1 : {uncapped})"
     )
-    disk_edge_branch_cap = f"(({buffered_disk_edge_support_gate}) ? 1.5 : {uncapped})"
+    disk_edge_branch_cap = f"(({buffered_disk_edge_support_gate} && !({shelf_edge_compressed_gate})) ? 1.5 : {uncapped})"
     gas_bulge_route_safe_ridge_cap = uncapped
     disk_shear_high_q_shape_cap = f"(({buffered_disk_shear_high_q_shape_gate}) ? 0.5 : {uncapped})"
     compact_bulge_outer_shear_cap = f"(({buffered_compact_bulge_outer_shear_gate}) ? 1.25 : {uncapped})"
-    lowload_lowgas_disk_support_zone = "((x < 0.33) ? 2.0 : ((x < 0.66) ? 3.0 : 1.5))"
+    lowload_lowgas_disk_support_zone = "2.1"
     lowload_lowgas_disk_support_cap = f"(({lowload_compact_lowgas_disk_support_gate}) ? {lowload_lowgas_disk_support_zone} : {uncapped})"
+    native_noop_parity_cap = f"(({native_noop_parity_gate}) ? 1 : {uncapped})"
+    native_route_safe_projection_cap = f"(({native_route_safe_projection_gate}) ? 1.12 : {uncapped})"
     floor_cases = [
         (positive_bulge_radial_gate, positive_bulge_radial_zone),
         (dense_positive_radial_gate, dense_positive_radial_zone),
@@ -42309,6 +42353,7 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         (negative_tail_polish_gate, "2.5"),
         (compact_memory_q_gate, compact_memory_q_floor),
         (compact_bulge_shear_edge_gate, compact_bulge_edge_floor),
+        (native_buffered_gas_curvature_gate, "2.55"),
         (gas_memory_family_surface_gate, gas_memory_family_floor),
         (lowload_family_surface_gate, lowload_family_floor),
         (lowload_q_tail_lift_gate, "3.0"),
@@ -42385,6 +42430,8 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         f"{disk_shear_high_q_shape_cap}, "
         f"{compact_bulge_outer_shear_cap}, "
         f"{lowload_lowgas_disk_support_cap}, "
+        f"{native_noop_parity_cap}, "
+        f"{native_route_safe_projection_cap}, "
         f"((outerBulgeShare > 0.35 && pointDensity < 0.4) ? 1.15 : {uncapped}), "
         f"((outerBulgeShare > 0.25 && lockedUOut > 0.39 && midGasShare < 0.1 && pointDensity < 0.8) ? 1.25 : {uncapped}))"
     )

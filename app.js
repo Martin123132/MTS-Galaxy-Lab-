@@ -1841,10 +1841,12 @@
     var source = String(expression || "").trim();
     if (!source) throw new Error("Framework formula is empty.");
     if (source === V18REVIEW_TOKEN) {
-      var nativeFormula = V18_RELEASE_ARTIFACT &&
+      var nativeMeta = V18_RELEASE_ARTIFACT &&
         V18_RELEASE_ARTIFACT.metadata &&
-        V18_RELEASE_ARTIFACT.metadata.nativeFormulaV1809 &&
-        V18_RELEASE_ARTIFACT.metadata.nativeFormulaV1809.expression;
+        V18_RELEASE_ARTIFACT.metadata.nativeFormulaV1809;
+      var nativeFormula = nativeMeta &&
+        (nativeMeta.canReplaceCache === true || nativeMeta.nativeFormulaCanReplaceCache === true) &&
+        nativeMeta.expression;
       if (nativeFormula) {
         var compiledNative = compileFrameworkExpression(nativeFormula);
         compiledNative.source = source;
