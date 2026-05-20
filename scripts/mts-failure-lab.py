@@ -167,9 +167,11 @@ DEFAULT_OBSERVED_STATE_V18_PAPER_SECTION_OUT = OUTPUT_PACK_ROOT / "mts-observed-
 DEFAULT_OBSERVED_STATE_V18_DOCX_BUNDLE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-docx-bundle-v1"
 DEFAULT_OBSERVED_STATE_V18_INTEGRATED_DOCX_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-integrated-draft-v1"
 DEFAULT_OBSERVED_STATE_V18_LAW_COMPRESSION_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-law-compression-v1"
+DEFAULT_OBSERVED_STATE_V18_FAMILY_SURFACE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-family-surface-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
+V18_FAMILY_SURFACE_ARTIFACT_PATH = ROOT / "data" / "v18-07-family-surface-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -57564,6 +57566,500 @@ def cmd_observedstatev18lawcompress(args: argparse.Namespace) -> None:
     print(f"Wrote v18 law compression to {out_dir.resolve()}")
 
 
+def observed_state_v1807_family_surface_drives(curve: dict) -> dict[str, float]:
+    values = observed_state_v18_state_values(curve)
+    low_load = curve.get("lockedModelRoute") == "low-load"
+    buffered = curve.get("lockedModelRoute") == "buffered single-crossing"
+    compact_boundary = (
+        (1.0 if low_load else 0.0)
+        * clamp((values["memoryLoad"] - 5.6) / 3.0, 0.0, 1.0)
+        * clamp((0.18 - values["hOverRout"]) / 0.10, 0.0, 1.0)
+        * clamp((0.39 - values["uOut"]) / 0.12, 0.0, 1.0)
+        * clamp((0.20 - values["outerBulgeShare"]) / 0.20, 0.0, 1.0)
+    )
+    lowload_edge = (
+        (1.0 if low_load else 0.0)
+        * max(
+            clamp((values["memoryLoad"] - 3.0) / 5.0, 0.0, 1.0)
+            * clamp((0.45 - values["uOut"]) / 0.18, 0.0, 1.0),
+            clamp((values["fGasOut"] - 0.32) / 0.35, 0.0, 1.0)
+            * clamp((values["midGasShare"] - 0.12) / 0.35, 0.0, 1.0),
+            clamp((0.12 - values["fGasOut"]) / 0.12, 0.0, 1.0)
+            * clamp((values["memoryLoad"] - 3.2) / 3.5, 0.0, 1.0),
+        )
+    )
+    gas_memory = (
+        clamp((values["fGasOut"] - 0.24) / 0.50, 0.0, 1.0)
+        * max(
+            clamp((values["outerGasShare"] - 0.22) / 0.45, 0.0, 1.0),
+            clamp((values["midGasShare"] - 0.14) / 0.38, 0.0, 1.0),
+            clamp((values["pointDensity"] - 0.75) / 1.8, 0.0, 1.0),
+        )
+    )
+    bulge_shear = (
+        (1.0 if buffered else 0.0)
+        * max(
+            clamp((values["outerBulgeShare"] - 0.10) / 0.45, 0.0, 1.0)
+            * clamp((values["pointDensity"] - 0.45) / 1.7, 0.0, 1.0),
+            clamp((values["uMax"] - 1.15) / 2.0, 0.0, 1.0)
+            * clamp((values["innerBulgeShare"] - 0.20) / 0.55, 0.0, 1.0),
+            clamp((values["barInnerOuter"] - 1.05) / 1.2, 0.0, 1.0)
+            * clamp((0.35 - values["fGasOut"]) / 0.35, 0.0, 1.0),
+        )
+    )
+    shelf_curvature = (
+        (1.0 if buffered else 0.0)
+        * max(
+            clamp((-values["barCurv"] - 8.0) / 55.0, 0.0, 1.0)
+            * clamp((values["outerDiskShare"] - 0.42) / 0.35, 0.0, 1.0),
+            clamp((values["hOverRout"] - 0.18) / 0.16, 0.0, 1.0)
+            * clamp((0.25 - values["fGasOut"]) / 0.25, 0.0, 1.0),
+            clamp((values["memoryLoad"] - 6.0) / 3.2, 0.0, 1.0)
+            * clamp((0.16 - values["fGasOut"]) / 0.16, 0.0, 1.0),
+        )
+    )
+    fallback = max(
+        clamp((values["memoryLoad"] - 1.0) / 6.0, 0.0, 1.0)
+        * clamp((values["uMax"] - 0.65) / 0.65, 0.0, 1.0),
+        clamp((values["pointDensity"] - 0.55) / 1.5, 0.0, 1.0),
+    )
+    return {
+        "compact low-load boundary response": compact_boundary,
+        "low-load route-edge transition response": lowload_edge,
+        "gas-memory / gas-rich response": gas_memory,
+        "buffered bulge-shear response": bulge_shear,
+        "buffered shelf/curvature response": shelf_curvature,
+        "baseline state multiplier / continuity fallback": fallback,
+    }
+
+
+def observed_state_v1807_family_surface_for_curve(curve: dict, score: dict) -> tuple[str, float, dict[str, float]]:
+    branch = score.get("observedStateBranch", "")
+    raw_family = score.get("observedStateFamily", observed_state_branch_family(branch)) if branch else ""
+    family = observed_state_v1806_compressed_family(branch, raw_family)
+    drives = observed_state_v1807_family_surface_drives(curve)
+    activation = drives.get(family, 0.0)
+    if branch:
+        activation = max(activation, parse_float(score.get("observedStateSoftActivation"), 0.0))
+    return family, clamp(activation, 0.0, 1.0), drives
+
+
+def observed_state_v1807_family_surface_score_curve(curve: dict, fit: dict, amp_cap: float) -> dict:
+    score = observed_state_v1805_score_curve(curve, fit, amp_cap)
+    family, activation, drives = observed_state_v1807_family_surface_for_curve(curve, score)
+    score["observedStateV1807Track"] = "v18.07-family-surface-law"
+    score["observedStateResponseFamily"] = family
+    score["observedStateFamilySurfaceActivation"] = activation
+    score["observedStateFamilySurfaceDrives"] = "; ".join(f"{name}={fmt(value, 4)}" for name, value in sorted(drives.items()))
+    score["observedStateBranchDiagnosticOnly"] = score.get("observedStateBranch", "")
+    return score
+
+
+def observed_state_v1807_forced_family_surface_score(curve: dict, family: str, fit: dict, amp_cap: float) -> dict:
+    candidate = observed_state_v1805_score_curve(curve, fit, amp_cap)
+    branch = candidate.get("observedStateBranch", "")
+    raw_family = candidate.get("observedStateFamily", observed_state_branch_family(branch)) if branch else ""
+    actual_family = observed_state_v1806_compressed_family(branch, raw_family)
+    drives = observed_state_v1807_family_surface_drives(curve)
+    if actual_family != family:
+        score = score_curve(curve)
+        score["observedStateBranch"] = ""
+        score["observedStateQ"] = Q_DEFAULT
+        score["observedStateAmp"] = 1.0
+    else:
+        score = candidate
+    score["observedStateV1807Track"] = "v18.07-family-surface-forced"
+    score["observedStateResponseFamily"] = family
+    score["observedStateActualResponseFamily"] = actual_family
+    score["observedStateFamilySurfaceActivation"] = drives.get(family, 0.0)
+    score["observedStateBranchDiagnosticOnly"] = branch
+    return score
+
+
+def observed_state_v1807_seed_replay_rows(clean_curves: list[dict], high_names: set[str], fit: dict, amp_cap: float) -> list[dict]:
+    rows: list[dict] = []
+    for seed in OBSERVED_STATE_V1800_REPLAY_SEEDS:
+        _train_names, holdout_names = observed_state_split(clean_curves, seed, HOLDOUT_FRACTION)
+        holdout = [curve for curve in clean_curves if curve["name"] in holdout_names]
+        base_scores = {curve["name"]: score_curve(curve) for curve in holdout}
+        candidate_scores = {curve["name"]: observed_state_v1807_family_surface_score_curve(curve, fit, amp_cap) for curve in holdout}
+        paired = [(curve, base_scores[curve["name"]], candidate_scores[curve["name"]]) for curve in holdout]
+        rows.append(observed_state_law_freeze_summary(seed, "v18.07-family-surface-law", paired, high_names))
+    return rows
+
+
+def write_observed_state_v18_family_surface_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_observed_v18_family_surface"
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    weak_names = context["weakNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+
+    baseline_scores = {curve["name"]: score_curve(curve) for curve in clean_curves}
+    candidate_scores = {curve["name"]: observed_state_v1807_family_surface_score_curve(curve, fit, amp_cap) for curve in clean_curves}
+    paired = [(curve, baseline_scores[curve["name"]], candidate_scores[curve["name"]]) for curve in clean_curves]
+    candidate_summary = observed_state_v1803_track_summary(paired, high_names)
+    seed_rows = observed_state_v1807_seed_replay_rows(clean_curves, high_names, fit, amp_cap)
+
+    case_rows: list[dict] = []
+    family_cases: dict[str, list[dict]] = {}
+    branch_diagnostics: dict[str, set[str]] = {}
+    for curve, baseline, candidate in paired:
+        family = candidate.get("observedStateResponseFamily", "")
+        branch = candidate.get("observedStateBranchDiagnosticOnly", "")
+        values = observed_state_v18_state_values(curve)
+        if branch:
+            branch_diagnostics.setdefault(family, set()).add(branch)
+        row = {
+            "galaxy": curve["name"],
+            "set": "clean-high-rmse" if curve["name"] in high_names else "clean-protected",
+            "lockedRoute": curve.get("lockedModelRoute", ""),
+            "baselineRmse": baseline["rmse"],
+            "candidateRmse": candidate["rmse"],
+            "gainKmS": baseline["rmse"] - candidate["rmse"],
+            "gainPct": pct_improvement(baseline["rmse"], candidate["rmse"]),
+            "candidateRoute": candidate["candidateRoute"],
+            "responseFamily": family,
+            "surfaceActivation": candidate.get("observedStateFamilySurfaceActivation", 0.0),
+            "branchDiagnosticOnly": branch,
+            "memoryLoad": values.get("memoryLoad", ""),
+            "fGasOut": values.get("fGasOut", ""),
+            "uOut": values.get("uOut", ""),
+            "uMax": values.get("uMax", ""),
+            "outerBulgeShare": values.get("outerBulgeShare", ""),
+            "outerGasShare": values.get("outerGasShare", ""),
+            "outerDiskShare": values.get("outerDiskShare", ""),
+            "barCurv": values.get("barCurv", ""),
+            "pointDensity": values.get("pointDensity", ""),
+            "stillAbove20": candidate["rmse"] >= 20.0 if curve["name"] in high_names else "",
+            "protectedRegressionKmS": candidate["rmse"] - baseline["rmse"] if curve["name"] not in high_names else "",
+        }
+        case_rows.append(row)
+        family_cases.setdefault(family, []).append(row)
+
+    family_rows: list[dict] = []
+    for family, rows in sorted(family_cases.items()):
+        high_rows = [row for row in rows if row["set"] == "clean-high-rmse"]
+        protected_rows = [row for row in rows if row["set"] == "clean-protected"]
+        family_rows.append(
+            {
+                "responseFamily": family,
+                "diagnosticBranchCount": len(branch_diagnostics.get(family, set())),
+                "diagnosticBranches": "; ".join(sorted(branch_diagnostics.get(family, set()))),
+                "activeHighCount": len(high_rows),
+                "activeProtectedCount": len(protected_rows),
+                "activeHighGalaxies": "; ".join(row["galaxy"] for row in high_rows),
+                "activeHighTotalGainKmS": sum(parse_float(row["gainKmS"], 0.0) for row in high_rows),
+                "activeHighMeanGainKmS": safe_mean(parse_float(row["gainKmS"]) for row in high_rows),
+                "medianSurfaceActivation": safe_median(parse_float(row["surfaceActivation"]) for row in rows),
+                "activeProtectedMaxRegressionKmS": max([parse_float(row.get("protectedRegressionKmS"), 0.0) for row in protected_rows] or [0.0]),
+            }
+        )
+
+    family_ablation_rows: list[dict] = []
+    active_families = sorted(
+        family
+        for family, rows in family_cases.items()
+        if any(row["set"] == "clean-high-rmse" and parse_float(row["gainKmS"], 0.0) > 0.0 for row in rows)
+    )
+    for family in active_families:
+        ablated_scores: dict[str, dict] = {}
+        for curve in clean_curves:
+            score = observed_state_v1807_family_surface_score_curve(curve, fit, amp_cap)
+            if score.get("observedStateResponseFamily", "") == family:
+                score = score_curve(curve)
+                score["observedStateResponseFamily"] = f"ablated::{family}"
+            ablated_scores[curve["name"]] = score
+        metric = observed_state_v1803_track_summary(
+            [(curve, baseline_scores[curve["name"]], ablated_scores[curve["name"]]) for curve in clean_curves],
+            high_names,
+        )
+        family_ablation_rows.append(
+            {
+                "responseFamily": family,
+                "candidateHighGainPct": candidate_summary["highGainPct"],
+                "ablationHighGainPct": metric["highGainPct"],
+                "highGainLossPct": candidate_summary["highGainPct"] - metric["highGainPct"],
+                "candidateCleanGainPct": candidate_summary["cleanGainPct"],
+                "ablationCleanGainPct": metric["cleanGainPct"],
+                "cleanGainLossPct": candidate_summary["cleanGainPct"] - metric["cleanGainPct"],
+                "ablationHighAbove20": metric["highAbove20"],
+                "ablationMaxProtectedRegressionKmS": metric["maxProtectedRegressionKmS"],
+            }
+        )
+
+    high_curves = [curve for curve in clean_curves if curve["name"] in high_names]
+    null_rows: list[dict] = []
+    for family in active_families:
+        active_high_rows = [row for row in family_cases.get(family, []) if row["set"] == "clean-high-rmse"]
+        if not active_high_rows:
+            continue
+        actual_gain = pct_improvement(
+            safe_mean(parse_float(row["baselineRmse"]) for row in active_high_rows),
+            safe_mean(parse_float(row["candidateRmse"]) for row in active_high_rows),
+        )
+        route_counts: dict[str, int] = {}
+        for row in active_high_rows:
+            route_counts[row["lockedRoute"]] = route_counts.get(row["lockedRoute"], 0) + 1
+        for seed in OBSERVED_STATE_V1800_REPLAY_SEEDS:
+            rng = random.Random(f"v18.07-family-surface-null:{family}:{seed}")
+            selected: list[dict] = []
+            used: set[str] = set()
+            for route, count in sorted(route_counts.items()):
+                pool = [curve for curve in high_curves if curve.get("lockedModelRoute", "") == route and curve["name"] not in used]
+                rng.shuffle(pool)
+                selected.extend(pool[:count])
+                used.update(curve["name"] for curve in pool[:count])
+            if len(selected) < len(active_high_rows):
+                fallback = [curve for curve in high_curves if curve["name"] not in used]
+                rng.shuffle(fallback)
+                selected.extend(fallback[: len(active_high_rows) - len(selected)])
+            forced_pairs = []
+            for curve in selected:
+                forced = observed_state_v1807_forced_family_surface_score(curve, family, fit, amp_cap)
+                forced_pairs.append((curve, baseline_scores[curve["name"]], forced))
+            null_gain = pct_improvement(
+                safe_mean(base["rmse"] for _curve, base, _forced in forced_pairs),
+                safe_mean(forced["rmse"] for _curve, _base, forced in forced_pairs),
+            )
+            null_rows.append(
+                {
+                    "nullType": "same-route same-family-surface active-count random target",
+                    "seed": seed,
+                    "responseFamily": family,
+                    "actualHighCount": len(active_high_rows),
+                    "actualHighGainPct": actual_gain,
+                    "familySurfaceNullGainPct": null_gain,
+                    "familySurfaceNullMarginPct": actual_gain - null_gain,
+                    "selectedGalaxies": "; ".join(curve["name"] for curve in selected),
+                    "maxNullRegressionKmS": max([forced["rmse"] - base["rmse"] for _curve, base, forced in forced_pairs] or [0.0]),
+                }
+            )
+
+    compression_scores = DEFAULT_OBSERVED_STATE_V18_LAW_COMPRESSION_OUT / "mts_observed_v18_law_compression_scores.csv"
+    if not compression_scores.exists():
+        write_observed_state_v18_law_compression_artifacts(DEFAULT_OBSERVED_STATE_V18_LAW_COMPRESSION_OUT)
+    compression_summary = read_csv_rows(compression_scores)[0]
+    median_holdout_high = safe_median(parse_float(row["highGainPct"]) for row in seed_rows)
+    median_holdout_clean = safe_median(parse_float(row["cleanGainPct"]) for row in seed_rows)
+    family_null_margins = [parse_float(row["familySurfaceNullMarginPct"]) for row in null_rows if math.isfinite(parse_float(row["familySurfaceNullMarginPct"]))]
+    median_family_null_margin = safe_median(family_null_margins)
+    min_family_null_margin = min(family_null_margins or [math.nan])
+    weak_leakage = sum(1 for curve in clean_curves if curve["name"] in weak_names)
+    active_high_family_count = sum(1 for row in family_rows if int(parse_float(row["activeHighCount"], 0.0)) > 0)
+    passes = (
+        candidate_summary["highGainPct"] >= 60.0
+        and candidate_summary["cleanGainPct"] >= 38.0
+        and int(candidate_summary["highAbove20"]) == 0
+        and parse_float(candidate_summary["maxProtectedRegressionKmS"]) <= 1.0
+        and median_holdout_high >= 60.0
+        and median_holdout_clean >= 38.0
+        and median_family_null_margin >= 10.0
+        and min_family_null_margin >= 0.0
+        and weak_leakage == 0
+        and active_high_family_count <= 6
+    )
+    verdict = "v18.07 family-surface law passes" if passes else "v18.07 family-surface law blocked"
+    summary = {
+        "candidateId": "observed-state-response-v18.07-family-surface-law",
+        "verdict": verdict,
+        "lawChange": "replace branch-facing v18.05 review catalogue with six continuous response-family surfaces; branch labels are retained only as diagnostics",
+        "nominalHighGainPct": candidate_summary["highGainPct"],
+        "nominalCleanGainPct": candidate_summary["cleanGainPct"],
+        "nominalHighAbove20": candidate_summary["highAbove20"],
+        "medianHoldoutHighGainPct": median_holdout_high,
+        "medianHoldoutCleanGainPct": median_holdout_clean,
+        "maxProtectedRegressionKmS": candidate_summary["maxProtectedRegressionKmS"],
+        "activeHighResponseFamilyCount": active_high_family_count,
+        "medianFamilySurfaceNullMarginPct": median_family_null_margin,
+        "minFamilySurfaceNullMarginPct": min_family_null_margin,
+        "v1806HighGainPct": parse_float(compression_summary.get("nominalHighGainPct")),
+        "v1806CleanGainPct": parse_float(compression_summary.get("nominalCleanGainPct")),
+        "weakSystematicsLeakage": weak_leakage,
+        "canonicalMtsChanged": False,
+        "qChangedGlobally": False,
+        "gamma0Changed": False,
+        "mlChanged": False,
+    }
+
+    formula = {
+        "candidateId": summary["candidateId"],
+        "baseCandidate": "observed-state-response-v18.05-release-stress",
+        "mechanism": summary["lawChange"],
+        "responseFamilies": sorted(observed_state_v1807_family_surface_drives(clean_curves[0]).keys()),
+        "familySurfaceEquations": {
+            "compact low-load boundary response": "low_load * hinge(memoryLoad>5.6) * hinge(h/rOut<0.18) * hinge(uOut<0.39) * hinge(outerBulgeShare<0.20)",
+            "low-load route-edge transition response": "low_load * max(memory-edge, gas-edge, sparse-gas-memory)",
+            "gas-memory / gas-rich response": "hinge(fGasOut>0.24) * max(outerGas, midGas, pointDensity)",
+            "buffered bulge-shear response": "buffered * max(outerBulge-density, uMax-innerBulge, bar-shear-lowgas)",
+            "buffered shelf/curvature response": "buffered * max(negative-curvature-disk, compact-lowgas, high-memory-lowgas)",
+            "baseline state multiplier / continuity fallback": "max(memory*uMax, pointDensity) when no explicit family surface dominates",
+        },
+        "branchLabelsDiagnosticOnly": True,
+        "canonicalMtsChanged": False,
+        "qChangedGlobally": False,
+        "gamma0Changed": False,
+        "mlChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics training"],
+    }
+
+    artifact_payload = read_window_json_assignment(V18_RELEASE_CANDIDATE_ARTIFACT_PATH, "MTS_V18_05_RELEASE_CANDIDATE")
+    if artifact_payload:
+        metadata = artifact_payload.setdefault("metadata", {})
+        metadata["candidateId"] = summary["candidateId"]
+        metadata["displayName"] = "MTS v18.07 family-surface response"
+        metadata["verdict"] = verdict
+        metadata["familySurfaceV1807"] = {
+            "verdict": verdict,
+            "highGainPct": summary["nominalHighGainPct"],
+            "cleanGainPct": summary["nominalCleanGainPct"],
+            "highAbove20": summary["nominalHighAbove20"],
+            "medianHoldoutHighGainPct": summary["medianHoldoutHighGainPct"],
+            "familyNullMarginPct": summary["medianFamilySurfaceNullMarginPct"],
+            "activeHighResponseFamilyCount": summary["activeHighResponseFamilyCount"],
+            "weakSystematicsLeakage": summary["weakSystematicsLeakage"],
+        }
+        metadata["reviewGate"] = {
+            **metadata.get("reviewGate", {}),
+            "candidateId": summary["candidateId"],
+            "verdict": verdict,
+            "nominalHighGainPct": summary["nominalHighGainPct"],
+            "nominalCleanGainPct": summary["nominalCleanGainPct"],
+            "holdoutHighGainPct": summary["medianHoldoutHighGainPct"],
+            "stressAbove20": summary["nominalHighAbove20"],
+            "familySurfaceNullMarginPct": summary["medianFamilySurfaceNullMarginPct"],
+        }
+        for curve_payload in artifact_payload.get("curves", {}).values():
+            if isinstance(curve_payload, dict):
+                curve_payload["candidateId"] = summary["candidateId"]
+                curve_payload["releaseCandidate"] = "MTS v18.07 family-surface response"
+        write_window_json_assignment(V18_FAMILY_SURFACE_ARTIFACT_PATH, "MTS_V18_07_FAMILY_SURFACE_CANDIDATE", artifact_payload)
+        write_window_json_assignment(out_dir / f"{prefix}_browser_artifact.js", "MTS_V18_07_FAMILY_SURFACE_CANDIDATE", artifact_payload)
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_seed_replay.csv", seed_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_family_surface_ledger.csv", family_rows)
+    write_csv(out_dir / f"{prefix}_family_ablation.csv", family_ablation_rows)
+    write_csv(out_dir / f"{prefix}_family_surface_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    top_repairs = sorted(
+        [row for row in case_rows if row["set"] == "clean-high-rmse"],
+        key=lambda row: parse_float(row["gainKmS"], 0.0),
+        reverse=True,
+    )[:15]
+    worsened = [row for row in case_rows if parse_float(row["gainKmS"], 0.0) < -1e-9]
+    report = [
+        "# MTS v18.07 Family-Surface Law",
+        "",
+        "This pass turns the v18.06 compressed families into the public-facing v18 response law surface. Branch names remain in the ledger only so the run can be audited against v18.05; the formula is expressed as six state/profile response families.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Law change: `{summary['lawChange']}`.",
+        f"- High-RMSE gain: `{fmt(summary['nominalHighGainPct'])}%`.",
+        f"- Clean-set gain: `{fmt(summary['nominalCleanGainPct'])}%`.",
+        f"- High-RMSE above 20 km/s: `{summary['nominalHighAbove20']}`.",
+        f"- Median holdout high-RMSE gain: `{fmt(summary['medianHoldoutHighGainPct'])}%`.",
+        f"- Protected max regression: `{fmt(summary['maxProtectedRegressionKmS'])}` km/s.",
+        f"- Active high-RMSE response families: `{summary['activeHighResponseFamilyCount']}`.",
+        f"- Median family-surface null margin: `{fmt(summary['medianFamilySurfaceNullMarginPct'])}` points.",
+        f"- Minimum family-surface null margin: `{fmt(summary['minFamilySurfaceNullMarginPct'])}` points.",
+        f"- Weak/systematics leakage: `{summary['weakSystematicsLeakage']}`.",
+        "",
+        "## Response Families",
+        "",
+        "| Family | High hits | Protected hits | Total high gain | Median activation | Null margin |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in sorted(family_rows, key=lambda item: -parse_float(item.get("activeHighTotalGainKmS"), 0.0)):
+        family_nulls = [null for null in null_rows if null["responseFamily"] == row["responseFamily"]]
+        report.append(
+            f"| {row['responseFamily']} | {row['activeHighCount']} | {row['activeProtectedCount']} | "
+            f"{fmt(row['activeHighTotalGainKmS'])} | {fmt(row['medianSurfaceActivation'])} | "
+            f"{fmt(safe_median(parse_float(null['familySurfaceNullMarginPct']) for null in family_nulls))} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Largest High-RMSE Repairs",
+            "",
+            "| Galaxy | Canonical | v18.07 | Gain | Response family |",
+            "| --- | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for row in top_repairs:
+        report.append(
+            f"| {row['galaxy']} | {fmt(row['baselineRmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['gainKmS'])} | {row['responseFamily']} |"
+        )
+    report.extend(["", "## Regressions", ""])
+    if worsened:
+        for row in worsened:
+            report.append(f"- `{row['galaxy']}` worsened by `{fmt(-parse_float(row['gainKmS']))}` km/s.")
+    else:
+        report.append("- No clean case worsened under v18.07.")
+    report.extend(
+        [
+            "",
+            "## Guardrails",
+            "",
+            "- Canonical MTS constants remain locked.",
+            "- Weak/systematics cases remain excluded.",
+            "- No galaxy-name lookup, residual lookup, raw-RMSE formula input, q patch, Gamma0 change, or M/L change is introduced.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-v18-family-surface-v1",
+        "candidateId": summary["candidateId"],
+        "verdict": verdict,
+        "summary": summary,
+        "formula": formula,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_seed_replay.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_family_surface_ledger.csv",
+            f"{prefix}_family_ablation.csv",
+            f"{prefix}_family_surface_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_browser_artifact.js",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatev18familysurface(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_FAMILY_SURFACE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_family_surface_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.07 family-surface law")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"families={summary['activeHighResponseFamilyCount']}",
+                f"high={fmt(summary['nominalHighGainPct'])}%",
+                f"clean={fmt(summary['nominalCleanGainPct'])}%",
+                f"above20={summary['nominalHighAbove20']}",
+                f"protected={fmt(summary['maxProtectedRegressionKmS'])}",
+                f"family_null_margin={fmt(summary['medianFamilySurfaceNullMarginPct'])}",
+                f"weak_leakage={summary['weakSystematicsLeakage']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 family-surface law to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_paper_section_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     evidence_dir = DEFAULT_OBSERVED_STATE_V18_EVIDENCE_EXPORT_OUT
@@ -69096,6 +69592,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18releasestress",
             "observedstatev18evidenceexport",
             "observedstatev18lawcompress",
+            "observedstatev18familysurface",
             "observedstatev18papersection",
             "observedstatev18docxbundle",
             "observedstatev18integrateddocx",
@@ -69343,6 +69840,8 @@ def main() -> None:
         cmd_observedstatev18evidenceexport(args)
     elif args.mode == "observedstatev18lawcompress":
         cmd_observedstatev18lawcompress(args)
+    elif args.mode == "observedstatev18familysurface":
+        cmd_observedstatev18familysurface(args)
     elif args.mode == "observedstatev18papersection":
         cmd_observedstatev18papersection(args)
     elif args.mode == "observedstatev18docxbundle":
