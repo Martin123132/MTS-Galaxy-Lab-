@@ -1840,11 +1840,31 @@
   function compileFrameworkExpression(expression) {
     var source = String(expression || "").trim();
     if (!source) throw new Error("Framework formula is empty.");
-    if (source === V18REVIEW_TOKEN || source === V17STATE_EXACT_TOKEN || V17STATE_LEGACY_TOKENS[source]) {
+    if (source === V18REVIEW_TOKEN) {
+      var nativeFormula = V18_RELEASE_ARTIFACT &&
+        V18_RELEASE_ARTIFACT.metadata &&
+        V18_RELEASE_ARTIFACT.metadata.nativeFormulaV1809 &&
+        V18_RELEASE_ARTIFACT.metadata.nativeFormulaV1809.expression;
+      if (nativeFormula) {
+        var compiledNative = compileFrameworkExpression(nativeFormula);
+        compiledNative.source = source;
+        compiledNative.kind = "v18-native-expression";
+        compiledNative.reviewGate = true;
+        compiledNative.nativeExpression = nativeFormula;
+        return compiledNative;
+      }
       return {
         source: source,
         kind: "v17state-exact-cache",
-        reviewGate: source === V18REVIEW_TOKEN,
+        reviewGate: true,
+        fn: null
+      };
+    }
+    if (source === V17STATE_EXACT_TOKEN || V17STATE_LEGACY_TOKENS[source]) {
+      return {
+        source: source,
+        kind: "v17state-exact-cache",
+        reviewGate: false,
         fn: null
       };
     }

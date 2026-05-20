@@ -171,6 +171,7 @@ DEFAULT_OBSERVED_STATE_V18_FAMILY_SURFACE_OUT = OUTPUT_PACK_ROOT / "mts-observed
 DEFAULT_OBSERVED_STATE_V18_SURFACE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-surface-stress-v1"
 DEFAULT_OBSERVED_STATE_V18_SURFACE_SMOOTH_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-surface-smooth-v1"
 DEFAULT_OBSERVED_STATE_V18_PROMOTION_GATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-promotion-gate-v1"
+DEFAULT_OBSERVED_STATE_V18_NATIVE_PARITY_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-native-parity-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -58528,6 +58529,257 @@ def cmd_observedstatev18surfacesmooth(args: argparse.Namespace) -> None:
     print(f"Wrote v18 surface-persistence smoothing to {out_dir.resolve()}")
 
 
+def write_observed_state_v18_native_parity_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_observed_v18_native_parity"
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    weak_names = context["weakNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+
+    # This is the browser text formula currently produced by the harness. The
+    # audit keeps it separate from the verified v18.09 cache so a stale formula
+    # cannot quietly masquerade as the reviewed law.
+    expression = observed_state_app_expression(fit, amp_cap)
+    native_supports = observed_state_browser_formula_supports(clean_curves, expression)
+
+    artifact_payload = read_window_json_assignment(
+        V18_SURFACE_SMOOTH_ARTIFACT_PATH,
+        "MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE",
+    )
+    artifact_curves = artifact_payload.get("curves", {})
+
+    case_rows: list[dict] = []
+    mismatch_rows: list[dict] = []
+
+    tolerance = 1e-6
+    for curve in clean_curves:
+        name = curve["name"]
+        set_name = "clean-high-rmse" if name in high_names else "clean-protected"
+        baseline = score_curve(curve)
+        target = observed_state_v1807_family_surface_score_curve(curve, fit, amp_cap)
+        formula_support = [native_supports[(name, index)] for index in range(len(curve["points"]))]
+        native = observed_state_score_curve_from_supports(curve, formula_support)
+
+        cache_entry = artifact_curves.get(name, {})
+        cache_support = cache_entry.get("support2", [])
+        cache_valid = isinstance(cache_support, list) and len(cache_support) == len(curve["points"])
+        cache = (
+            observed_state_score_curve_from_supports(curve, [float(value) for value in cache_support])
+            if cache_valid
+            else {"rmse": math.nan, "candidateRoute": ""}
+        )
+
+        cache_diff = cache["rmse"] - target["rmse"] if math.isfinite(cache["rmse"]) else math.nan
+        native_diff = native["rmse"] - target["rmse"]
+        cache_route_match = cache.get("candidateRoute", "") == target.get("candidateRoute", "")
+        native_route_match = native.get("candidateRoute", "") == target.get("candidateRoute", "")
+        cache_pass = cache_valid and abs(cache_diff) <= tolerance and cache_route_match
+        native_pass = abs(native_diff) <= tolerance and native_route_match
+        branch = target.get("observedStateBranchDiagnosticOnly", target.get("observedStateBranch", ""))
+        family = target.get("observedStateResponseFamily", "")
+
+        row = {
+            "galaxy": name,
+            "set": set_name,
+            "lockedRoute": curve.get("lockedModelRoute", ""),
+            "baselineRmse": baseline["rmse"],
+            "targetV1809Rmse": target["rmse"],
+            "browserCacheRmse": cache["rmse"],
+            "nativeFormulaRmse": native["rmse"],
+            "targetGainKmS": baseline["rmse"] - target["rmse"],
+            "nativeFormulaGainKmS": baseline["rmse"] - native["rmse"],
+            "browserCacheMinusTargetRmse": cache_diff,
+            "nativeFormulaMinusTargetRmse": native_diff,
+            "targetRoute": target.get("candidateRoute", ""),
+            "browserCacheRoute": cache.get("candidateRoute", ""),
+            "nativeFormulaRoute": native.get("candidateRoute", ""),
+            "browserCacheRouteMatch": cache_route_match,
+            "nativeFormulaRouteMatch": native_route_match,
+            "browserCacheParityPass": cache_pass,
+            "nativeFormulaParityPass": native_pass,
+            "responseFamily": family,
+            "diagnosticBranch": branch,
+            "targetStillAbove20": target["rmse"] >= 20.0 if name in high_names else "",
+            "nativeStillAbove20": native["rmse"] >= 20.0 if name in high_names else "",
+            "targetProtectedRegressionKmS": max(0.0, target["rmse"] - baseline["rmse"]) if name not in high_names else 0.0,
+            "nativeProtectedRegressionKmS": max(0.0, native["rmse"] - baseline["rmse"]) if name not in high_names else 0.0,
+        }
+        case_rows.append(row)
+
+        if not cache_pass:
+            mismatch_rows.append(
+                {
+                    **row,
+                    "mismatchTrack": "browser-cache-vs-python-target",
+                    "absRmseMismatch": abs(cache_diff) if math.isfinite(cache_diff) else math.nan,
+                    "routeMismatch": not cache_route_match,
+                }
+            )
+        if not native_pass:
+            mismatch_rows.append(
+                {
+                    **row,
+                    "mismatchTrack": "native-formula-vs-python-target",
+                    "absRmseMismatch": abs(native_diff),
+                    "routeMismatch": not native_route_match,
+                }
+            )
+
+    clean_rows = case_rows
+    high_rows = [row for row in case_rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [row for row in case_rows if row["set"] == "clean-protected"]
+    cache_mismatches = [row for row in mismatch_rows if row["mismatchTrack"] == "browser-cache-vs-python-target"]
+    native_mismatches = [row for row in mismatch_rows if row["mismatchTrack"] == "native-formula-vs-python-target"]
+    native_high_mismatches = [row for row in native_mismatches if row["set"] == "clean-high-rmse"]
+
+    summary = {
+        "candidateId": "observed-state-response-v18.09-native-parity",
+        "testedTarget": "observed-state-response-v18.09 surface-persistence nominal v18.07 family-surface scores",
+        "verdict": "v18.09 native formula parity passed",
+        "cleanCurveCount": len(clean_rows),
+        "cleanHighRmseCount": len(high_rows),
+        "weakSystematicsExcludedCount": len(weak_names),
+        "weakSystematicsLeakage": 0,
+        "targetHighGainPct": pct_improvement(
+            safe_mean(row["baselineRmse"] for row in high_rows),
+            safe_mean(row["targetV1809Rmse"] for row in high_rows),
+        ),
+        "targetCleanGainPct": pct_improvement(
+            safe_mean(row["baselineRmse"] for row in clean_rows),
+            safe_mean(row["targetV1809Rmse"] for row in clean_rows),
+        ),
+        "nativeFormulaHighGainPct": pct_improvement(
+            safe_mean(row["baselineRmse"] for row in high_rows),
+            safe_mean(row["nativeFormulaRmse"] for row in high_rows),
+        ),
+        "nativeFormulaCleanGainPct": pct_improvement(
+            safe_mean(row["baselineRmse"] for row in clean_rows),
+            safe_mean(row["nativeFormulaRmse"] for row in clean_rows),
+        ),
+        "targetHighAbove20": sum(1 for row in high_rows if row["targetStillAbove20"]),
+        "nativeFormulaHighAbove20": sum(1 for row in high_rows if row["nativeStillAbove20"]),
+        "browserCacheParityMismatchCount": len(cache_mismatches),
+        "nativeFormulaParityMismatchCount": len(native_mismatches),
+        "nativeFormulaHighMismatchCount": len(native_high_mismatches),
+        "maxBrowserCacheMinusTargetRmseAbs": max([parse_float(row["absRmseMismatch"], 0.0) for row in cache_mismatches] or [0.0]),
+        "maxNativeFormulaMinusTargetRmseAbs": max([parse_float(row["absRmseMismatch"], 0.0) for row in native_mismatches] or [0.0]),
+        "targetMaxProtectedRegressionKmS": max([parse_float(row["targetProtectedRegressionKmS"], 0.0) for row in protected_rows] or [0.0]),
+        "nativeMaxProtectedRegressionKmS": max([parse_float(row["nativeProtectedRegressionKmS"], 0.0) for row in protected_rows] or [0.0]),
+        "nativeExpressionLength": len(expression),
+        "browserCacheIsCurrent": len(cache_mismatches) == 0,
+        "nativeFormulaCanReplaceCache": len(native_mismatches) == 0,
+    }
+    if summary["browserCacheParityMismatchCount"]:
+        summary["verdict"] = "v18.09 browser cache parity blocked"
+    elif summary["nativeFormulaParityMismatchCount"]:
+        summary["verdict"] = "v18.09 native formula port still blocked"
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_mismatches.csv", mismatch_rows)
+    (out_dir / f"{prefix}_formula.txt").write_text(expression, encoding="utf-8")
+
+    top_native_gaps = sorted(
+        native_mismatches,
+        key=lambda row: parse_float(row.get("absRmseMismatch"), 0.0),
+        reverse=True,
+    )[:15]
+    report = [
+        "# MTS v18.09 Native Formula Parity",
+        "",
+        "This is an implementation hardening pass. It checks whether the browser text formula can replace the verified v18.09 support cache without changing the clean-set scores.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{summary['verdict']}`.",
+        f"- Browser cache parity mismatches: `{summary['browserCacheParityMismatchCount']}`.",
+        f"- Native formula parity mismatches: `{summary['nativeFormulaParityMismatchCount']}`.",
+        f"- Native high-RMSE mismatches: `{summary['nativeFormulaHighMismatchCount']}`.",
+        f"- Max native formula RMSE mismatch: `{fmt(summary['maxNativeFormulaMinusTargetRmseAbs'])}` km/s.",
+        f"- Target high-RMSE gain: `{fmt(summary['targetHighGainPct'])}%`.",
+        f"- Native formula high-RMSE gain: `{fmt(summary['nativeFormulaHighGainPct'])}%`.",
+        f"- Target high-RMSE above 20: `{summary['targetHighAbove20']}`.",
+        f"- Native formula high-RMSE above 20: `{summary['nativeFormulaHighAbove20']}`.",
+        f"- Target max protected regression: `{fmt(summary['targetMaxProtectedRegressionKmS'])}` km/s.",
+        f"- Native max protected regression: `{fmt(summary['nativeMaxProtectedRegressionKmS'])}` km/s.",
+        "",
+        "## What This Means",
+        "",
+    ]
+    if summary["nativeFormulaCanReplaceCache"]:
+        report.append("The browser text formula is numerically equivalent to the tested v18.09 curve law and can replace the cache path.")
+    else:
+        report.append("The verified browser cache matches the tested v18.09 scores, but the old browser text formula does not. The app must keep using the verified cache until the missing branch/floor pieces are ported into the native formula.")
+    report.extend(
+        [
+            "",
+            "## Largest Native Formula Gaps",
+            "",
+            "| Galaxy | Set | Target RMSE | Native RMSE | Native-target | Target route | Native route | Branch |",
+            "| --- | --- | ---: | ---: | ---: | --- | --- | --- |",
+        ]
+    )
+    for row in top_native_gaps:
+        report.append(
+            f"| {row['galaxy']} | {row['set']} | {fmt(row['targetV1809Rmse'])} | {fmt(row['nativeFormulaRmse'])} | "
+            f"{fmt(row['nativeFormulaMinusTargetRmse'])} | {row['targetRoute']} | {row['nativeFormulaRoute']} | {row['diagnosticBranch']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Guardrails",
+            "",
+            "- Canonical MTS constants are unchanged.",
+            "- Weak/systematics galaxies are excluded from parity claims.",
+            "- No galaxy-name, residual, or raw-RMSE formula input is introduced.",
+            "- No MTS/v18 promotion status changes in this mode.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-v18-native-parity-v1",
+        "candidateId": summary["candidateId"],
+        "verdict": summary["verdict"],
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_mismatches.csv",
+            f"{prefix}_formula.txt",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatev18nativeparity(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NATIVE_PARITY_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_native_parity_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.09 native formula parity")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"target_high={fmt(summary['targetHighGainPct'])}%",
+                f"native_high={fmt(summary['nativeFormulaHighGainPct'])}%",
+                f"cache_mismatch={summary['browserCacheParityMismatchCount']}",
+                f"native_mismatch={summary['nativeFormulaParityMismatchCount']}",
+                f"native_high_mismatch={summary['nativeFormulaHighMismatchCount']}",
+                f"native_max_gap={fmt(summary['maxNativeFormulaMinusTargetRmseAbs'])}",
+                f"weak_leakage={summary['weakSystematicsLeakage']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 native formula parity to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_promotion_gate_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_observed_v18_promotion_gate"
@@ -70382,6 +70634,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18surfacestress",
             "observedstatev18surfacesmooth",
             "observedstatev18promotiongate",
+            "observedstatev18nativeparity",
             "observedstatev18papersection",
             "observedstatev18docxbundle",
             "observedstatev18integrateddocx",
@@ -70637,6 +70890,8 @@ def main() -> None:
         cmd_observedstatev18surfacesmooth(args)
     elif args.mode == "observedstatev18promotiongate":
         cmd_observedstatev18promotiongate(args)
+    elif args.mode == "observedstatev18nativeparity":
+        cmd_observedstatev18nativeparity(args)
     elif args.mode == "observedstatev18papersection":
         cmd_observedstatev18papersection(args)
     elif args.mode == "observedstatev18docxbundle":
