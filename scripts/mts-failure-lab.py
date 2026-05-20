@@ -168,6 +168,8 @@ DEFAULT_OBSERVED_STATE_V18_DOCX_BUNDLE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v1
 DEFAULT_OBSERVED_STATE_V18_INTEGRATED_DOCX_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-integrated-draft-v1"
 DEFAULT_OBSERVED_STATE_V18_LAW_COMPRESSION_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-law-compression-v1"
 DEFAULT_OBSERVED_STATE_V18_FAMILY_SURFACE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-family-surface-v1"
+DEFAULT_OBSERVED_STATE_V18_SURFACE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-surface-stress-v1"
+DEFAULT_OBSERVED_STATE_V18_SURFACE_SMOOTH_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-surface-smooth-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -58060,6 +58062,470 @@ def cmd_observedstatev18familysurface(args: argparse.Namespace) -> None:
     print(f"Wrote v18 family-surface law to {out_dir.resolve()}")
 
 
+def observed_state_v1808_score_curve_with_jittered_state(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+) -> dict:
+    disabled: set[str] = set()
+
+    def score_with_disabled() -> dict:
+        return observed_state_with_disabled_branches(
+            disabled,
+            lambda: observed_state_score_curve_v1800_baryon_guard(
+                curve,
+                state_curve,
+                fit,
+                amp_cap,
+                0.08,
+                1.0 / 12.0,
+            ),
+        )
+
+    score = score_with_disabled()
+    branch = score.get("observedStateBranch", "")
+    vetoes: list[str] = []
+    if branch in OBSERVED_STATE_V1803_BRANCH_SAFETY_RULES and not observed_state_v1803_gate_pass(state_curve, branch):
+        disabled.add(branch)
+        vetoes.append(f"{branch}:v18.03-safety")
+        score = score_with_disabled()
+        branch = score.get("observedStateBranch", "")
+    if branch == OBSERVED_STATE_V1804_EDGE_BRANCH:
+        edge_pass, _values, failed_terms = observed_state_v1804_edge_rule_status(state_curve)
+        if not edge_pass:
+            disabled.add(branch)
+            vetoes.append(f"{branch}:v18.04-edge-rule:{';'.join(failed_terms)}")
+            score = score_with_disabled()
+            branch = score.get("observedStateBranch", "")
+    raw_family = score.get("observedStateFamily", observed_state_branch_family(branch)) if branch else ""
+    response_family = observed_state_v1806_compressed_family(branch, raw_family)
+    drives = observed_state_v1807_family_surface_drives(state_curve)
+    score["observedStateV1808Track"] = "v18.08-surface-stress"
+    score["observedStateResponseFamily"] = response_family
+    score["observedStateFamilySurfaceActivation"] = drives.get(response_family, 0.0)
+    score["observedStateFamilySurfaceDrives"] = "; ".join(f"{name}={fmt(value, 4)}" for name, value in sorted(drives.items()))
+    score["observedStateV1808DisabledBranches"] = "; ".join(sorted(disabled))
+    score["observedStateV1808Vetoes"] = "; ".join(vetoes)
+    return score
+
+
+def observed_state_v1809_score_curve_with_surface_persistence(
+    curve: dict,
+    state_curve: dict,
+    fit: dict,
+    amp_cap: float,
+) -> dict:
+    score = observed_state_v1808_score_curve_with_jittered_state(curve, state_curve, fit, amp_cap)
+    fallback_family = "baseline state multiplier / continuity fallback"
+    if score.get("observedStateResponseFamily", "") != fallback_family:
+        score["observedStateV1809SurfacePersistence"] = False
+        return score
+
+    nominal = observed_state_v1807_family_surface_score_curve(curve, fit, amp_cap)
+    nominal_family = nominal.get("observedStateResponseFamily", "")
+    nominal_branch = nominal.get("observedStateBranchDiagnosticOnly", nominal.get("observedStateBranch", ""))
+    if not nominal_branch or nominal_family == fallback_family:
+        score["observedStateV1809SurfacePersistence"] = False
+        return score
+
+    drives = observed_state_v1807_family_surface_drives(state_curve)
+    nominal_drive = parse_float(drives.get(nominal_family, 0.0), 0.0)
+    # The stress run perturbs state variables around the observed curve. If the
+    # observed curve has a real non-fallback family but the perturbed selector
+    # drops only to the broad continuity fallback, keep the local family surface
+    # instead of introducing a cliff at the boundary.
+
+    persisted = observed_state_v1805_forced_branch_score(curve, nominal_branch, fit, amp_cap)
+    persisted["observedStateV1809Track"] = "v18.09-surface-persistence"
+    persisted["observedStateResponseFamily"] = nominal_family
+    persisted["observedStateFamilySurfaceActivation"] = nominal_drive
+    persisted["observedStateFamilySurfaceDrives"] = "; ".join(f"{name}={fmt(value, 4)}" for name, value in sorted(drives.items()))
+    persisted["observedStateBranchDiagnosticOnly"] = nominal_branch
+    persisted["observedStateV1809SurfacePersistence"] = True
+    persisted["observedStateV1809PersistedFamily"] = nominal_family
+    persisted["observedStateV1809PersistedBranch"] = nominal_branch
+    persisted["observedStateV1809PersistedFamilyDrive"] = nominal_drive
+    persisted["observedStateV1809PersistenceReason"] = "jitter dropout to fallback"
+    persisted["observedStateV1808Vetoes"] = score.get("observedStateV1808Vetoes", "")
+    return persisted
+
+
+def write_observed_state_v18_surface_stress_artifacts(
+    out_dir: Path,
+    prefix: str = "mts_observed_v18_surface_stress",
+    score_fn=observed_state_v1808_score_curve_with_jittered_state,
+    candidate_id: str = "observed-state-response-v18.08-surface-stress",
+    tested_candidate: str = "observed-state-response-v18.07-family-surface-law",
+    analysis_name: str = "mts-observed-v18-surface-stress-v1",
+    report_title: str = "# MTS v18.08 Surface-Stability Stress",
+    report_intro: str = "This pass perturbs the state/profile variables used by the v18.07 family-surface selector. It scores the original clean curves under those perturbed state selectors, so the result tests whether the repair is robust to small state uncertainty.",
+    pass_verdict: str = "v18.08 surface stability passed",
+    fail_verdict: str = "v18.08 surface smoothing required",
+) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    weak_names = context["weakNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+
+    family_surface_dir = DEFAULT_OBSERVED_STATE_V18_FAMILY_SURFACE_OUT
+    family_surface_scores = family_surface_dir / "mts_observed_v18_family_surface_scores.csv"
+    if not family_surface_scores.exists():
+        write_observed_state_v18_family_surface_artifacts(family_surface_dir)
+    v1807_summary = read_csv_rows(family_surface_scores)[0]
+
+    baseline_scores = {curve["name"]: score_curve(curve) for curve in clean_curves}
+    nominal_scores = {curve["name"]: observed_state_v1807_family_surface_score_curve(curve, fit, amp_cap) for curve in clean_curves}
+    nominal_family = {name: score.get("observedStateResponseFamily", "") for name, score in nominal_scores.items()}
+    nominal_branch = {name: score.get("observedStateBranchDiagnosticOnly", score.get("observedStateBranch", "")) for name, score in nominal_scores.items()}
+
+    variant_rows: list[dict] = []
+    case_trial_rows: list[dict] = []
+    for scale in OBSERVED_STATE_ROBUSTNESS_SCALES:
+        for seed in OBSERVED_STATE_ROBUSTNESS_SEEDS:
+            trial_scores = []
+            for curve in clean_curves:
+                base = baseline_scores[curve["name"]]
+                state_curve = observed_state_jitter_state_curve(curve, seed, scale)
+                cand = score_fn(curve, state_curve, fit, amp_cap)
+                trial_scores.append((curve, base, cand))
+                if curve["name"] in high_names:
+                    family = cand.get("observedStateResponseFamily", "")
+                    branch = cand.get("observedStateBranch", "")
+                    case_trial_rows.append(
+                        {
+                            "scale": scale,
+                            "seed": seed,
+                            "galaxy": curve["name"],
+                            "lockedRoute": curve["lockedModelRoute"],
+                            "nominalFamily": nominal_family.get(curve["name"], ""),
+                            "jitterFamily": family,
+                            "familyPreserved": family == nominal_family.get(curve["name"], ""),
+                            "nominalBranch": nominal_branch.get(curve["name"], ""),
+                            "jitterBranch": branch,
+                            "branchPreserved": branch == nominal_branch.get(curve["name"], ""),
+                            "surfaceActivation": cand.get("observedStateFamilySurfaceActivation", ""),
+                            "baselineRmse": base["rmse"],
+                            "nominalRmse": nominal_scores[curve["name"]]["rmse"],
+                            "candidateRmse": cand["rmse"],
+                            "gainKmS": base["rmse"] - cand["rmse"],
+                            "deltaVsNominalKmS": cand["rmse"] - nominal_scores[curve["name"]]["rmse"],
+                            "stillAbove20": cand["rmse"] >= 20.0,
+                            "worsenedVsBaseline": cand["rmse"] > base["rmse"],
+                            "candidateRoute": cand["candidateRoute"],
+                            "routeTransition": "" if cand["candidateRoute"] == base["candidateRoute"] else f"{base['candidateRoute']} -> {cand['candidateRoute']}",
+                            "vetoes": cand.get("observedStateV1808Vetoes", ""),
+                        }
+                    )
+            high_rows = [row for row in trial_scores if row[0]["name"] in high_names]
+            protected_rows = [row for row in trial_scores if row[0]["name"] not in high_names]
+            protected_regressions = [row[2]["rmse"] - row[1]["rmse"] for row in protected_rows]
+            variant_rows.append(
+                {
+                    "scale": scale,
+                    "seed": seed,
+                    "highGainPct": pct_improvement(
+                        safe_mean(row[1]["rmse"] for row in high_rows),
+                        safe_mean(row[2]["rmse"] for row in high_rows),
+                    ),
+                    "cleanGainPct": pct_improvement(
+                        safe_mean(row[1]["rmse"] for row in trial_scores),
+                        safe_mean(row[2]["rmse"] for row in trial_scores),
+                    ),
+                    "highStillAbove20": sum(1 for row in high_rows if row[2]["rmse"] >= 20.0),
+                    "highWorsened": sum(1 for row in high_rows if row[2]["rmse"] > row[1]["rmse"]),
+                    "protectedRegressionCount": sum(1 for value in protected_regressions if value > 1e-9),
+                    "maxProtectedRegression": max(protected_regressions) if protected_regressions else 0.0,
+                    "routePreservation": safe_mean(1.0 if row[2]["candidateRoute"] == row[1]["candidateRoute"] else 0.0 for row in trial_scores),
+                    "familyPreservation": safe_mean(
+                        1.0
+                        if row[2].get("observedStateResponseFamily", "") == nominal_family.get(row[0]["name"], "")
+                        else 0.0
+                        for row in high_rows
+                    ),
+                }
+            )
+
+    case_rows: list[dict] = []
+    for name in sorted(high_names):
+        rows = [row for row in case_trial_rows if row["galaxy"] == name]
+        if not rows:
+            continue
+        fail_rows = [row for row in rows if row["stillAbove20"] or row["worsenedVsBaseline"]]
+        case_rows.append(
+            {
+                "galaxy": name,
+                "nominalFamily": nominal_family.get(name, ""),
+                "nominalBranch": nominal_branch.get(name, ""),
+                "nominalRmse": nominal_scores[name]["rmse"],
+                "worstJitterRmse": max(parse_float(row["candidateRmse"]) for row in rows),
+                "medianJitterRmse": safe_median(parse_float(row["candidateRmse"]) for row in rows),
+                "worstDeltaVsNominalKmS": max(parse_float(row["deltaVsNominalKmS"]) for row in rows),
+                "familyPreserveRate": safe_mean(1.0 if row["familyPreserved"] else 0.0 for row in rows),
+                "branchPreserveRate": safe_mean(1.0 if row["branchPreserved"] else 0.0 for row in rows),
+                "under20Rate": safe_mean(0.0 if row["stillAbove20"] else 1.0 for row in rows),
+                "improvedRate": safe_mean(0.0 if row["worsenedVsBaseline"] else 1.0 for row in rows),
+                "failureTrialCount": len(fail_rows),
+                "fragile": len(fail_rows) > 0
+                or safe_mean(1.0 if row["familyPreserved"] else 0.0 for row in rows) < 0.80
+                or max(parse_float(row["deltaVsNominalKmS"]) for row in rows) > 8.0,
+            }
+        )
+
+    family_rows: list[dict] = []
+    for family in sorted({row["nominalFamily"] for row in case_trial_rows}):
+        rows = [row for row in case_trial_rows if row["nominalFamily"] == family]
+        if not rows:
+            continue
+        family_rows.append(
+            {
+                "responseFamily": family,
+                "caseCount": len({row["galaxy"] for row in rows}),
+                "familyPreserveRate": safe_mean(1.0 if row["familyPreserved"] else 0.0 for row in rows),
+                "branchPreserveRate": safe_mean(1.0 if row["branchPreserved"] else 0.0 for row in rows),
+                "under20Rate": safe_mean(0.0 if row["stillAbove20"] else 1.0 for row in rows),
+                "medianGainKmS": safe_median(parse_float(row["gainKmS"]) for row in rows),
+                "worstRmse": max(parse_float(row["candidateRmse"]) for row in rows),
+                "fragileCaseCount": len({row["galaxy"] for row in rows if row["stillAbove20"] or row["worsenedVsBaseline"]}),
+            }
+        )
+
+    protected_rows: list[dict] = []
+    for curve in clean_curves:
+        if curve["name"] in high_names:
+            continue
+        max_reg = 0.0
+        reg_count = 0
+        worst_scale = 0.0
+        worst_family = ""
+        for scale in OBSERVED_STATE_ROBUSTNESS_SCALES:
+            for seed in OBSERVED_STATE_ROBUSTNESS_SEEDS:
+                base = baseline_scores[curve["name"]]
+                state_curve = observed_state_jitter_state_curve(curve, seed, scale)
+                cand = score_fn(curve, state_curve, fit, amp_cap)
+                reg = cand["rmse"] - base["rmse"]
+                if reg > max_reg:
+                    max_reg = reg
+                    worst_scale = scale
+                    worst_family = cand.get("observedStateResponseFamily", "")
+                if reg > 1e-9:
+                    reg_count += 1
+        if max_reg > 0.0:
+            protected_rows.append(
+                {
+                    "galaxy": curve["name"],
+                    "lockedRoute": curve["lockedModelRoute"],
+                    "maxRegression": max_reg,
+                    "regressionTrialCount": reg_count,
+                    "worstScale": worst_scale,
+                    "worstFamily": worst_family,
+                    "protectedFailure": max_reg > 4.0,
+                }
+            )
+
+    scale_rows: list[dict] = []
+    for scale in OBSERVED_STATE_ROBUSTNESS_SCALES:
+        rows = [row for row in variant_rows if parse_float(row["scale"]) == scale]
+        scale_rows.append(
+            {
+                "scale": scale,
+                "medianHighGainPct": safe_median(parse_float(row["highGainPct"]) for row in rows),
+                "minHighGainPct": min(parse_float(row["highGainPct"]) for row in rows),
+                "medianCleanGainPct": safe_median(parse_float(row["cleanGainPct"]) for row in rows),
+                "maxHighStillAbove20": max(int(parse_float(row["highStillAbove20"], 0.0)) for row in rows),
+                "maxHighWorsened": max(int(parse_float(row["highWorsened"], 0.0)) for row in rows),
+                "maxProtectedRegression": max(parse_float(row["maxProtectedRegression"], 0.0) for row in rows),
+                "medianRoutePreservation": safe_median(parse_float(row["routePreservation"]) for row in rows),
+                "medianFamilyPreservation": safe_median(parse_float(row["familyPreservation"]) for row in rows),
+            }
+        )
+
+    fragile_cases = [row for row in case_rows if row["fragile"]]
+    fragile_families = [row for row in family_rows if parse_float(row["familyPreserveRate"]) < 0.80 or int(row["fragileCaseCount"]) > 0]
+    protected_failures = [row for row in protected_rows if row["protectedFailure"]]
+    weak_leakage = sum(1 for curve in clean_curves if curve["name"] in weak_names)
+    passes = (
+        min(parse_float(row["minHighGainPct"]) for row in scale_rows) >= 55.0
+        and max(int(parse_float(row["maxHighStillAbove20"], 0.0)) for row in scale_rows) <= 2
+        and max(parse_float(row["maxProtectedRegression"], 0.0) for row in scale_rows) <= 4.0
+        and safe_median(parse_float(row["medianFamilyPreservation"]) for row in scale_rows) >= 0.80
+        and len(protected_failures) == 0
+        and weak_leakage == 0
+    )
+    verdict = pass_verdict if passes else fail_verdict
+    summary = {
+        "candidateId": candidate_id,
+        "testedCandidate": tested_candidate,
+        "verdict": verdict,
+        "v1807HighGainPct": parse_float(v1807_summary.get("nominalHighGainPct")),
+        "v1807CleanGainPct": parse_float(v1807_summary.get("nominalCleanGainPct")),
+        "jitterScales": ";".join(str(scale) for scale in OBSERVED_STATE_ROBUSTNESS_SCALES),
+        "trialSeeds": len(OBSERVED_STATE_ROBUSTNESS_SEEDS),
+        "minStressHighGainPct": min(parse_float(row["minHighGainPct"]) for row in scale_rows),
+        "medianStressHighGainPctAtMaxScale": next(row["medianHighGainPct"] for row in scale_rows if parse_float(row["scale"]) == max(OBSERVED_STATE_ROBUSTNESS_SCALES)),
+        "maxStressHighAbove20": max(int(parse_float(row["maxHighStillAbove20"], 0.0)) for row in scale_rows),
+        "maxStressProtectedRegressionKmS": max(parse_float(row["maxProtectedRegression"], 0.0) for row in scale_rows),
+        "medianFamilyPreservation": safe_median(parse_float(row["familyPreserveRate"]) for row in family_rows),
+        "fragileHighGalaxyCount": len(fragile_cases),
+        "fragileFamilyCount": len(fragile_families),
+        "protectedFailureCount": len(protected_failures),
+        "weakSystematicsLeakage": weak_leakage,
+    }
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_variant_scores.csv", variant_rows)
+    write_csv(out_dir / f"{prefix}_scale_summary.csv", scale_rows)
+    write_csv(out_dir / f"{prefix}_family_stability.csv", family_rows)
+    write_csv(out_dir / f"{prefix}_fragile_cases.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_case_trials.csv", case_trial_rows)
+    write_csv(out_dir / f"{prefix}_protected_regressions.csv", protected_rows)
+
+    report = [
+        report_title,
+        "",
+        report_intro,
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- v18.07 nominal high-RMSE gain: `{fmt(summary['v1807HighGainPct'])}%`.",
+        f"- Minimum stressed high-RMSE gain: `{fmt(summary['minStressHighGainPct'])}%`.",
+        f"- Median stressed high-RMSE gain at max scale: `{fmt(summary['medianStressHighGainPctAtMaxScale'])}%`.",
+        f"- Max stressed high-RMSE above 20 km/s: `{summary['maxStressHighAbove20']}`.",
+        f"- Max stressed protected regression: `{fmt(summary['maxStressProtectedRegressionKmS'])}` km/s.",
+        f"- Median family preservation: `{fmt(summary['medianFamilyPreservation'], 3)}`.",
+        f"- Fragile high-RMSE galaxies: `{summary['fragileHighGalaxyCount']}`.",
+        f"- Fragile response families: `{summary['fragileFamilyCount']}`.",
+        f"- Protected failures: `{summary['protectedFailureCount']}`.",
+        f"- Weak/systematics leakage: `{summary['weakSystematicsLeakage']}`.",
+        "",
+        "## Scale Summary",
+        "",
+        "| Scale | Median high gain | Min high gain | Max above 20 | Max protected regression | Family preservation |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in scale_rows:
+        report.append(
+            f"| {fmt(row['scale'])} | {fmt(row['medianHighGainPct'])}% | {fmt(row['minHighGainPct'])}% | "
+            f"{row['maxHighStillAbove20']} | {fmt(row['maxProtectedRegression'])} | {fmt(row['medianFamilyPreservation'], 3)} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Family Stability",
+            "",
+            "| Family | Cases | Family preserve | Under 20 rate | Worst RMSE | Fragile cases |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in sorted(family_rows, key=lambda item: (parse_float(item["familyPreserveRate"]), -int(parse_float(item["caseCount"], 0.0)))):
+        report.append(
+            f"| {row['responseFamily']} | {row['caseCount']} | {fmt(row['familyPreserveRate'], 3)} | "
+            f"{fmt(row['under20Rate'], 3)} | {fmt(row['worstRmse'])} | {row['fragileCaseCount']} |"
+        )
+    report.extend(["", "## Most Fragile Cases", ""])
+    for row in sorted(case_rows, key=lambda item: (0 if item["fragile"] else 1, -parse_float(item["worstDeltaVsNominalKmS"])))[:15]:
+        report.append(
+            f"- `{row['galaxy']}`: family `{row['nominalFamily']}`, worst RMSE `{fmt(row['worstJitterRmse'])}`, "
+            f"worst delta `{fmt(row['worstDeltaVsNominalKmS'])}`, family preserve `{fmt(row['familyPreserveRate'], 3)}`, under-20 `{fmt(row['under20Rate'], 3)}`."
+        )
+    report.extend(["", "## Protected Regressions", ""])
+    if protected_rows:
+        for row in sorted(protected_rows, key=lambda item: parse_float(item["maxRegression"]), reverse=True)[:10]:
+            report.append(
+                f"- `{row['galaxy']}`: max regression `{fmt(row['maxRegression'])}` km/s at scale `{fmt(row['worstScale'])}`, family `{row['worstFamily']}`."
+            )
+    else:
+        report.append("- None.")
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": analysis_name,
+        "candidateId": summary["candidateId"],
+        "testedCandidate": summary["testedCandidate"],
+        "verdict": verdict,
+        "summary": summary,
+        "scaleSummary": scale_rows,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_variant_scores.csv",
+            f"{prefix}_scale_summary.csv",
+            f"{prefix}_family_stability.csv",
+            f"{prefix}_fragile_cases.csv",
+            f"{prefix}_case_trials.csv",
+            f"{prefix}_protected_regressions.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatev18surfacestress(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_SURFACE_STRESS_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_surface_stress_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.08 surface-stability stress")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"min_high={fmt(summary['minStressHighGainPct'])}%",
+                f"max_above20={summary['maxStressHighAbove20']}",
+                f"protected={fmt(summary['maxStressProtectedRegressionKmS'])}",
+                f"family_pres={fmt(summary['medianFamilyPreservation'], 3)}",
+                f"fragile_cases={summary['fragileHighGalaxyCount']}",
+                f"weak_leakage={summary['weakSystematicsLeakage']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 surface-stability stress to {out_dir.resolve()}")
+
+
+def write_observed_state_v18_surface_smooth_artifacts(out_dir: Path) -> dict:
+    return write_observed_state_v18_surface_stress_artifacts(
+        out_dir,
+        prefix="mts_observed_v18_surface_smooth",
+        score_fn=observed_state_v1809_score_curve_with_surface_persistence,
+        candidate_id="observed-state-response-v18.09-surface-persistence",
+        tested_candidate="observed-state-response-v18.07-family-surface-law-plus-persistence",
+        analysis_name="mts-observed-v18-surface-smooth-v1",
+        report_title="# MTS v18.09 Surface-Persistence Smoothing",
+        report_intro=(
+            "This pass repeats the v18.08 state/profile perturbation stress, but keeps a non-fallback v18.07 response "
+            "when jitter would otherwise drop the same galaxy into the broad continuity fallback. It targets selector "
+            "dropout only; it adds no new repair branch, q change, amplitude patch, residual lookup, or galaxy-name rule."
+        ),
+        pass_verdict="v18.09 surface persistence passed",
+        fail_verdict="v18.09 surface persistence still fragile",
+    )
+
+
+def cmd_observedstatev18surfacesmooth(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_SURFACE_SMOOTH_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_surface_smooth_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.09 surface-persistence smoothing")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"min_high={fmt(summary['minStressHighGainPct'])}%",
+                f"max_above20={summary['maxStressHighAbove20']}",
+                f"protected={fmt(summary['maxStressProtectedRegressionKmS'])}",
+                f"family_pres={fmt(summary['medianFamilyPreservation'], 3)}",
+                f"fragile_cases={summary['fragileHighGalaxyCount']}",
+                f"weak_leakage={summary['weakSystematicsLeakage']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 surface-persistence smoothing to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_paper_section_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     evidence_dir = DEFAULT_OBSERVED_STATE_V18_EVIDENCE_EXPORT_OUT
@@ -69593,6 +70059,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18evidenceexport",
             "observedstatev18lawcompress",
             "observedstatev18familysurface",
+            "observedstatev18surfacestress",
+            "observedstatev18surfacesmooth",
             "observedstatev18papersection",
             "observedstatev18docxbundle",
             "observedstatev18integrateddocx",
@@ -69842,6 +70310,10 @@ def main() -> None:
         cmd_observedstatev18lawcompress(args)
     elif args.mode == "observedstatev18familysurface":
         cmd_observedstatev18familysurface(args)
+    elif args.mode == "observedstatev18surfacestress":
+        cmd_observedstatev18surfacestress(args)
+    elif args.mode == "observedstatev18surfacesmooth":
+        cmd_observedstatev18surfacesmooth(args)
     elif args.mode == "observedstatev18papersection":
         cmd_observedstatev18papersection(args)
     elif args.mode == "observedstatev18docxbundle":
