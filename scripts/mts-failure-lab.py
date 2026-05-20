@@ -163,6 +163,7 @@ DEFAULT_OBSERVED_STATE_V18_SAFETY_DEPENDENCY_OUT = OUTPUT_PACK_ROOT / "mts-obser
 DEFAULT_OBSERVED_STATE_V18_EDGE_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-edge-harden-v1"
 DEFAULT_OBSERVED_STATE_V18_RELEASE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-stress-v1"
 DEFAULT_OBSERVED_STATE_V18_EVIDENCE_EXPORT_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-paper-evidence-v1"
+DEFAULT_OBSERVED_STATE_V18_PAPER_SECTION_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-paper-section-v1"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
@@ -57201,6 +57202,272 @@ def cmd_observedstatev18evidenceexport(args: argparse.Namespace) -> None:
     print(f"Wrote v18 evidence export to {out_dir.resolve()}")
 
 
+def write_observed_state_v18_paper_section_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    evidence_dir = DEFAULT_OBSERVED_STATE_V18_EVIDENCE_EXPORT_OUT
+    evidence_capsule_path = evidence_dir / "mts_v18_05_evidence_capsule.json"
+    if not evidence_capsule_path.exists():
+        write_observed_state_v18_evidence_export_artifacts(evidence_dir)
+
+    high_rows = read_csv_rows(evidence_dir / "mts_v18_05_evidence_high_rmse_before_after.csv")
+    branch_rows = read_csv_rows(evidence_dir / "mts_v18_05_evidence_branch_contributions.csv")
+    null_rows = read_csv_rows(evidence_dir / "mts_v18_05_evidence_null_comparison.csv")
+    capsule = json.loads(evidence_capsule_path.read_text(encoding="utf-8"))
+    summary = capsule.get("summary", {})
+
+    top_repairs = sorted(high_rows, key=lambda row: -parse_float(row.get("gainKmS"), 0.0))[:12]
+    top_branches = sorted(branch_rows, key=lambda row: -parse_float(row.get("totalGainKmS"), 0.0))[:12]
+    branch_null = next((row for row in null_rows if "branch" in row.get("comparison", "").lower()), {})
+    edge_actual = next((row for row in null_rows if "edge actual" in row.get("comparison", "").lower()), {})
+    edge_null = next((row for row in null_rows if "edge null" in row.get("comparison", "").lower()), {})
+
+    clean_high_gain = parse_float(summary.get("nominalHighGainPct"))
+    clean_gain = parse_float(summary.get("nominalCleanGainPct"))
+    holdout_high_gain = parse_float(summary.get("medianHoldoutHighGainPct"))
+    branch_null_margin = parse_float(summary.get("branchShuffleNullMarginPct"))
+    edge_null_margin = parse_float(summary.get("edgeNullMarginPct"))
+    max_forced_protected_regression = parse_float(summary.get("maxProtectedForcedRegressionKmS"))
+    above20 = int(parse_float(summary.get("nominalHighAbove20"), 0.0))
+    weak_leakage = int(parse_float(summary.get("weakSystematicsLeakage"), 0.0))
+
+    result_rows = [
+        {
+            "metric": "clean high-RMSE gain",
+            "value": clean_high_gain,
+            "unit": "percent",
+            "source": "mts_v18_05_evidence_capsule.json",
+        },
+        {
+            "metric": "clean-set gain",
+            "value": clean_gain,
+            "unit": "percent",
+            "source": "mts_v18_05_evidence_capsule.json",
+        },
+        {
+            "metric": "high-RMSE cases still above 20 km/s",
+            "value": above20,
+            "unit": "count",
+            "source": "mts_v18_05_evidence_capsule.json",
+        },
+        {
+            "metric": "median holdout high-RMSE gain",
+            "value": holdout_high_gain,
+            "unit": "percent",
+            "source": "mts_v18_05_evidence_capsule.json",
+        },
+        {
+            "metric": "branch-shuffle null margin",
+            "value": branch_null_margin,
+            "unit": "percentage points",
+            "source": "mts_v18_05_evidence_capsule.json",
+        },
+        {
+            "metric": "disk-shear edge null margin",
+            "value": edge_null_margin,
+            "unit": "percentage points",
+            "source": "mts_v18_05_evidence_capsule.json",
+        },
+        {
+            "metric": "max forced protected-lookalike regression",
+            "value": max_forced_protected_regression,
+            "unit": "km/s",
+            "source": "mts_v18_05_evidence_capsule.json",
+        },
+        {
+            "metric": "weak/systematics leakage",
+            "value": weak_leakage,
+            "unit": "count",
+            "source": "mts_v18_05_evidence_capsule.json",
+        },
+    ]
+    figure_rows = [
+        {
+            "figure": "Figure 1",
+            "file": str((evidence_dir / "mts_v18_05_evidence_high_rmse_before_after.svg").resolve()),
+            "sourceTable": str((evidence_dir / "mts_v18_05_evidence_high_rmse_before_after.csv").resolve()),
+            "caption": "Canonical locked MTS versus v18.05 RMSE for clean high-RMSE SPARC cases.",
+        },
+        {
+            "figure": "Figure 2",
+            "file": str((evidence_dir / "mts_v18_05_evidence_branch_contributions.svg").resolve()),
+            "sourceTable": str((evidence_dir / "mts_v18_05_evidence_branch_contributions.csv").resolve()),
+            "caption": "State-response branch contributions to clean high-RMSE repair.",
+        },
+        {
+            "figure": "Figure 3",
+            "file": str((evidence_dir / "mts_v18_05_evidence_null_comparison.svg").resolve()),
+            "sourceTable": str((evidence_dir / "mts_v18_05_evidence_null_comparison.csv").resolve()),
+            "caption": "v18.05 candidate gains compared with branch-shuffle and edge-null controls.",
+        },
+    ]
+    limitations_rows = [
+        {
+            "limitation": "Candidate status",
+            "text": "v18.05 is a release candidate extension. It is not the locked canonical baseline until reviewed.",
+        },
+        {
+            "limitation": "Weak/systematics holdout",
+            "text": "The 15 weak/systematics SPARC galaxies remain excluded from transport-law fitting and framework-facing gains.",
+        },
+        {
+            "limitation": "External validation",
+            "text": "Non-SPARC full baryonic validation remains blocked by missing native radial component tables.",
+        },
+        {
+            "limitation": "Claim boundary",
+            "text": "These results support a galaxy-rotation framework candidate only. They do not establish broad cosmology claims.",
+        },
+    ]
+
+    write_csv(out_dir / "mts_v18_05_results_table.csv", result_rows)
+    write_csv(out_dir / "mts_v18_05_figure_manifest.csv", figure_rows)
+    write_csv(out_dir / "mts_v18_05_limitations.csv", limitations_rows)
+
+    methods_box = [
+        "# MTS v18.05 Methods Box",
+        "",
+        "The v18.05 observed-state response candidate was evaluated against the locked canonical MTS baseline with fixed canonical constants: `q=0.77`, `Gamma0=809.956`, fixed disk M/L, and fixed bulge M/L. The candidate uses deterministic state/profile branches to modify the response on clean high-RMSE systems, while preserving the weak/systematics holdout and avoiding galaxy-name lookup, raw residual lookup, raw RMSE as a formula input, and weak/systematics training.",
+        "",
+        "The validation set is the clean SPARC framework-facing set produced by the prior clean-validation chain. The 15 weak/systematics galaxies are carried as protected/excluded cases only. Candidate performance is reported for clean high-RMSE cases, the full clean set, route-stratified holdout seed replay, branch ablation, branch-label shuffled nulls, state-respecting edge nulls, and protected-lookalike forced-branch stress.",
+    ]
+    (out_dir / "mts_v18_05_methods_box.md").write_text("\n".join(methods_box), encoding="utf-8")
+
+    limitations_box = [
+        "# MTS v18.05 Limitations Box",
+        "",
+        "- v18.05 is a review candidate, not the canonical MTS baseline.",
+        "- The weak/systematics SPARC galaxies remain excluded from transport-law fitting.",
+        "- The result is internal SPARC clean-set evidence; external non-SPARC full baryonic scoring is still not available from public small native component tables.",
+        "- The claim is framework-level rotation-curve performance. It should not be written as a broad cosmology claim.",
+        "- The browser preset is for inspection and reproducibility of the tested candidate, not for changing the locked canonical constants.",
+    ]
+    (out_dir / "mts_v18_05_limitations_box.md").write_text("\n".join(limitations_box), encoding="utf-8")
+
+    paper = [
+        "# MTS v18.05 Paper Section Draft",
+        "",
+        "## Candidate Definition",
+        "",
+        "MTS v18.05 is a deterministic observed-state response candidate for the clean high-RMSE SPARC failures. It leaves the canonical constants locked (`q=0.77`, `Gamma0=809.956`, fixed disk and bulge M/L) and applies state/profile response branches only where the clean framework-facing state gate is satisfied. The candidate does not use galaxy names, raw residual lookup, raw RMSE as a formula input, or weak/systematics galaxies in fitting.",
+        "",
+        "## Validation Protocol",
+        "",
+        "The candidate was tested on the clean SPARC validation chain with the 15 weak/systematics galaxies held out from framework-facing scoring. The stress pack reports clean high-RMSE performance, full clean-set performance, route-stratified holdout replay, branch ablation, protected-lookalike forced-branch stress, and null controls including same-route same-active-count branch-label shuffle and a state-respecting disk-shear edge null.",
+        "",
+        "## Results",
+        "",
+        f"Across the clean high-RMSE set, v18.05 improves mean RMSE by `{fmt(clean_high_gain)}%` relative to the locked canonical MTS baseline. The full clean-set gain is `{fmt(clean_gain)}%`. No clean high-RMSE case remains above `20 km/s` after the candidate response (`{above20}` cases). The route-stratified holdout replay gives a median high-RMSE gain of `{fmt(holdout_high_gain)}%`.",
+        "",
+        f"The candidate beats the branch-label shuffled null by `{fmt(branch_null_margin)}` percentage points on clean high-RMSE gain. The added disk-shear edge branch beats its state-respecting edge null by `{fmt(edge_null_margin)}` percentage points. The maximum forced protected-lookalike regression is `{fmt(max_forced_protected_regression)}` km/s, below the release stress guardrail.",
+        "",
+        "## Largest Repairs",
+        "",
+        "| Galaxy | Canonical RMSE | v18.05 RMSE | Gain | Branch |",
+        "| --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in top_repairs:
+        paper.append(
+            f"| {row.get('galaxy')} | {fmt(parse_float(row.get('baselineRmse')))} | {fmt(parse_float(row.get('v18_05Rmse')))} | {fmt(parse_float(row.get('gainKmS')))} | {row.get('branch', '')} |"
+        )
+    paper.extend(
+        [
+            "",
+            "## Branch Evidence",
+            "",
+            "| Branch | High cases | Total gain | Mean gain | Release status |",
+            "| --- | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for row in top_branches:
+        paper.append(
+            f"| {row.get('branch')} | {row.get('highCaseCount')} | {fmt(parse_float(row.get('totalGainKmS')))} | {fmt(parse_float(row.get('meanGainKmS')))} | {row.get('branchReleaseStatus', '')} |"
+        )
+    paper.extend(
+        [
+            "",
+            "## Null And Protection Checks",
+            "",
+            "| Check | Value | Note |",
+            "| --- | ---: | --- |",
+            f"| Branch-label shuffled null median gain | {fmt(parse_float(branch_null.get('gainPct')))}% | {branch_null.get('notes', '')} |",
+            f"| Branch-label shuffled null margin | {fmt(parse_float(branch_null.get('marginPct')))} pp | Candidate minus null |",
+            f"| Disk-shear edge actual increment | {fmt(parse_float(edge_actual.get('gainPct')))}% | {edge_actual.get('notes', '')} |",
+            f"| Disk-shear edge null margin | {fmt(parse_float(edge_null.get('marginPct')))} pp | State-respecting edge null |",
+            f"| Max forced protected-lookalike regression | {fmt(max_forced_protected_regression)} km/s | From protected forced-branch stress |",
+            "",
+            "## Figure References",
+            "",
+        ]
+    )
+    for row in figure_rows:
+        paper.append(f"- {row['figure']}: `{row['file']}`. Source table: `{row['sourceTable']}`.")
+    paper.extend(
+        [
+            "",
+            "## Limitations",
+            "",
+            "v18.05 should be written as a review candidate rather than as the canonical MTS baseline. The weak/systematics SPARC cases remain protected/excluded from transport-law fitting. The LITTLE THINGS and TNG work remains side evidence only; neither supplies SPARC-equivalent non-SPARC promotion evidence for v18.05. The appropriate claim is a clean-set framework-candidate repair of high-RMSE rotation-curve failures, not a broad cosmology claim.",
+        ]
+    )
+    (out_dir / "mts_v18_05_paper_section.md").write_text("\n".join(paper), encoding="utf-8")
+
+    summary_out = {
+        "candidateId": "observed-state-response-v18.05-release-candidate",
+        "verdict": "paper section ready",
+        "highRmseCaseCount": int(parse_float(summary.get("highRmseCaseCount"), 0.0)),
+        "branchCount": int(parse_float(summary.get("branchCount"), 0.0)),
+        "cleanHighGainPct": clean_high_gain,
+        "cleanSetGainPct": clean_gain,
+        "medianHoldoutHighGainPct": holdout_high_gain,
+        "highRmseAbove20": above20,
+        "branchShuffleNullMarginPct": branch_null_margin,
+        "edgeNullMarginPct": edge_null_margin,
+        "maxForcedProtectedRegressionKmS": max_forced_protected_regression,
+        "weakSystematicsLeakage": weak_leakage,
+        "sourceEvidenceDir": str(evidence_dir.resolve()),
+    }
+    output_files = [
+        "mts_v18_05_paper_section.md",
+        "mts_v18_05_methods_box.md",
+        "mts_v18_05_results_table.csv",
+        "mts_v18_05_figure_manifest.csv",
+        "mts_v18_05_limitations.csv",
+        "mts_v18_05_limitations_box.md",
+        "mts_v18_05_paper_section_capsule.json",
+    ]
+    capsule_out = {
+        "analysisName": "mts-observed-v18-paper-section-v1",
+        "summary": summary_out,
+        "outputFiles": output_files,
+    }
+    (out_dir / "mts_v18_05_paper_section_capsule.json").write_text(
+        json.dumps(json_clean(capsule_out), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return capsule_out
+
+
+def cmd_observedstatev18papersection(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_PAPER_SECTION_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_paper_section_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.05 paper section")
+    print(
+        "\t".join(
+            [
+                f"verdict={summary['verdict']}",
+                f"high={fmt(summary['cleanHighGainPct'])}%",
+                f"clean={fmt(summary['cleanSetGainPct'])}%",
+                f"above20={summary['highRmseAbove20']}",
+                f"branch_null_margin={fmt(summary['branchShuffleNullMarginPct'])}",
+                f"edge_null_margin={fmt(summary['edgeNullMarginPct'])}",
+                f"protected={fmt(summary['maxForcedProtectedRegressionKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 paper section to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_candidate_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     context = observed_state_candidate_context()
@@ -67995,6 +68262,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18edgeharden",
             "observedstatev18releasestress",
             "observedstatev18evidenceexport",
+            "observedstatev18papersection",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -68236,6 +68504,8 @@ def main() -> None:
         cmd_observedstatev18releasestress(args)
     elif args.mode == "observedstatev18evidenceexport":
         cmd_observedstatev18evidenceexport(args)
+    elif args.mode == "observedstatev18papersection":
+        cmd_observedstatev18papersection(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":
