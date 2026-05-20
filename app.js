@@ -13,16 +13,16 @@
   };
 
   var V17STATE_EXACT_TOKEN = "__MTS_V17_97_RADIAL_REPAIR_STATE_RESPONSE__";
-  var V18REVIEW_TOKEN = "__MTS_V18_07_FAMILY_SURFACE_CANDIDATE__";
-  var V18_RELEASE_ARTIFACT = window.MTS_V18_07_FAMILY_SURFACE_CANDIDATE || window.MTS_V18_05_RELEASE_CANDIDATE || window.MTS_V18_01_REVIEW_CANDIDATE;
+  var V18REVIEW_TOKEN = "__MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE__";
+  var V18_RELEASE_ARTIFACT = window.MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE || window.MTS_V18_07_FAMILY_SURFACE_CANDIDATE || window.MTS_V18_05_RELEASE_CANDIDATE || window.MTS_V18_01_REVIEW_CANDIDATE;
   var V18_REVIEW_GATE_FALLBACK = {
-    candidateId: "observed-state-response-v18.07-family-surface-law",
-    verdict: "v18.07 family-surface law passes",
+    candidateId: "observed-state-response-v18.09-surface-persistence",
+    verdict: "v18.09 release-facing candidate passes",
     nominalHighGainPct: 68.07867961334428,
     nominalCleanGainPct: 43.737260426360244,
     holdoutHighGainPct: 66.67923997034711,
     stressAbove20: 0,
-    stressMinHighGainPct: 59.47261043333803,
+    stressMinHighGainPct: 68.07867961334428,
     nullMarginKmS: 26.105578965995377,
     activeProtectedWorseCount: 0,
     nominalDiffVsV1797Count: 0
@@ -60,7 +60,7 @@
   var FRAMEWORK_PRESET_LABELS = {
     mts: "MTS baseline",
     v17state: "MTS v17.97 radial-repair state response",
-    v18review: "MTS v18.07 family-surface response",
+    v18review: "MTS v18.09 surface-persistence response",
     baryon: "Baryon only",
     soft: "Soft radial support",
     outer: "Outer gate support",
@@ -1898,7 +1898,7 @@
   }
 
   function exactCacheDisplayName(compiled) {
-    return compiled && compiled.reviewGate ? "v18.07 family-surface response" : "v17.97 exact cache";
+    return compiled && compiled.reviewGate ? "v18.09 surface-persistence response" : "v17.97 exact cache";
   }
 
   function isV18ReviewActive() {
@@ -3989,8 +3989,8 @@
     if ($("v18ReviewReleaseNull")) $("v18ReviewReleaseNull").textContent = releaseStress ? fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " pts" : "--";
     if ($("v18ReviewNote")) {
       $("v18ReviewNote").textContent = active
-        ? "Active preset uses the generated v18.07 family-surface artifact with " + artifactCount + " cached curves. Law-native status: " + (lawNative ? lawNative.verdict + " with " + lawNative.cleanParityMismatchCount + " clean mismatches" : "not run") + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "not run") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "not run") + ". Branch identity: " + (branchIdentity ? branchIdentity.verdict + " (" + branchIdentity.lawLikeBranchCount + " / " + branchIdentity.branchCount + " law-like)" : "not run") + ". Safety pass: " + (branchSafety ? branchSafety.verdict + " via " + branchSafety.bestTrack : "not run") + ". Edge harden: " + (edgeHarden ? edgeHarden.verdict + " with " + fmt(edgeHarden.edgeNullMarginPct, 2) + " point edge-null margin" : "not run") + ". Release stress: " + (releaseStress ? releaseStress.verdict + " with " + fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " point branch-null margin" : "not run") + ". The v18.07 family-surface gate keeps all clean high-RMSE cases below 20 km/s, active protected worsens stay at 0, and the hardening margin over the best null is " + fmt(gate.nullMarginKmS, 2) + " km/s."
-        : "Select MTS v18.07 family-surface response in the Test Rig to inspect the generated artifact. Nominal curves remain the tested v18 state-response cache; the release stress gate validates branch nulls, edge hardening, protected forcing, and browser parity.";
+        ? "Active preset uses the generated v18.09 surface-persistence artifact with " + artifactCount + " cached curves. Law-native status: " + (lawNative ? lawNative.verdict + " with " + lawNative.cleanParityMismatchCount + " clean mismatches" : "not run") + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "not run") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "not run") + ". Branch identity: " + (branchIdentity ? branchIdentity.verdict + " (" + branchIdentity.lawLikeBranchCount + " / " + branchIdentity.branchCount + " law-like)" : "not run") + ". Safety pass: " + (branchSafety ? branchSafety.verdict + " via " + branchSafety.bestTrack : "not run") + ". Edge harden: " + (edgeHarden ? edgeHarden.verdict + " with " + fmt(edgeHarden.edgeNullMarginPct, 2) + " point edge-null margin" : "not run") + ". Release stress: " + (releaseStress ? releaseStress.verdict + " with " + fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " point branch-null margin" : "not run") + ". The v18.09 promotion gate keeps all clean high-RMSE cases below 20 km/s, has zero protected regression, and the surface-persistence stress replay has " + String(gate.stressAbove20) + " above-20 cases."
+        : "Select MTS v18.09 surface-persistence response in the Test Rig to inspect the generated artifact. Nominal curves remain the tested v18 state-response cache; the promotion gate validates family nulls, branch nulls, surface persistence, protected forcing, and browser parity.";
     }
   }
 

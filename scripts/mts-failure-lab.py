@@ -170,10 +170,12 @@ DEFAULT_OBSERVED_STATE_V18_LAW_COMPRESSION_OUT = OUTPUT_PACK_ROOT / "mts-observe
 DEFAULT_OBSERVED_STATE_V18_FAMILY_SURFACE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-family-surface-v1"
 DEFAULT_OBSERVED_STATE_V18_SURFACE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-surface-stress-v1"
 DEFAULT_OBSERVED_STATE_V18_SURFACE_SMOOTH_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-surface-smooth-v1"
+DEFAULT_OBSERVED_STATE_V18_PROMOTION_GATE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-promotion-gate-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
 V18_FAMILY_SURFACE_ARTIFACT_PATH = ROOT / "data" / "v18-07-family-surface-candidate.js"
+V18_SURFACE_SMOOTH_ARTIFACT_PATH = ROOT / "data" / "v18-09-surface-persistence-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -58526,6 +58528,324 @@ def cmd_observedstatev18surfacesmooth(args: argparse.Namespace) -> None:
     print(f"Wrote v18 surface-persistence smoothing to {out_dir.resolve()}")
 
 
+def write_observed_state_v18_promotion_gate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_observed_v18_promotion_gate"
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    weak_names = context["weakNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+
+    family_dir = DEFAULT_OBSERVED_STATE_V18_FAMILY_SURFACE_OUT
+    family_scores_path = family_dir / "mts_observed_v18_family_surface_scores.csv"
+    family_null_path = family_dir / "mts_observed_v18_family_surface_family_surface_null_controls.csv"
+    family_case_path = family_dir / "mts_observed_v18_family_surface_case_ledger.csv"
+    if not family_scores_path.exists() or not family_null_path.exists():
+        write_observed_state_v18_family_surface_artifacts(family_dir)
+
+    smooth_dir = DEFAULT_OBSERVED_STATE_V18_SURFACE_SMOOTH_OUT
+    smooth_scores_path = smooth_dir / "mts_observed_v18_surface_smooth_scores.csv"
+    smooth_scale_path = smooth_dir / "mts_observed_v18_surface_smooth_scale_summary.csv"
+    if not smooth_scores_path.exists() or not smooth_scale_path.exists():
+        write_observed_state_v18_surface_smooth_artifacts(smooth_dir)
+
+    release_dir = DEFAULT_OBSERVED_STATE_V18_RELEASE_STRESS_OUT
+    release_scores_path = release_dir / "mts_observed_v18_release_stress_scores.csv"
+    if not release_scores_path.exists():
+        write_observed_state_v18_release_stress_artifacts(release_dir)
+
+    family_summary = read_csv_rows(family_scores_path)[0]
+    smooth_summary = read_csv_rows(smooth_scores_path)[0]
+    smooth_scales = read_csv_rows(smooth_scale_path)
+    release_summary = read_csv_rows(release_scores_path)[0]
+    family_null_rows = read_csv_rows(family_null_path)
+    family_case_rows = read_csv_rows(family_case_path)
+
+    baseline_scores = {curve["name"]: score_curve(curve) for curve in clean_curves}
+    candidate_scores = {curve["name"]: observed_state_v1807_family_surface_score_curve(curve, fit, amp_cap) for curve in clean_curves}
+    case_rows: list[dict] = []
+    for curve in clean_curves:
+        base = baseline_scores[curve["name"]]
+        cand = candidate_scores[curve["name"]]
+        family = cand.get("observedStateResponseFamily", "")
+        branch = cand.get("observedStateBranchDiagnosticOnly", cand.get("observedStateBranch", ""))
+        case_rows.append(
+            {
+                "galaxy": curve["name"],
+                "set": "clean-high-rmse" if curve["name"] in high_names else "clean-protected",
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "baselineRmse": base["rmse"],
+                "candidateRmse": cand["rmse"],
+                "gainKmS": base["rmse"] - cand["rmse"],
+                "responseFamily": family,
+                "diagnosticBranch": branch,
+                "surfaceActivation": cand.get("observedStateFamilySurfaceActivation", ""),
+                "candidateRoute": cand["candidateRoute"],
+                "routeTransition": "" if cand["candidateRoute"] == base["candidateRoute"] else f"{base['candidateRoute']} -> {cand['candidateRoute']}",
+                "stillAbove20": cand["rmse"] >= 20.0,
+                "protectedRegressionKmS": max(0.0, cand["rmse"] - base["rmse"]) if curve["name"] not in high_names else 0.0,
+            }
+        )
+
+    null_summary_rows: list[dict] = []
+    for family in sorted({row["responseFamily"] for row in family_null_rows}):
+        rows = [row for row in family_null_rows if row["responseFamily"] == family]
+        null_summary_rows.append(
+            {
+                "nullTrack": "same-route same-family active-count random target",
+                "responseFamily": family,
+                "actualHighCount": next((row.get("actualHighCount", "") for row in rows), ""),
+                "actualHighGainPct": safe_median(parse_float(row.get("actualHighGainPct")) for row in rows),
+                "medianNullGainPct": safe_median(parse_float(row.get("familySurfaceNullGainPct")) for row in rows),
+                "bestNullGainPct": max([parse_float(row.get("familySurfaceNullGainPct"), -1e9) for row in rows] or [math.nan]),
+                "medianMarginPct": safe_median(parse_float(row.get("familySurfaceNullMarginPct")) for row in rows),
+                "minMarginPct": min([parse_float(row.get("familySurfaceNullMarginPct"), math.nan) for row in rows if math.isfinite(parse_float(row.get("familySurfaceNullMarginPct")))] or [math.nan]),
+                "maxNullRegressionKmS": max([parse_float(row.get("maxNullRegressionKmS"), 0.0) for row in rows] or [0.0]),
+            }
+        )
+    null_summary_rows.append(
+        {
+            "nullTrack": "release branch-label shuffled null",
+            "responseFamily": "all v18.05 diagnostic branches",
+            "actualHighCount": "",
+            "actualHighGainPct": parse_float(release_summary.get("nominalHighGainPct")),
+            "medianNullGainPct": parse_float(release_summary.get("medianBranchShuffleNullHighGainPct")),
+            "bestNullGainPct": "",
+            "medianMarginPct": parse_float(release_summary.get("medianBranchShuffleNullMarginPct")),
+            "minMarginPct": parse_float(release_summary.get("medianBranchShuffleNullMarginPct")),
+            "maxNullRegressionKmS": parse_float(release_summary.get("maxProtectedForcedRegressionKmS"), 0.0),
+        }
+    )
+
+    family_null_margins = [parse_float(row.get("medianMarginPct")) for row in null_summary_rows if math.isfinite(parse_float(row.get("medianMarginPct")))]
+    min_family_null_margin = min(
+        [parse_float(row.get("minMarginPct")) for row in null_summary_rows if row.get("nullTrack", "").startswith("same-route") and math.isfinite(parse_float(row.get("minMarginPct")))]
+        or [math.nan]
+    )
+    high_rows = [row for row in case_rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [row for row in case_rows if row["set"] == "clean-protected"]
+    weak_leakage = sum(1 for curve in clean_curves if curve["name"] in weak_names)
+    max_protected_regression = max([parse_float(row["protectedRegressionKmS"], 0.0) for row in protected_rows] or [0.0])
+    protected_worse_count = sum(1 for row in protected_rows if parse_float(row["protectedRegressionKmS"], 0.0) > 1e-9)
+
+    passes = (
+        parse_float(family_summary.get("nominalHighGainPct")) >= 60.0
+        and parse_float(family_summary.get("nominalCleanGainPct")) >= 38.0
+        and int(parse_float(family_summary.get("nominalHighAbove20"), 99.0)) == 0
+        and parse_float(family_summary.get("medianHoldoutHighGainPct")) >= 60.0
+        and parse_float(family_summary.get("medianHoldoutCleanGainPct")) >= 38.0
+        and parse_float(family_summary.get("medianFamilySurfaceNullMarginPct")) >= 10.0
+        and min_family_null_margin >= 0.0
+        and parse_float(release_summary.get("medianBranchShuffleNullMarginPct")) >= 10.0
+        and int(parse_float(smooth_summary.get("maxStressHighAbove20"), 99.0)) == 0
+        and int(parse_float(smooth_summary.get("fragileHighGalaxyCount"), 99.0)) == 0
+        and parse_float(smooth_summary.get("maxStressProtectedRegressionKmS")) <= 1.0
+        and max_protected_regression <= 1.0
+        and protected_worse_count == 0
+        and weak_leakage == 0
+    )
+    verdict = "v18.09 release-facing candidate passes" if passes else "v18.09 release-facing candidate blocked"
+    summary = {
+        "candidateId": "observed-state-response-v18.09-surface-persistence",
+        "baseCandidate": "observed-state-response-v18.07-family-surface-law",
+        "verdict": verdict,
+        "lawChange": "add surface-persistence smoothing to the v18.07 response-family surface so jitter cannot drop a valid family hit into the broad fallback",
+        "nominalHighGainPct": parse_float(family_summary.get("nominalHighGainPct")),
+        "nominalCleanGainPct": parse_float(family_summary.get("nominalCleanGainPct")),
+        "nominalHighAbove20": int(parse_float(family_summary.get("nominalHighAbove20"), 0.0)),
+        "medianHoldoutHighGainPct": parse_float(family_summary.get("medianHoldoutHighGainPct")),
+        "medianHoldoutCleanGainPct": parse_float(family_summary.get("medianHoldoutCleanGainPct")),
+        "surfaceStressMinHighGainPct": parse_float(smooth_summary.get("minStressHighGainPct")),
+        "surfaceStressMaxAbove20": int(parse_float(smooth_summary.get("maxStressHighAbove20"), 0.0)),
+        "surfaceStressFragileHighCount": int(parse_float(smooth_summary.get("fragileHighGalaxyCount"), 0.0)),
+        "surfaceStressFamilyPreservation": parse_float(smooth_summary.get("medianFamilyPreservation")),
+        "maxProtectedRegressionKmS": max_protected_regression,
+        "activeProtectedWorseCount": protected_worse_count,
+        "medianFamilySurfaceNullMarginPct": parse_float(family_summary.get("medianFamilySurfaceNullMarginPct")),
+        "minFamilySurfaceNullMarginPct": min_family_null_margin,
+        "releaseBranchShuffleNullMarginPct": parse_float(release_summary.get("medianBranchShuffleNullMarginPct")),
+        "activeHighResponseFamilyCount": int(parse_float(family_summary.get("activeHighResponseFamilyCount"), 0.0)),
+        "cleanHighRmseCount": len(high_rows),
+        "cleanHighAbove20AfterCandidate": sum(1 for row in high_rows if row["stillAbove20"]),
+        "weakSystematicsLeakage": weak_leakage,
+        "canonicalMtsChanged": False,
+        "qChangedGlobally": False,
+        "gamma0Changed": False,
+        "mlChanged": False,
+        "forbiddenFormulaInputsUsed": False,
+    }
+
+    formula = {
+        "candidateId": summary["candidateId"],
+        "baseCandidate": summary["baseCandidate"],
+        "mechanism": summary["lawChange"],
+        "nominalCurveLaw": "v18.07 six-family state/profile response surface",
+        "surfacePersistenceRule": "if perturbed state selector drops to continuity fallback while observed curve has non-fallback v18.07 family response, keep the observed family response",
+        "responseFamilies": sorted(observed_state_v1807_family_surface_drives(clean_curves[0]).keys()),
+        "branchLabelsDiagnosticOnly": True,
+        "canonicalMtsChanged": False,
+        "qChangedGlobally": False,
+        "gamma0Changed": False,
+        "mlChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics training"],
+    }
+
+    artifact_payload = read_window_json_assignment(V18_FAMILY_SURFACE_ARTIFACT_PATH, "MTS_V18_07_FAMILY_SURFACE_CANDIDATE")
+    if not artifact_payload:
+        write_observed_state_v18_family_surface_artifacts(family_dir)
+        artifact_payload = read_window_json_assignment(V18_FAMILY_SURFACE_ARTIFACT_PATH, "MTS_V18_07_FAMILY_SURFACE_CANDIDATE")
+    if artifact_payload:
+        metadata = artifact_payload.setdefault("metadata", {})
+        metadata["candidateId"] = summary["candidateId"]
+        metadata["displayName"] = "MTS v18.09 surface-persistence response"
+        metadata["verdict"] = verdict
+        metadata["surfacePersistenceV1809"] = {
+            "verdict": str(smooth_summary.get("verdict", "")),
+            "minStressHighGainPct": summary["surfaceStressMinHighGainPct"],
+            "maxStressHighAbove20": summary["surfaceStressMaxAbove20"],
+            "fragileHighGalaxyCount": summary["surfaceStressFragileHighCount"],
+            "maxStressProtectedRegressionKmS": parse_float(smooth_summary.get("maxStressProtectedRegressionKmS")),
+            "medianFamilyPreservation": summary["surfaceStressFamilyPreservation"],
+            "weakSystematicsLeakage": parse_float(smooth_summary.get("weakSystematicsLeakage"), 0.0),
+        }
+        metadata["promotionGateV1809"] = {
+            "verdict": verdict,
+            "nominalHighGainPct": summary["nominalHighGainPct"],
+            "nominalCleanGainPct": summary["nominalCleanGainPct"],
+            "medianHoldoutHighGainPct": summary["medianHoldoutHighGainPct"],
+            "medianHoldoutCleanGainPct": summary["medianHoldoutCleanGainPct"],
+            "surfaceStressMaxAbove20": summary["surfaceStressMaxAbove20"],
+            "surfaceStressFragileHighCount": summary["surfaceStressFragileHighCount"],
+            "maxProtectedRegressionKmS": summary["maxProtectedRegressionKmS"],
+            "familySurfaceNullMarginPct": summary["medianFamilySurfaceNullMarginPct"],
+            "releaseBranchShuffleNullMarginPct": summary["releaseBranchShuffleNullMarginPct"],
+            "weakSystematicsLeakage": summary["weakSystematicsLeakage"],
+        }
+        metadata["reviewGate"] = {
+            **metadata.get("reviewGate", {}),
+            "candidateId": summary["candidateId"],
+            "verdict": verdict,
+            "nominalHighGainPct": summary["nominalHighGainPct"],
+            "nominalCleanGainPct": summary["nominalCleanGainPct"],
+            "holdoutHighGainPct": summary["medianHoldoutHighGainPct"],
+            "stressAbove20": summary["surfaceStressMaxAbove20"],
+            "stressMinHighGainPct": summary["surfaceStressMinHighGainPct"],
+            "nullMarginKmS": metadata.get("reviewGate", {}).get("nullMarginKmS", math.nan),
+            "familySurfaceNullMarginPct": summary["medianFamilySurfaceNullMarginPct"],
+            "releaseBranchShuffleNullMarginPct": summary["releaseBranchShuffleNullMarginPct"],
+            "activeProtectedWorseCount": summary["activeProtectedWorseCount"],
+            "nominalDiffVsV1797Count": metadata.get("reviewGate", {}).get("nominalDiffVsV1797Count", 0),
+        }
+        for curve_payload in artifact_payload.get("curves", {}).values():
+            if isinstance(curve_payload, dict):
+                curve_payload["candidateId"] = summary["candidateId"]
+                curve_payload["releaseCandidate"] = "MTS v18.09 surface-persistence response"
+        write_window_json_assignment(V18_SURFACE_SMOOTH_ARTIFACT_PATH, "MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE", artifact_payload)
+        write_window_json_assignment(out_dir / f"{prefix}_browser_artifact.js", "MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE", artifact_payload)
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", family_null_rows)
+    write_csv(out_dir / f"{prefix}_null_summary.csv", null_summary_rows)
+    write_csv(out_dir / f"{prefix}_surface_stress_scale_summary.csv", smooth_scales)
+    write_csv(out_dir / f"{prefix}_source_family_case_ledger.csv", family_case_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    top_repairs = sorted(high_rows, key=lambda row: parse_float(row["gainKmS"], 0.0), reverse=True)[:15]
+    report = [
+        "# MTS v18.09 Promotion Gate",
+        "",
+        "This mode promotes the tested v18.09 surface-persistence candidate into the browser/release artifact only if the high-RMSE repair, protected-case behaviour, surface-stress replay, and branch/family null controls all pass.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Law change: `{summary['lawChange']}`.",
+        f"- High-RMSE gain: `{fmt(summary['nominalHighGainPct'])}%`.",
+        f"- Clean-set gain: `{fmt(summary['nominalCleanGainPct'])}%`.",
+        f"- Holdout high-RMSE gain: `{fmt(summary['medianHoldoutHighGainPct'])}%`.",
+        f"- High-RMSE cases above 20 after candidate: `{summary['cleanHighAbove20AfterCandidate']}`.",
+        f"- Surface-stress max above 20: `{summary['surfaceStressMaxAbove20']}`.",
+        f"- Surface-stress fragile cases: `{summary['surfaceStressFragileHighCount']}`.",
+        f"- Protected regressions: `{summary['activeProtectedWorseCount']}`; max `{fmt(summary['maxProtectedRegressionKmS'])}` km/s.",
+        f"- Family-surface null margin: `{fmt(summary['medianFamilySurfaceNullMarginPct'])}` points.",
+        f"- Release branch-shuffle null margin: `{fmt(summary['releaseBranchShuffleNullMarginPct'])}` points.",
+        f"- Weak/systematics leakage: `{summary['weakSystematicsLeakage']}`.",
+        "",
+        "## Largest High-RMSE Repairs",
+        "",
+        "| Galaxy | Canonical | v18.09 | Gain | Family | Branch |",
+        "| --- | ---: | ---: | ---: | --- | --- |",
+    ]
+    for row in top_repairs:
+        report.append(
+            f"| {row['galaxy']} | {fmt(row['baselineRmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['gainKmS'])} | {row['responseFamily']} | {row['diagnosticBranch']} |"
+        )
+    report.extend(["", "## Null Summary", "", "| Track | Family | Actual gain | Median null | Median margin | Min margin |", "| --- | --- | ---: | ---: | ---: | ---: |"])
+    for row in null_summary_rows:
+        report.append(
+            f"| {row['nullTrack']} | {row['responseFamily']} | {fmt(row['actualHighGainPct'])}% | {fmt(row['medianNullGainPct'])}% | {fmt(row['medianMarginPct'])} | {fmt(row['minMarginPct'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Guardrails",
+            "",
+            "- Canonical MTS constants remain locked.",
+            "- Weak/systematics galaxies remain excluded.",
+            "- No galaxy-name lookup, residual lookup, raw-RMSE formula input, q patch, Gamma0 change, or M/L change is introduced.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-v18-promotion-gate-v1",
+        "candidateId": summary["candidateId"],
+        "verdict": verdict,
+        "summary": summary,
+        "formula": formula,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_null_summary.csv",
+            f"{prefix}_surface_stress_scale_summary.csv",
+            f"{prefix}_source_family_case_ledger.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_browser_artifact.js",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatev18promotiongate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_PROMOTION_GATE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_promotion_gate_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.09 promotion gate")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['nominalHighGainPct'])}%",
+                f"clean={fmt(summary['nominalCleanGainPct'])}%",
+                f"above20={summary['cleanHighAbove20AfterCandidate']}",
+                f"stress_above20={summary['surfaceStressMaxAbove20']}",
+                f"protected={fmt(summary['maxProtectedRegressionKmS'])}",
+                f"family_null={fmt(summary['medianFamilySurfaceNullMarginPct'])}",
+                f"branch_null={fmt(summary['releaseBranchShuffleNullMarginPct'])}",
+                f"weak_leakage={summary['weakSystematicsLeakage']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 promotion gate to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_paper_section_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     evidence_dir = DEFAULT_OBSERVED_STATE_V18_EVIDENCE_EXPORT_OUT
@@ -70061,6 +70381,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18familysurface",
             "observedstatev18surfacestress",
             "observedstatev18surfacesmooth",
+            "observedstatev18promotiongate",
             "observedstatev18papersection",
             "observedstatev18docxbundle",
             "observedstatev18integrateddocx",
@@ -70314,6 +70635,8 @@ def main() -> None:
         cmd_observedstatev18surfacestress(args)
     elif args.mode == "observedstatev18surfacesmooth":
         cmd_observedstatev18surfacesmooth(args)
+    elif args.mode == "observedstatev18promotiongate":
+        cmd_observedstatev18promotiongate(args)
     elif args.mode == "observedstatev18papersection":
         cmd_observedstatev18papersection(args)
     elif args.mode == "observedstatev18docxbundle":
