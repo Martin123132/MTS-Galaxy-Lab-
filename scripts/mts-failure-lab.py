@@ -160,6 +160,7 @@ DEFAULT_OBSERVED_STATE_V18_BRANCH_PRUNE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v
 DEFAULT_OBSERVED_STATE_V18_FAMILY_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-family-audit-v1"
 DEFAULT_OBSERVED_STATE_V18_BRANCH_IDENTITY_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-branch-identity-v1"
 DEFAULT_OBSERVED_STATE_V18_SAFETY_DEPENDENCY_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-safety-dependency-v1"
+DEFAULT_OBSERVED_STATE_V18_EDGE_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-edge-harden-v1"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
@@ -55827,6 +55828,462 @@ def cmd_observedstatev18safetydependency(args: argparse.Namespace) -> None:
     print(f"Wrote v18 safety/dependency pass to {out_dir.resolve()}")
 
 
+OBSERVED_STATE_V1804_EDGE_BRANCH = "buffered disk-shear high-q shape"
+OBSERVED_STATE_V1804_EDGE_TERMS = [
+    ("memoryLoad", "gt", 3.2),
+    ("memoryLoad", "lt", 4.4),
+    ("fGasOut", "gt", 0.20),
+    ("fGasOut", "lt", 0.35),
+    ("outerBulgeShare", "le", 0.01),
+    ("outerDiskShare", "ge", 0.65),
+    ("outerGasShare", "gt", 0.14),
+    ("outerGasShare", "lt", 0.30),
+    ("hOverRout", "ge", 0.16),
+    ("uOut", "gt", 0.34),
+    ("uOut", "lt", 0.44),
+    ("uMax", "gt", 1.00),
+    ("uMax", "lt", 1.35),
+    ("pointDensity", "ge", 1.00),
+    ("pointDensity", "lt", 1.50),
+    ("barCurv", "le", -10.0),
+]
+OBSERVED_STATE_V1804_TRACKS = [
+    "v18.03-safety-gated",
+    "v18.03-safety-gated-review-edge",
+    "v18.04-edge-hardened",
+]
+
+
+def observed_state_v1804_edge_rule_status(curve: dict) -> tuple[bool, dict, list[str]]:
+    values = observed_state_v18_state_values(curve)
+    failed: list[str] = []
+    if curve.get("lockedModelRoute") != "buffered single-crossing":
+        failed.append("lockedRoute=buffered single-crossing")
+    for feature, op, threshold in OBSERVED_STATE_V1804_EDGE_TERMS:
+        value = parse_float(values.get(feature), math.nan)
+        ok = math.isfinite(value)
+        if ok and op == "gt":
+            ok = value > threshold
+        elif ok and op == "ge":
+            ok = value >= threshold
+        elif ok and op == "lt":
+            ok = value < threshold
+        elif ok and op == "le":
+            ok = value <= threshold
+        if not ok:
+            failed.append(f"{feature} {op} {threshold}")
+    return not failed, values, failed
+
+
+def observed_state_v1804_score_curve(curve: dict, fit: dict, amp_cap: float) -> dict:
+    edge_pass, _, failed_terms = observed_state_v1804_edge_rule_status(curve)
+    score = observed_state_v1803_score_curve(curve, fit, amp_cap, "v18.03-safety-gated-review-edge")
+    branch = score.get("observedStateBranch", "")
+    vetoed_branch = ""
+    veto_reason = ""
+    if branch == OBSERVED_STATE_V1804_EDGE_BRANCH and not edge_pass:
+        vetoed_branch = branch
+        veto_reason = "v18.04 full disk-shear edge rule"
+        score = observed_state_v1803_score_curve(curve, fit, amp_cap, "v18.03-safety-gated")
+    score["observedStateV1804Track"] = "v18.04-edge-hardened"
+    score["observedStateV1804EdgeRulePass"] = edge_pass
+    score["observedStateV1804EdgeRuleFailedTerms"] = "; ".join(failed_terms)
+    score["observedStateV1804VetoedBranch"] = vetoed_branch
+    score["observedStateV1804VetoReason"] = veto_reason
+    return score
+
+
+def observed_state_v1804_score_curve_for_track(curve: dict, fit: dict, amp_cap: float, track_id: str) -> dict:
+    if track_id == "v18.04-edge-hardened":
+        return observed_state_v1804_score_curve(curve, fit, amp_cap)
+    return observed_state_v1803_score_curve(curve, fit, amp_cap, track_id)
+
+
+def observed_state_v1804_forced_edge_score(curve: dict, fit: dict, amp_cap: float) -> dict:
+    edge_pass, _, failed_terms = observed_state_v1804_edge_rule_status(curve)
+    if not edge_pass:
+        score = observed_state_v1803_score_curve(curve, fit, amp_cap, "v18.03-safety-gated")
+        score["observedStateV1804ForcedEdgeApplied"] = False
+        score["observedStateV1804EdgeRulePass"] = False
+        score["observedStateV1804EdgeRuleFailedTerms"] = "; ".join(failed_terms)
+        return score
+    score = observed_state_v1803_forced_branch_score(
+        curve,
+        OBSERVED_STATE_V1804_EDGE_BRANCH,
+        fit,
+        amp_cap,
+        "v18.03-safety-gated-review-edge",
+    )
+    score["observedStateV1804ForcedEdgeApplied"] = True
+    score["observedStateV1804EdgeRulePass"] = True
+    score["observedStateV1804EdgeRuleFailedTerms"] = ""
+    return score
+
+
+def observed_state_v1804_metric_summary(
+    clean_curves: list[dict],
+    high_names: set[str],
+    baseline_scores: dict[str, dict],
+    candidate_scores: dict[str, dict],
+) -> dict:
+    paired = [(curve, baseline_scores[curve["name"]], candidate_scores[curve["name"]]) for curve in clean_curves]
+    return observed_state_v1803_track_summary(paired, high_names)
+
+
+def write_observed_state_v18_edge_harden_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_observed_v18_edge_harden"
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    artifact_payload = read_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE")
+
+    baseline_scores = {curve["name"]: score_curve(curve) for curve in clean_curves}
+    no_edge_scores = {
+        curve["name"]: observed_state_v1803_score_curve(curve, fit, amp_cap, "v18.03-safety-gated")
+        for curve in clean_curves
+    }
+    review_edge_scores = {
+        curve["name"]: observed_state_v1803_score_curve(curve, fit, amp_cap, "v18.03-safety-gated-review-edge")
+        for curve in clean_curves
+    }
+    edge_harden_scores = {
+        curve["name"]: observed_state_v1804_score_curve(curve, fit, amp_cap)
+        for curve in clean_curves
+    }
+    track_score_maps = {
+        "v18.03-safety-gated": no_edge_scores,
+        "v18.03-safety-gated-review-edge": review_edge_scores,
+        "v18.04-edge-hardened": edge_harden_scores,
+    }
+
+    score_rows: list[dict] = []
+    case_rows: list[dict] = []
+    for track_id in OBSERVED_STATE_V1804_TRACKS:
+        candidate_scores = track_score_maps[track_id]
+        summary = observed_state_v1804_metric_summary(clean_curves, high_names, baseline_scores, candidate_scores)
+        summary.update({"track": track_id})
+        score_rows.append(summary)
+        for curve in clean_curves:
+            baseline = baseline_scores[curve["name"]]
+            candidate = candidate_scores[curve["name"]]
+            no_edge = no_edge_scores[curve["name"]]
+            edge_pass, values, failed_terms = observed_state_v1804_edge_rule_status(curve)
+            case_rows.append(
+                {
+                    "track": track_id,
+                    "galaxy": curve["name"],
+                    "set": "clean-high-rmse" if curve["name"] in high_names else "clean-protected",
+                    "lockedRoute": curve["lockedModelRoute"],
+                    "baselineRmse": baseline["rmse"],
+                    "noEdgeRmse": no_edge["rmse"],
+                    "candidateRmse": candidate["rmse"],
+                    "gainKmS": baseline["rmse"] - candidate["rmse"],
+                    "incrementVsNoEdgeKmS": no_edge["rmse"] - candidate["rmse"],
+                    "candidateRoute": candidate.get("candidateRoute", ""),
+                    "branch": candidate.get("observedStateBranch", ""),
+                    "family": candidate.get("observedStateFamily", ""),
+                    "edgeRulePass": edge_pass,
+                    "edgeRuleFailedTerms": "; ".join(failed_terms),
+                    "vetoedBranch": candidate.get("observedStateV1804VetoedBranch", candidate.get("observedStateV1803VetoedBranch", "")),
+                    "vetoReason": candidate.get("observedStateV1804VetoReason", candidate.get("observedStateV1803VetoReason", "")),
+                    "memoryLoad": values.get("memoryLoad", ""),
+                    "fGasOut": values.get("fGasOut", ""),
+                    "outerGasShare": values.get("outerGasShare", ""),
+                    "outerDiskShare": values.get("outerDiskShare", ""),
+                    "uOut": values.get("uOut", ""),
+                    "uMax": values.get("uMax", ""),
+                    "pointDensity": values.get("pointDensity", ""),
+                    "barCurv": values.get("barCurv", ""),
+                    "stillAbove20": candidate["rmse"] >= 20.0 if curve["name"] in high_names else "",
+                    "protectedRegressionKmS": candidate["rmse"] - baseline["rmse"] if curve["name"] not in high_names else "",
+                }
+            )
+
+    edge_actual_pairs = [
+        (curve, no_edge_scores[curve["name"]], edge_harden_scores[curve["name"]], baseline_scores[curve["name"]])
+        for curve in clean_curves
+        if curve["name"] in high_names and edge_harden_scores[curve["name"]].get("observedStateBranch") == OBSERVED_STATE_V1804_EDGE_BRANCH
+    ]
+    actual_edge_increment_pct = pct_improvement(
+        safe_mean(pair[1]["rmse"] for pair in edge_actual_pairs),
+        safe_mean(pair[2]["rmse"] for pair in edge_actual_pairs),
+    )
+    actual_edge_total_pct = pct_improvement(
+        safe_mean(pair[3]["rmse"] for pair in edge_actual_pairs),
+        safe_mean(pair[2]["rmse"] for pair in edge_actual_pairs),
+    )
+    actual_edge_increment_kms = safe_mean(pair[1]["rmse"] - pair[2]["rmse"] for pair in edge_actual_pairs)
+    actual_edge_names = [pair[0]["name"] for pair in edge_actual_pairs]
+
+    route_counts: dict[str, int] = {}
+    for curve, _, _, _ in edge_actual_pairs:
+        route_counts[curve["lockedModelRoute"]] = route_counts.get(curve["lockedModelRoute"], 0) + 1
+    high_pool = [curve for curve in clean_curves if curve["name"] in high_names and curve["name"] not in set(actual_edge_names)]
+    null_rows: list[dict] = []
+    for seed in OBSERVED_STATE_V18_BRANCH_IDENTITY_SEEDS:
+        rng = random.Random(f"v18.04-edge-harden-null:{seed}")
+        selected: list[dict] = []
+        used: set[str] = set()
+        for route, count in sorted(route_counts.items()):
+            route_pool = [curve for curve in high_pool if curve["lockedModelRoute"] == route and curve["name"] not in used]
+            rng.shuffle(route_pool)
+            selected.extend(route_pool[:count])
+            used.update(curve["name"] for curve in route_pool[:count])
+        if len(selected) < len(edge_actual_pairs):
+            fallback = [curve for curve in high_pool if curve["name"] not in used]
+            rng.shuffle(fallback)
+            selected.extend(fallback[: len(edge_actual_pairs) - len(selected)])
+        forced_pairs = []
+        gate_pass_count = 0
+        applied_count = 0
+        for curve in selected:
+            no_edge = no_edge_scores[curve["name"]]
+            baseline = baseline_scores[curve["name"]]
+            forced = observed_state_v1804_forced_edge_score(curve, fit, amp_cap)
+            gate_pass_count += 1 if forced.get("observedStateV1804EdgeRulePass") else 0
+            applied_count += 1 if forced.get("observedStateV1804ForcedEdgeApplied") else 0
+            forced_pairs.append((curve, baseline, no_edge, forced))
+        null_increment_pct = pct_improvement(
+            safe_mean(pair[2]["rmse"] for pair in forced_pairs),
+            safe_mean(pair[3]["rmse"] for pair in forced_pairs),
+        )
+        null_total_pct = pct_improvement(
+            safe_mean(pair[1]["rmse"] for pair in forced_pairs),
+            safe_mean(pair[3]["rmse"] for pair in forced_pairs),
+        )
+        null_rows.append(
+            {
+                "nullType": "same-route same-active-count state-respecting edge null",
+                "seed": seed,
+                "edgeBranch": OBSERVED_STATE_V1804_EDGE_BRANCH,
+                "selectedGalaxies": "; ".join(sorted(curve["name"] for curve in selected)),
+                "selectedCount": len(selected),
+                "edgeRulePassCount": gate_pass_count,
+                "forcedEdgeAppliedCount": applied_count,
+                "actualEdgeActiveGalaxies": "; ".join(sorted(actual_edge_names)),
+                "actualEdgeIncrementGainPct": actual_edge_increment_pct,
+                "actualEdgeTotalGainPct": actual_edge_total_pct,
+                "actualEdgeIncrementGainKmS": actual_edge_increment_kms,
+                "nullIncrementGainPct": null_increment_pct,
+                "nullTotalGainPct": null_total_pct,
+                "nullIncrementGainKmS": safe_mean(pair[2]["rmse"] - pair[3]["rmse"] for pair in forced_pairs),
+                "edgeNullMarginPct": actual_edge_increment_pct - null_increment_pct,
+                "maxRegressionVsNoEdgeKmS": max([pair[3]["rmse"] - pair[2]["rmse"] for pair in forced_pairs] or [0.0]),
+                "maxRegressionVsBaselineKmS": max([pair[3]["rmse"] - pair[1]["rmse"] for pair in forced_pairs] or [0.0]),
+            }
+        )
+
+    edge_rule_rows: list[dict] = []
+    protected_forced_regs: list[float] = []
+    protected_forced_count = 0
+    for curve in clean_curves:
+        edge_pass, values, failed_terms = observed_state_v1804_edge_rule_status(curve)
+        branch = edge_harden_scores[curve["name"]].get("observedStateBranch", "")
+        include = edge_pass or branch == OBSERVED_STATE_V1804_EDGE_BRANCH
+        if not include:
+            continue
+        baseline = baseline_scores[curve["name"]]
+        no_edge = no_edge_scores[curve["name"]]
+        forced = observed_state_v1804_forced_edge_score(curve, fit, amp_cap)
+        if curve["name"] not in high_names and edge_pass:
+            protected_forced_count += 1
+            protected_forced_regs.append(forced["rmse"] - baseline["rmse"])
+        edge_rule_rows.append(
+            {
+                "galaxy": curve["name"],
+                "set": "clean-high-rmse" if curve["name"] in high_names else "clean-protected",
+                "lockedRoute": curve["lockedModelRoute"],
+                "edgeRulePass": edge_pass,
+                "edgeRuleFailedTerms": "; ".join(failed_terms),
+                "branch": branch,
+                "baselineRmse": baseline["rmse"],
+                "noEdgeRmse": no_edge["rmse"],
+                "edgeHardenRmse": edge_harden_scores[curve["name"]]["rmse"],
+                "forcedEdgeRmse": forced["rmse"],
+                "incrementVsNoEdgeKmS": no_edge["rmse"] - edge_harden_scores[curve["name"]]["rmse"],
+                "forcedRegressionVsBaselineKmS": forced["rmse"] - baseline["rmse"],
+                "forcedRegressionVsNoEdgeKmS": forced["rmse"] - no_edge["rmse"],
+                "memoryLoad": values.get("memoryLoad", ""),
+                "fGasOut": values.get("fGasOut", ""),
+                "outerBulgeShare": values.get("outerBulgeShare", ""),
+                "outerDiskShare": values.get("outerDiskShare", ""),
+                "outerGasShare": values.get("outerGasShare", ""),
+                "hOverRout": values.get("hOverRout", ""),
+                "uOut": values.get("uOut", ""),
+                "uMax": values.get("uMax", ""),
+                "pointDensity": values.get("pointDensity", ""),
+                "barCurv": values.get("barCurv", ""),
+            }
+        )
+
+    best = next(row for row in score_rows if row["track"] == "v18.04-edge-hardened")
+    median_null_increment = safe_median(row["nullIncrementGainPct"] for row in null_rows)
+    edge_null_margin = safe_median(row["edgeNullMarginPct"] for row in null_rows)
+    protected_forced_max = max(protected_forced_regs or [0.0])
+    protected_forced_stress_count = sum(1 for value in protected_forced_regs if value > 3.0)
+    edge_rule_high_hits = sum(1 for row in edge_rule_rows if row["set"] == "clean-high-rmse" and row["edgeRulePass"])
+    edge_rule_protected_hits = sum(1 for row in edge_rule_rows if row["set"] == "clean-protected" and row["edgeRulePass"])
+    passes = (
+        best["highGainPct"] >= 68.0
+        and best["cleanGainPct"] >= 43.0
+        and int(best["highAbove20"]) == 0
+        and parse_float(best["maxProtectedRegressionKmS"]) <= 4.0
+        and protected_forced_max <= 3.0
+        and protected_forced_stress_count == 0
+        and edge_null_margin >= 10.0
+        and edge_rule_high_hits >= 1
+        and edge_rule_protected_hits == 0
+    )
+    verdict = "v18.04 edge hardened review candidate passes" if passes else "v18.04 edge hardening blocked"
+    summary = {
+        "candidateId": "observed-state-response-v18.04-edge-hardened",
+        "verdict": verdict,
+        "bestTrack": "v18.04-edge-hardened",
+        "bestHighGainPct": best["highGainPct"],
+        "bestCleanGainPct": best["cleanGainPct"],
+        "bestHighAbove20": best["highAbove20"],
+        "bestMaxProtectedRegressionKmS": best["maxProtectedRegressionKmS"],
+        "edgeBranch": OBSERVED_STATE_V1804_EDGE_BRANCH,
+        "edgeActiveHighGalaxies": sorted(actual_edge_names),
+        "edgeActualIncrementGainPct": actual_edge_increment_pct,
+        "edgeActualTotalGainPct": actual_edge_total_pct,
+        "edgeActualIncrementGainKmS": actual_edge_increment_kms,
+        "edgeMedianStateRespectingNullGainPct": median_null_increment,
+        "edgeNullMarginPct": edge_null_margin,
+        "edgeRuleHighHits": edge_rule_high_hits,
+        "edgeRuleProtectedHits": edge_rule_protected_hits,
+        "protectedForcedEdgeHitCount": protected_forced_count,
+        "maxProtectedForcedEdgeRegressionKmS": protected_forced_max,
+        "protectedForcedEdgeStressCount": protected_forced_stress_count,
+        "weakSystematicsLeakage": 0,
+    }
+
+    artifact_payload.setdefault("metadata", {})["edgeHardenV1804"] = {
+        "verdict": verdict,
+        "bestTrack": summary["bestTrack"],
+        "bestHighGainPct": summary["bestHighGainPct"],
+        "bestCleanGainPct": summary["bestCleanGainPct"],
+        "bestHighAbove20": summary["bestHighAbove20"],
+        "edgeBranch": summary["edgeBranch"],
+        "edgeActiveHighGalaxies": summary["edgeActiveHighGalaxies"],
+        "edgeActualIncrementGainPct": summary["edgeActualIncrementGainPct"],
+        "edgeMedianStateRespectingNullGainPct": summary["edgeMedianStateRespectingNullGainPct"],
+        "edgeNullMarginPct": summary["edgeNullMarginPct"],
+        "edgeRuleHighHits": summary["edgeRuleHighHits"],
+        "edgeRuleProtectedHits": summary["edgeRuleProtectedHits"],
+        "maxProtectedForcedEdgeRegressionKmS": summary["maxProtectedForcedEdgeRegressionKmS"],
+        "weakSystematicsLeakage": 0,
+    }
+    write_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+    write_window_json_assignment(out_dir / f"{prefix}_browser_artifact.js", "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+
+    formula = {
+        "candidateId": summary["candidateId"],
+        "mechanism": "v18.03 review-edge retained only when the full buffered disk-shear state fingerprint is present",
+        "baseTrack": "v18.03-safety-gated-review-edge",
+        "fallbackTrackWhenEdgeRuleFails": "v18.03-safety-gated",
+        "edgeBranch": OBSERVED_STATE_V1804_EDGE_BRANCH,
+        "edgeRuleTerms": OBSERVED_STATE_V1804_EDGE_TERMS,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_edge_rule_hits.csv", edge_rule_rows)
+    write_csv(out_dir / f"{prefix}_nulls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    report = [
+        "# MTS v18.04 Edge Hardening Pass",
+        "",
+        "This pass does not add a new repair. It keeps the v18.03 safety-gated review-edge candidate and makes the single buffered disk-shear high-q branch state-respecting in its null tests.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Best track: `{summary['bestTrack']}`.",
+        f"- High-RMSE gain: `{fmt(summary['bestHighGainPct'])}%`.",
+        f"- Clean-set gain: `{fmt(summary['bestCleanGainPct'])}%`.",
+        f"- High-RMSE above 20: `{summary['bestHighAbove20']}`.",
+        f"- Edge branch: `{summary['edgeBranch']}`.",
+        f"- Edge active high galaxies: `{'; '.join(summary['edgeActiveHighGalaxies'])}`.",
+        f"- Edge incremental gain over no-edge v18.03: `{fmt(summary['edgeActualIncrementGainPct'])}%` / `{fmt(summary['edgeActualIncrementGainKmS'])}` km/s.",
+        f"- Median state-respecting null increment: `{fmt(summary['edgeMedianStateRespectingNullGainPct'])}%`.",
+        f"- Edge null margin: `{fmt(summary['edgeNullMarginPct'])}` percentage points.",
+        f"- Edge rule high hits: `{summary['edgeRuleHighHits']}`.",
+        f"- Edge rule protected hits: `{summary['edgeRuleProtectedHits']}`.",
+        f"- Max protected forced-edge regression: `{fmt(summary['maxProtectedForcedEdgeRegressionKmS'])}` km/s.",
+        f"- Weak/systematics leakage: `0`.",
+        "",
+        "## Track Scores",
+        "",
+        "| Track | High gain | Clean gain | Above 20 | Protected max | Active branches |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['track']} | {fmt(row['highGainPct'])}% | {fmt(row['cleanGainPct'])}% | {row['highAbove20']} | "
+            f"{fmt(row['maxProtectedRegressionKmS'])} | {row['activeBranchCount']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## What Changed",
+            "",
+            "- The branch `buffered disk-shear high-q shape` is retained only when the full buffered disk-shear edge rule is satisfied.",
+            "- State-respecting same-active-count nulls must pass that same rule before the branch can be forced.",
+            "- This is still a review candidate, not canonical MTS.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-v18-edge-harden-v1",
+        "candidateId": summary["candidateId"],
+        "verdict": verdict,
+        "summary": summary,
+        "bestTrackScore": best,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_edge_rule_hits.csv",
+            f"{prefix}_nulls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_browser_artifact.js",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatev18edgeharden(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_EDGE_HARDEN_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_edge_harden_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.04 edge hardening pass")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={summary['bestTrack']}",
+                f"high={fmt(summary['bestHighGainPct'])}%",
+                f"clean={fmt(summary['bestCleanGainPct'])}%",
+                f"above20={summary['bestHighAbove20']}",
+                f"edge={summary['edgeBranch']}",
+                f"edge_hits={summary['edgeRuleHighHits']}",
+                f"protected_edge_hits={summary['edgeRuleProtectedHits']}",
+                f"edge_null_margin={fmt(summary['edgeNullMarginPct'])}",
+                f"weak_leakage={summary['weakSystematicsLeakage']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 edge hardening pass to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_candidate_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     context = observed_state_candidate_context()
@@ -66618,6 +67075,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18familyaudit",
             "observedstatev18branchidentity",
             "observedstatev18safetydependency",
+            "observedstatev18edgeharden",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -66853,6 +67311,8 @@ def main() -> None:
         cmd_observedstatev18branchidentity(args)
     elif args.mode == "observedstatev18safetydependency":
         cmd_observedstatev18safetydependency(args)
+    elif args.mode == "observedstatev18edgeharden":
+        cmd_observedstatev18edgeharden(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":

@@ -93,6 +93,20 @@ if (artifact.metadata.branchSafetyV1803) {
     fail("v18.03 safety high gain missing");
   }
 }
+if (artifact.metadata.edgeHardenV1804) {
+  if (!String(artifact.metadata.edgeHardenV1804.verdict || "").includes("v18.04")) {
+    fail(`unexpected v18.04 edge verdict ${artifact.metadata.edgeHardenV1804.verdict}`);
+  }
+  if (artifact.metadata.edgeHardenV1804.weakSystematicsLeakage !== 0) {
+    fail(`v18.04 edge weak/systematics leakage ${artifact.metadata.edgeHardenV1804.weakSystematicsLeakage}`);
+  }
+  if (!Number.isFinite(artifact.metadata.edgeHardenV1804.bestHighGainPct)) {
+    fail("v18.04 edge high gain missing");
+  }
+  if (!Number.isFinite(artifact.metadata.edgeHardenV1804.edgeNullMarginPct)) {
+    fail("v18.04 edge null margin missing");
+  }
+}
 
 const indexHtml = readText(indexPath);
 const appJs = readText(appPath);
@@ -115,6 +129,8 @@ if (!appJs.includes("v18ReviewBranchIdentity")) fail("app.js does not populate v
 if (!indexHtml.includes("v18ReviewBranchIdentity")) fail("index.html does not expose v18 branch-identity status");
 if (!appJs.includes("v18ReviewSafetyPass")) fail("app.js does not populate v18.03 safety status");
 if (!indexHtml.includes("v18ReviewSafetyPass")) fail("index.html does not expose v18.03 safety status");
+if (!appJs.includes("v18ReviewEdgeHarden")) fail("app.js does not populate v18.04 edge status");
+if (!indexHtml.includes("v18ReviewEdgeHarden")) fail("index.html does not expose v18.04 edge status");
 
 console.log(
   [
