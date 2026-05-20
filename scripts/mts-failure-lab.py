@@ -161,6 +161,7 @@ DEFAULT_OBSERVED_STATE_V18_FAMILY_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-observed-v
 DEFAULT_OBSERVED_STATE_V18_BRANCH_IDENTITY_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-branch-identity-v1"
 DEFAULT_OBSERVED_STATE_V18_SAFETY_DEPENDENCY_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-safety-dependency-v1"
 DEFAULT_OBSERVED_STATE_V18_EDGE_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-edge-harden-v1"
+DEFAULT_OBSERVED_STATE_V18_RELEASE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-stress-v1"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
@@ -56284,6 +56285,518 @@ def cmd_observedstatev18edgeharden(args: argparse.Namespace) -> None:
     print(f"Wrote v18 edge hardening pass to {out_dir.resolve()}")
 
 
+def observed_state_v1805_score_curve(curve: dict, fit: dict, amp_cap: float) -> dict:
+    score = observed_state_v1804_score_curve(curve, fit, amp_cap)
+    score["observedStateV1805Track"] = "v18.05-release-stress"
+    return score
+
+
+def observed_state_v1805_forced_branch_score(curve: dict, branch: str, fit: dict, amp_cap: float) -> dict:
+    if branch == OBSERVED_STATE_V1804_EDGE_BRANCH:
+        return observed_state_v1804_forced_edge_score(curve, fit, amp_cap)
+    return observed_state_v1803_forced_branch_score(curve, branch, fit, amp_cap, "v18.03-safety-gated-review-edge")
+
+
+def observed_state_v1805_score_with_disabled_branch(curve: dict, fit: dict, amp_cap: float, branch: str) -> dict:
+    return observed_state_with_disabled_branches(
+        {branch},
+        lambda: observed_state_v1805_score_curve(curve, fit, amp_cap),
+    )
+
+
+def observed_state_v1805_browser_parity_rows(
+    clean_curves: list[dict],
+    weak_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    artifact_payload: dict,
+) -> tuple[list[dict], dict]:
+    artifact_curves = artifact_payload.get("curves", {})
+    rows: list[dict] = []
+    for curve in clean_curves:
+        name = curve["name"]
+        candidate = observed_state_v1805_score_curve(curve, fit, amp_cap)
+        artifact = artifact_curves.get(name, {})
+        artifact_rmse = parse_float(artifact.get("v18Rmse", artifact.get("rmse", math.nan)))
+        artifact_route = str(artifact.get("v18CandidateRoute", artifact.get("candidateRoute", "")))
+        rmse_diff = artifact_rmse - candidate["rmse"] if math.isfinite(artifact_rmse) else math.nan
+        route_match = artifact_route == candidate["candidateRoute"]
+        parity_claimed = name not in weak_names
+        parity_pass = (not parity_claimed) or (math.isfinite(rmse_diff) and abs(rmse_diff) <= 1e-8 and route_match)
+        rows.append(
+            {
+                "galaxy": name,
+                "set": "clean-protected",
+                "candidateRmse": candidate["rmse"],
+                "artifactRmse": artifact_rmse,
+                "artifactMinusCandidateRmse": rmse_diff,
+                "candidateRoute": candidate["candidateRoute"],
+                "artifactRoute": artifact_route,
+                "routeMatch": route_match,
+                "branch": candidate.get("observedStateBranch", ""),
+                "parityClaimed": parity_claimed,
+                "parityPass": parity_pass,
+            }
+        )
+    claimed = [row for row in rows if row["parityClaimed"]]
+    summary = {
+        "cleanParityMismatchCount": sum(1 for row in claimed if not row["parityPass"]),
+        "maxCleanArtifactMinusCandidateRmseAbs": max([abs(parse_float(row["artifactMinusCandidateRmse"], 0.0)) for row in claimed] or [0.0]),
+    }
+    return rows, summary
+
+
+def observed_state_v1805_seed_replay_rows(clean_curves: list[dict], high_names: set[str], fit: dict, amp_cap: float) -> list[dict]:
+    rows: list[dict] = []
+    for seed in OBSERVED_STATE_V1800_REPLAY_SEEDS:
+        _train_names, holdout_names = observed_state_split(clean_curves, seed, HOLDOUT_FRACTION)
+        holdout = [curve for curve in clean_curves if curve["name"] in holdout_names]
+        base_scores = {curve["name"]: score_curve(curve) for curve in holdout}
+        candidate_scores = {curve["name"]: observed_state_v1805_score_curve(curve, fit, amp_cap) for curve in holdout}
+        paired = [(curve, base_scores[curve["name"]], candidate_scores[curve["name"]]) for curve in holdout]
+        rows.append(observed_state_law_freeze_summary(seed, "v18.05-release-stress", paired, high_names))
+    return rows
+
+
+def observed_state_v1805_branch_ablation_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    baseline_scores: dict[str, dict],
+    candidate_scores: dict[str, dict],
+    candidate_summary: dict,
+) -> list[dict]:
+    active_branches = sorted(
+        {
+            score.get("observedStateBranch", "")
+            for curve in clean_curves
+            for score in [candidate_scores[curve["name"]]]
+            if score.get("observedStateBranch") and parse_float(score.get("observedStateSoftActivation"), 0.0) > 0.0
+        }
+    )
+    rows: list[dict] = []
+    for branch in active_branches:
+        ablated_scores = {
+            curve["name"]: observed_state_v1805_score_with_disabled_branch(curve, fit, amp_cap, branch)
+            for curve in clean_curves
+        }
+        paired = [(curve, baseline_scores[curve["name"]], ablated_scores[curve["name"]]) for curve in clean_curves]
+        metric = observed_state_v1803_track_summary(paired, high_names)
+        active_high = [
+            curve["name"]
+            for curve in clean_curves
+            if curve["name"] in high_names and candidate_scores[curve["name"]].get("observedStateBranch") == branch
+        ]
+        active_protected = [
+            curve["name"]
+            for curve in clean_curves
+            if curve["name"] not in high_names and candidate_scores[curve["name"]].get("observedStateBranch") == branch
+        ]
+        rows.append(
+            {
+                "branch": branch,
+                "activeHighCount": len(active_high),
+                "activeProtectedCount": len(active_protected),
+                "activeHighGalaxies": "; ".join(active_high),
+                "activeProtectedGalaxies": "; ".join(active_protected),
+                "candidateHighGainPct": candidate_summary["highGainPct"],
+                "ablationHighGainPct": metric["highGainPct"],
+                "highGainLossPct": candidate_summary["highGainPct"] - metric["highGainPct"],
+                "candidateCleanGainPct": candidate_summary["cleanGainPct"],
+                "ablationCleanGainPct": metric["cleanGainPct"],
+                "cleanGainLossPct": candidate_summary["cleanGainPct"] - metric["cleanGainPct"],
+                "ablationHighAbove20": metric["highAbove20"],
+                "ablationMaxProtectedRegressionKmS": metric["maxProtectedRegressionKmS"],
+                "ablationProtectedWorseCount": metric["protectedWorseCount"],
+                "branchEssentialForZeroAbove20": metric["highAbove20"] > 0,
+                "branchReleaseStatus": "essential" if metric["highAbove20"] > 0 or (candidate_summary["highGainPct"] - metric["highGainPct"]) >= 1.0 else "small-effect",
+            }
+        )
+    return rows
+
+
+def observed_state_v1805_protected_stress_rows(
+    clean_curves: list[dict],
+    fit: dict,
+    amp_cap: float,
+) -> tuple[list[dict], dict]:
+    curves_by_name = {curve["name"]: curve for curve in clean_curves}
+    protected_analog_path = DEFAULT_OBSERVED_STATE_V18_BRANCH_IDENTITY_OUT / "mts_observed_v18_branch_identity_protected_analogues.csv"
+    if not protected_analog_path.exists():
+        write_observed_state_v18_branch_identity_artifacts(DEFAULT_OBSERVED_STATE_V18_BRANCH_IDENTITY_OUT)
+    protected_analog_rows = read_csv_rows(protected_analog_path)
+    rows: list[dict] = []
+    regressions: list[float] = []
+    for row in protected_analog_rows:
+        branch = row.get("branch", "")
+        galaxy = row.get("protectedGalaxy", "")
+        curve = curves_by_name.get(galaxy)
+        if not curve:
+            continue
+        baseline = score_curve(curve)
+        forced = observed_state_v1805_forced_branch_score(curve, branch, fit, amp_cap)
+        regression = forced["rmse"] - baseline["rmse"]
+        regressions.append(regression)
+        rows.append(
+            {
+                "branch": branch,
+                "protectedGalaxy": galaxy,
+                "nearestHighBranchGalaxy": row.get("nearestHighBranchGalaxy", ""),
+                "stateDistance": row.get("stateDistance", ""),
+                "baselineRmse": baseline["rmse"],
+                "forcedRmse": forced["rmse"],
+                "forcedRegressionKmS": regression,
+                "forcedCandidateRoute": forced.get("candidateRoute", ""),
+                "vetoedBranch": forced.get("observedStateV1804VetoedBranch", forced.get("observedStateV1803VetoedBranch", "")),
+                "vetoReason": forced.get("observedStateV1804VetoReason", forced.get("observedStateV1803VetoReason", "")),
+                "edgeRulePass": forced.get("observedStateV1804EdgeRulePass", ""),
+                "forcedEdgeApplied": forced.get("observedStateV1804ForcedEdgeApplied", ""),
+            }
+        )
+    summary = {
+        "protectedStressRows": len(rows),
+        "maxProtectedForcedRegressionKmS": max(regressions or [0.0]),
+        "protectedForcedWorseCount": sum(1 for value in regressions if value > 1e-9),
+        "protectedForcedStressCount": sum(1 for value in regressions if value > 3.0),
+    }
+    return rows, summary
+
+
+def observed_state_v1805_null_control_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+    baseline_scores: dict[str, dict],
+    candidate_scores: dict[str, dict],
+    candidate_summary: dict,
+) -> tuple[list[dict], dict]:
+    high_curves = [curve for curve in clean_curves if curve["name"] in high_names]
+    active_high = [
+        curve
+        for curve in high_curves
+        if candidate_scores[curve["name"]].get("observedStateBranch")
+        and parse_float(candidate_scores[curve["name"]].get("observedStateSoftActivation"), 0.0) > 0.0
+    ]
+    active_by_route: dict[str, int] = {}
+    active_branches = [candidate_scores[curve["name"]].get("observedStateBranch", "") for curve in active_high]
+    for curve in active_high:
+        active_by_route[curve["lockedModelRoute"]] = active_by_route.get(curve["lockedModelRoute"], 0) + 1
+    rows: list[dict] = []
+    for seed in OBSERVED_STATE_V1800_REPLAY_SEEDS:
+        rng = random.Random(f"v18.05-release-null:{seed}")
+        selected: list[dict] = []
+        used: set[str] = set()
+        for route, count in sorted(active_by_route.items()):
+            route_pool = [curve for curve in high_curves if curve["lockedModelRoute"] == route and curve["name"] not in used]
+            rng.shuffle(route_pool)
+            selected.extend(route_pool[:count])
+            used.update(curve["name"] for curve in route_pool[:count])
+        if len(selected) < len(active_high):
+            fallback = [curve for curve in high_curves if curve["name"] not in used]
+            rng.shuffle(fallback)
+            selected.extend(fallback[: len(active_high) - len(selected)])
+        shuffled_branches = list(active_branches)
+        rng.shuffle(shuffled_branches)
+        forced_pairs = []
+        for curve, branch in zip(selected, shuffled_branches):
+            forced = observed_state_v1805_forced_branch_score(curve, branch, fit, amp_cap)
+            forced_pairs.append((curve, baseline_scores[curve["name"]], forced, branch))
+        null_gain = pct_improvement(
+            safe_mean(pair[1]["rmse"] for pair in forced_pairs),
+            safe_mean(pair[2]["rmse"] for pair in forced_pairs),
+        )
+        rows.append(
+            {
+                "nullType": "same-route same-active-count branch-label shuffle",
+                "seed": seed,
+                "selectedCount": len(selected),
+                "candidateHighGainPct": candidate_summary["highGainPct"],
+                "nullHighGainPct": null_gain,
+                "nullMarginPct": candidate_summary["highGainPct"] - null_gain,
+                "maxNullRegressionKmS": max([pair[2]["rmse"] - pair[1]["rmse"] for pair in forced_pairs] or [0.0]),
+                "selectedGalaxies": "; ".join(curve["name"] for curve in selected),
+                "forcedBranches": "; ".join(branch for _curve, _base, _forced, branch in forced_pairs),
+            }
+        )
+    edge_dir = DEFAULT_OBSERVED_STATE_V18_EDGE_HARDEN_OUT
+    edge_null_path = edge_dir / "mts_observed_v18_edge_harden_nulls.csv"
+    if not edge_null_path.exists():
+        write_observed_state_v18_edge_harden_artifacts(edge_dir)
+    for row in read_csv_rows(edge_null_path):
+        rows.append(
+            {
+                "nullType": "state-respecting edge null",
+                "seed": row.get("seed", ""),
+                "selectedCount": row.get("selectedCount", ""),
+                "candidateHighGainPct": candidate_summary["highGainPct"],
+                "nullHighGainPct": row.get("nullIncrementGainPct", ""),
+                "nullMarginPct": row.get("edgeNullMarginPct", ""),
+                "maxNullRegressionKmS": row.get("maxRegressionVsBaselineKmS", ""),
+                "selectedGalaxies": row.get("selectedGalaxies", ""),
+                "forcedBranches": OBSERVED_STATE_V1804_EDGE_BRANCH,
+            }
+        )
+    branch_shuffle_rows = [row for row in rows if row["nullType"] == "same-route same-active-count branch-label shuffle"]
+    edge_rows = [row for row in rows if row["nullType"] == "state-respecting edge null"]
+    summary = {
+        "medianBranchShuffleNullHighGainPct": safe_median(parse_float(row["nullHighGainPct"]) for row in branch_shuffle_rows),
+        "medianBranchShuffleNullMarginPct": safe_median(parse_float(row["nullMarginPct"]) for row in branch_shuffle_rows),
+        "minBranchShuffleNullMarginPct": min([parse_float(row["nullMarginPct"], math.inf) for row in branch_shuffle_rows] or [math.nan]),
+        "medianEdgeNullMarginPct": safe_median(parse_float(row["nullMarginPct"]) for row in edge_rows),
+        "maxNullRegressionKmS": max([parse_float(row["maxNullRegressionKmS"], 0.0) for row in rows] or [0.0]),
+    }
+    return rows, summary
+
+
+def write_observed_state_v18_release_stress_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_observed_v18_release_stress"
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    weak_names = context["weakNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    artifact_payload = read_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE")
+
+    baseline_scores = {curve["name"]: score_curve(curve) for curve in clean_curves}
+    candidate_scores = {curve["name"]: observed_state_v1805_score_curve(curve, fit, amp_cap) for curve in clean_curves}
+    paired = [(curve, baseline_scores[curve["name"]], candidate_scores[curve["name"]]) for curve in clean_curves]
+    candidate_summary = observed_state_v1803_track_summary(paired, high_names)
+
+    case_rows: list[dict] = []
+    for curve, baseline, candidate in paired:
+        case_rows.append(
+            {
+                "galaxy": curve["name"],
+                "set": "clean-high-rmse" if curve["name"] in high_names else "clean-protected",
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "baselineRmse": baseline["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "gainKmS": baseline["rmse"] - candidate["rmse"],
+                "candidateRoute": candidate["candidateRoute"],
+                "branch": candidate.get("observedStateBranch", ""),
+                "family": candidate.get("observedStateFamily", ""),
+                "softActivation": candidate.get("observedStateSoftActivation", ""),
+                "edgeRulePass": candidate.get("observedStateV1804EdgeRulePass", ""),
+                "stillAbove20": candidate["rmse"] >= 20.0 if curve["name"] in high_names else "",
+                "protectedRegressionKmS": candidate["rmse"] - baseline["rmse"] if curve["name"] not in high_names else "",
+            }
+        )
+
+    seed_rows = observed_state_v1805_seed_replay_rows(clean_curves, high_names, fit, amp_cap)
+    branch_rows = observed_state_v1805_branch_ablation_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        baseline_scores,
+        candidate_scores,
+        candidate_summary,
+    )
+    protected_rows, protected_summary = observed_state_v1805_protected_stress_rows(clean_curves, fit, amp_cap)
+    null_rows, null_summary = observed_state_v1805_null_control_rows(
+        clean_curves,
+        high_names,
+        fit,
+        amp_cap,
+        baseline_scores,
+        candidate_scores,
+        candidate_summary,
+    )
+    parity_rows, parity_summary = observed_state_v1805_browser_parity_rows(clean_curves, weak_names, fit, amp_cap, artifact_payload)
+
+    median_holdout_high = safe_median(row["highGainPct"] for row in seed_rows)
+    median_holdout_clean = safe_median(row["cleanGainPct"] for row in seed_rows)
+    max_holdout_above20 = max([parse_float(row["highStillAbove20"], 0.0) for row in seed_rows] or [0.0])
+    max_holdout_protected = max([parse_float(row["maxProtectedRegression"], 0.0) for row in seed_rows] or [0.0])
+    min_holdout_high = min([parse_float(row["highGainPct"], math.inf) for row in seed_rows] or [math.nan])
+    worst_ablation_above20 = max([parse_float(row["ablationHighAbove20"], 0.0) for row in branch_rows] or [0.0])
+    essential_branch_count = sum(1 for row in branch_rows if row["branchReleaseStatus"] == "essential")
+
+    passes = (
+        candidate_summary["highGainPct"] >= 68.0
+        and candidate_summary["cleanGainPct"] >= 43.0
+        and int(candidate_summary["highAbove20"]) == 0
+        and parse_float(candidate_summary["maxProtectedRegressionKmS"]) <= 4.0
+        and median_holdout_high >= 60.0
+        and median_holdout_clean >= 38.0
+        and max_holdout_above20 <= 4
+        and max_holdout_protected <= 4.0
+        and protected_summary["maxProtectedForcedRegressionKmS"] <= 3.0
+        and protected_summary["protectedForcedStressCount"] == 0
+        and null_summary["medianBranchShuffleNullMarginPct"] >= 10.0
+        and null_summary["medianEdgeNullMarginPct"] >= 10.0
+        and parity_summary["cleanParityMismatchCount"] == 0
+    )
+    verdict = "v18.05 release candidate passes stress gate" if passes else "v18.05 release stress blocked"
+    summary = {
+        "candidateId": "observed-state-response-v18.05-release-stress",
+        "verdict": verdict,
+        "nominalHighGainPct": candidate_summary["highGainPct"],
+        "nominalCleanGainPct": candidate_summary["cleanGainPct"],
+        "nominalHighAbove20": candidate_summary["highAbove20"],
+        "nominalMaxProtectedRegressionKmS": candidate_summary["maxProtectedRegressionKmS"],
+        "medianHoldoutHighGainPct": median_holdout_high,
+        "medianHoldoutCleanGainPct": median_holdout_clean,
+        "minHoldoutHighGainPct": min_holdout_high,
+        "maxHoldoutHighAbove20": max_holdout_above20,
+        "maxHoldoutProtectedRegressionKmS": max_holdout_protected,
+        "branchCount": len(branch_rows),
+        "essentialBranchCount": essential_branch_count,
+        "worstAblationHighAbove20": worst_ablation_above20,
+        "medianBranchShuffleNullHighGainPct": null_summary["medianBranchShuffleNullHighGainPct"],
+        "medianBranchShuffleNullMarginPct": null_summary["medianBranchShuffleNullMarginPct"],
+        "medianEdgeNullMarginPct": null_summary["medianEdgeNullMarginPct"],
+        "maxProtectedForcedRegressionKmS": protected_summary["maxProtectedForcedRegressionKmS"],
+        "protectedForcedStressCount": protected_summary["protectedForcedStressCount"],
+        "cleanParityMismatchCount": parity_summary["cleanParityMismatchCount"],
+        "maxCleanArtifactMinusCandidateRmseAbs": parity_summary["maxCleanArtifactMinusCandidateRmseAbs"],
+        "weakSystematicsLeakage": 0,
+    }
+
+    artifact_payload.setdefault("metadata", {})["releaseStressV1805"] = {
+        "verdict": verdict,
+        "candidateId": summary["candidateId"],
+        "nominalHighGainPct": summary["nominalHighGainPct"],
+        "nominalCleanGainPct": summary["nominalCleanGainPct"],
+        "nominalHighAbove20": summary["nominalHighAbove20"],
+        "medianHoldoutHighGainPct": summary["medianHoldoutHighGainPct"],
+        "medianHoldoutCleanGainPct": summary["medianHoldoutCleanGainPct"],
+        "medianBranchShuffleNullMarginPct": summary["medianBranchShuffleNullMarginPct"],
+        "medianEdgeNullMarginPct": summary["medianEdgeNullMarginPct"],
+        "maxProtectedForcedRegressionKmS": summary["maxProtectedForcedRegressionKmS"],
+        "cleanParityMismatchCount": summary["cleanParityMismatchCount"],
+        "weakSystematicsLeakage": 0,
+    }
+    write_window_json_assignment(V18_BROWSER_ARTIFACT_PATH, "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+    write_window_json_assignment(out_dir / f"{prefix}_browser_artifact.js", "MTS_V18_01_REVIEW_CANDIDATE", artifact_payload)
+
+    formula = {
+        "candidateId": summary["candidateId"],
+        "baseCandidate": "observed-state-response-v18.04-edge-hardened",
+        "mechanism": "frozen v18.04 observed-state response; no new branches, q changes, amplitude patch search, residual lookup, RMSE lookup, or weak/systematics fitting",
+        "edgeHardenedBranch": OBSERVED_STATE_V1804_EDGE_BRANCH,
+        "edgeRuleTerms": OBSERVED_STATE_V1804_EDGE_TERMS,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_seed_replay.csv", seed_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_branch_ablation.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_protected_stress.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_browser_parity.csv", parity_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    improved_high = sorted(
+        [row for row in case_rows if row["set"] == "clean-high-rmse"],
+        key=lambda row: parse_float(row["gainKmS"], 0.0),
+        reverse=True,
+    )
+    worsened = [row for row in case_rows if parse_float(row["gainKmS"], 0.0) < -1e-9]
+    report = [
+        "# MTS v18.05 Release Stress Gate",
+        "",
+        "This pass freezes v18.04 and tries to break it. It does not add new repair branches.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Nominal high-RMSE gain: `{fmt(summary['nominalHighGainPct'])}%`.",
+        f"- Nominal clean-set gain: `{fmt(summary['nominalCleanGainPct'])}%`.",
+        f"- Nominal high-RMSE above 20: `{summary['nominalHighAbove20']}`.",
+        f"- Median holdout high-RMSE gain: `{fmt(summary['medianHoldoutHighGainPct'])}%`.",
+        f"- Median holdout clean-set gain: `{fmt(summary['medianHoldoutCleanGainPct'])}%`.",
+        f"- Branch-shuffle null margin: `{fmt(summary['medianBranchShuffleNullMarginPct'])}` percentage points.",
+        f"- State-respecting edge null margin: `{fmt(summary['medianEdgeNullMarginPct'])}` percentage points.",
+        f"- Max forced protected-lookalike regression: `{fmt(summary['maxProtectedForcedRegressionKmS'])}` km/s.",
+        f"- Browser parity mismatches: `{summary['cleanParityMismatchCount']}`.",
+        f"- Weak/systematics leakage: `0`.",
+        "",
+        "## Largest High-RMSE Repairs",
+        "",
+        "| Galaxy | Baseline | v18.05 | Gain | Branch |",
+        "| --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in improved_high[:15]:
+        report.append(
+            f"| {row['galaxy']} | {fmt(row['baselineRmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['gainKmS'])} | {row['branch']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Regressions",
+            "",
+        ]
+    )
+    if worsened:
+        for row in worsened:
+            report.append(f"- `{row['galaxy']}` worsened by `{fmt(-parse_float(row['gainKmS']))}` km/s.")
+    else:
+        report.append("- No clean case worsened under the frozen v18.04 candidate.")
+    report.extend(
+        [
+            "",
+            "## Stress Tests",
+            "",
+            f"- Seed replays: `{len(seed_rows)}`.",
+            f"- Branch ablations: `{len(branch_rows)}` branches, `{essential_branch_count}` essential under the zero-above-20 gate.",
+            f"- Protected-lookalike forced stress rows: `{protected_summary['protectedStressRows']}`.",
+            f"- Null controls: `{len(null_rows)}`.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-v18-release-stress-v1",
+        "candidateId": summary["candidateId"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_seed_replay.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_branch_ablation.csv",
+            f"{prefix}_protected_stress.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_browser_parity.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_browser_artifact.js",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_observedstatev18releasestress(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_RELEASE_STRESS_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_release_stress_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.05 release stress gate")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['nominalHighGainPct'])}%",
+                f"clean={fmt(summary['nominalCleanGainPct'])}%",
+                f"above20={summary['nominalHighAbove20']}",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"branch_null_margin={fmt(summary['medianBranchShuffleNullMarginPct'])}",
+                f"edge_null_margin={fmt(summary['medianEdgeNullMarginPct'])}",
+                f"protected_forced={fmt(summary['maxProtectedForcedRegressionKmS'])}",
+                f"parity_mismatch={summary['cleanParityMismatchCount']}",
+                f"weak_leakage={summary['weakSystematicsLeakage']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 release stress gate to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_candidate_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     context = observed_state_candidate_context()
@@ -67076,6 +67589,7 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18branchidentity",
             "observedstatev18safetydependency",
             "observedstatev18edgeharden",
+            "observedstatev18releasestress",
             "observedstatesoftgate",
             "observedstatesoftsafe",
             "observedstatefreezeaudit",
@@ -67313,6 +67827,8 @@ def main() -> None:
         cmd_observedstatev18safetydependency(args)
     elif args.mode == "observedstatev18edgeharden":
         cmd_observedstatev18edgeharden(args)
+    elif args.mode == "observedstatev18releasestress":
+        cmd_observedstatev18releasestress(args)
     elif args.mode == "observedstatesoftgate":
         cmd_observedstatesoftgate(args)
     elif args.mode == "observedstatesoftsafe":

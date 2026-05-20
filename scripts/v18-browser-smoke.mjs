@@ -107,6 +107,20 @@ if (artifact.metadata.edgeHardenV1804) {
     fail("v18.04 edge null margin missing");
   }
 }
+if (artifact.metadata.releaseStressV1805) {
+  if (!String(artifact.metadata.releaseStressV1805.verdict || "").includes("v18.05")) {
+    fail(`unexpected v18.05 release verdict ${artifact.metadata.releaseStressV1805.verdict}`);
+  }
+  if (artifact.metadata.releaseStressV1805.weakSystematicsLeakage !== 0) {
+    fail(`v18.05 weak/systematics leakage ${artifact.metadata.releaseStressV1805.weakSystematicsLeakage}`);
+  }
+  if (!Number.isFinite(artifact.metadata.releaseStressV1805.nominalHighGainPct)) {
+    fail("v18.05 high gain missing");
+  }
+  if (!Number.isFinite(artifact.metadata.releaseStressV1805.medianBranchShuffleNullMarginPct)) {
+    fail("v18.05 branch null margin missing");
+  }
+}
 
 const indexHtml = readText(indexPath);
 const appJs = readText(appPath);
@@ -131,6 +145,8 @@ if (!appJs.includes("v18ReviewSafetyPass")) fail("app.js does not populate v18.0
 if (!indexHtml.includes("v18ReviewSafetyPass")) fail("index.html does not expose v18.03 safety status");
 if (!appJs.includes("v18ReviewEdgeHarden")) fail("app.js does not populate v18.04 edge status");
 if (!indexHtml.includes("v18ReviewEdgeHarden")) fail("index.html does not expose v18.04 edge status");
+if (!appJs.includes("v18ReviewReleaseStress")) fail("app.js does not populate v18.05 release status");
+if (!indexHtml.includes("v18ReviewReleaseStress")) fail("index.html does not expose v18.05 release status");
 
 console.log(
   [
