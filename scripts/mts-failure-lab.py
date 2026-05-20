@@ -42022,6 +42022,10 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         "(memory > 9.0 && lockedUMax < 0.95 && lockedUOut < 0.33 && outerDiskShare >= 0.68 && pointDensity < 0.80) || "
         f"{lowload_q_tail_lift_gate}))"
     )
+    lowload_family_surface_gate = (
+        "(lockedRouteLow > 0.5 && memory >= 18.0 && lockedUMax <= 0.75 "
+        "&& lockedUOut <= 0.31 && outerDiskShare >= 0.65)"
+    )
     compact_memory_q_protected_lookalike_gate = (
         "(fGasOut >= 0.18 && fGasOut <= 0.30 && midGasShare >= 0.11 && midGasShare <= 0.20 "
         "&& outerGasShare >= 0.18 && outerGasShare <= 0.30 && barCurv < -25 "
@@ -42045,6 +42049,16 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         "(lockedRouteLow > 0.5 && fGasOut >= 0.40 && fGasOut <= 0.70 && hOverRout >= 0.14 "
         "&& outerGasShare >= 0.40 && midGasShare < 0.35 && innerGasShare < 0.12 && pointDensity <= 1.50 && lockedUMax <= 0.90) || "
         "(lockedRouteLow > 0.5 && fGasOut > 0.78 && memory < 1.20 && outerGasShare > 0.75 && pointDensity <= 1.50 && lockedUMax <= 0.90))"
+    )
+    gas_memory_family_surface_gate = (
+        f"({gas_rich_buffered_gate} || {buffered_gas_lgap_transition_gate} || {gas_disk_dense_support_gate} || "
+        f"{gas_extended_saturation_gate} || (({gas_memory_compressed_gate}) && pointDensity >= 1.55) || "
+        "(lockedRouteLow > 0.5 && memory >= 3.5 && memory <= 4.2 && fGasOut >= 0.35 && fGasOut <= 0.45 "
+        "&& barCurv < -20 && outerDiskShare > 0.65 && innerGasShare < 0.08) || "
+        "(lockedRouteLow > 0.5 && memory >= 1.8 && memory <= 2.2 && fGasOut >= 0.52 && fGasOut <= 0.62 "
+        "&& midGasShare >= 0.35 && midGasShare <= 0.42 && outerGasShare >= 0.48 && outerGasShare <= 0.56 "
+        "&& lockedUOut >= 0.36 && lockedUOut <= 0.42 && hOverRout >= 0.19 && hOverRout <= 0.24 "
+        "&& pointDensity >= 1.5 && pointDensity <= 1.8))"
     )
     gas_memory_dwarf_tail_gate = (
         "(lockedRouteLow > 0.5 && fGasOut > 0.78 && memory < 1.20 && outerGasShare > 0.75)"
@@ -42156,6 +42170,42 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         "- (0.02 * min(1, max(0, (outerBulgeShare - 0.5) / 0.2) * max(0, (0.15 - hOverRout) / 0.07))) "
         "- (0.02 * min(1, max(0, (pointDensity - 2) / 1) * max(0, (0.18 - fGasOut) / 0.1) * max(0, (-barCurv - 15) / 20))), 0.1), 1.6)"
     )
+    gas_memory_family_q = (
+        "min(max(0.76 "
+        "+ (0.30 * lockedRouteLow) "
+        "+ (0.20 * min(1, max(0, (fGasOut - 0.42) / 0.30) * max(0, (midGasShare - 0.20) / 0.30))) "
+        "+ (0.08 * min(1, max(0, (lGapOverH - 0.55) / 2.5))) "
+        "- (0.10 * min(1, max(0, (pointDensity - 1.0) / 1.8))), 0.70), 1.28)"
+    )
+    gas_memory_family_floor = (
+        f"min(max(max({buffered_gas_memory_floor}, "
+        "2.20 + (0.75 * min(1, max(0, (fGasOut - 0.44) / 0.24) * max(0, (pointDensity - 1.2) / 1.0) * max(0, (midGasShare - 0.30) / 0.25)))), "
+        "1.70), 3.50)"
+    )
+    lowload_family_q = (
+        "min(max(1.05 "
+        "+ (0.55 * min(1, max(0, (outerBulgeShare - 0.04) / 0.16) * max(0, barCurv) / 35.0)) "
+        "+ (0.30 * min(1, max(0, (lockedUMax - 0.84) / 0.18) * max(0, (0.30 - fGasOut) / 0.30) * max(0, (barCurv + 25) / 35.0))) "
+        "+ (0.22 * min(1, max(0, (fGasOut - 0.42) / 0.25) * max(0, (midGasShare - 0.22) / 0.25) * max(0, (pointDensity - 1.0) / 1.2))) "
+        "+ (0.10 * min(1, max(0, (hOverRout - 0.24) / 0.12) * max(0, (0.10 - fGasOut) / 0.10) * max(0, (lockedUOut - 0.36) / 0.10))) "
+        "- (0.48 * min(1, max(0, (-barCurv - 12.0) / 45.0))), 0.58), 1.70)"
+    )
+    lowload_family_gas_edge_floor = (
+        "1.78 + (0.42 * min(1, max(0, (fGasOut - 0.40) / 0.30) "
+        "* max(0, (midGasShare - 0.22) / 0.20) * max(0, (0.85 - lockedUMax) / 0.30)))"
+    )
+    lowload_family_gas_shear_floor = (
+        "2.15 + (0.75 * min(1, max(0, (fGasOut - 0.44) / 0.24) "
+        "* max(0, (pointDensity - 1.2) / 1.0) * max(0, (lockedUOut - 0.34) / 0.10)))"
+    )
+    lowload_family_compact_floor = (
+        "1.95 + (0.28 * min(1, max(0, (hOverRout - 0.26) / 0.12) "
+        "* max(0, (0.10 - fGasOut) / 0.10) * max(0, (lockedUOut - 0.38) / 0.10)))"
+    )
+    lowload_family_floor = (
+        f"min(max(max(max(max({lowload_transition_floor}, {lowload_family_gas_edge_floor}), "
+        f"{lowload_family_gas_shear_floor}), {lowload_family_compact_floor}), 1.70), 3.05)"
+    )
     q_cases = [
         (positive_bulge_radial_gate, "1.50"),
         (dense_positive_radial_gate, "1.50"),
@@ -42166,6 +42216,8 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         (negative_tail_polish_gate, "0.40"),
         (compact_memory_q_gate, "0.10"),
         (compact_bulge_shear_edge_gate, compact_bulge_edge_q),
+        (gas_memory_family_surface_gate, gas_memory_family_q),
+        (lowload_family_surface_gate, lowload_family_q),
         (lowload_q_tail_lift_gate, "0.85"),
         (lowload_q_compressed_transfer_gate, "0.85"),
         (gas_memory_dwarf_tail_gate, "0.85"),
@@ -42239,7 +42291,7 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         f"|| {sparse_gas_transition_gate} || {outer_rising_transition_gate} || {outer_negative_transition_gate} "
         f"|| {gas_envelope_support_gate} || {gas_disk_edge_v2_gate} || {compact_bulge_shear_edge_gate} "
         f"|| {lowload_compact_lowgas_disk_support_gate} || {gas_extended_saturation_gate} "
-        f"|| {lowload_high_memory_fallback_gate} || {lowload_gas_disk_fallback_gate}) && !({over_gate} || {gas_envelope_suppression_gate})) ? 1 : {uncapped})"
+        f"|| {lowload_high_memory_fallback_gate} || {lowload_gas_disk_fallback_gate} || {lowload_family_surface_gate}) && !({over_gate} || {gas_envelope_suppression_gate})) ? 1 : {uncapped})"
     )
     disk_edge_branch_cap = f"(({buffered_disk_edge_support_gate}) ? 1.5 : {uncapped})"
     gas_bulge_route_safe_ridge_cap = uncapped
@@ -42257,6 +42309,8 @@ def observed_state_app_expression(fit: dict, amp_cap: float) -> str:
         (negative_tail_polish_gate, "2.5"),
         (compact_memory_q_gate, compact_memory_q_floor),
         (compact_bulge_shear_edge_gate, compact_bulge_edge_floor),
+        (gas_memory_family_surface_gate, gas_memory_family_floor),
+        (lowload_family_surface_gate, lowload_family_floor),
         (lowload_q_tail_lift_gate, "3.0"),
         (lowload_q_compressed_transfer_gate, "2.10"),
         (gas_memory_dwarf_tail_gate, "1.6"),
