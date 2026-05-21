@@ -177,6 +177,7 @@ DEFAULT_OBSERVED_STATE_V18_RELEASE_VERIFY_OUT = OUTPUT_PACK_ROOT / "mts-observed
 DEFAULT_OBSERVED_STATE_V18_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-redteam-v1"
 DEFAULT_OBSERVED_STATE_V18_RELEASE_MATERIALS_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-materials-v1"
 DEFAULT_OBSERVED_STATE_V18_RELEASE_COMPRESSION_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-compression-v1"
+DEFAULT_OBSERVED_STATE_V18_FAMILY_NATIVE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-family-native-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -60951,6 +60952,430 @@ def cmd_v18releasecompression(args: argparse.Namespace) -> None:
     print(f"Wrote v18.11 release compression to {out_dir.resolve()}")
 
 
+V18_12_FAMILY_NATIVE_FAMILIES = [
+    "compact low-load boundary response",
+    "low-load route-edge transition response",
+    "gas-memory / gas-rich response",
+    "buffered bulge-shear response",
+    "buffered shelf/curvature response",
+]
+
+
+def observed_state_v1812_family_reference_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+) -> list[dict]:
+    rows = []
+    for curve in clean_curves:
+        baseline = score_curve(curve)
+        reference = observed_state_v1807_family_surface_score_curve(curve, fit, amp_cap)
+        drives = observed_state_v1807_family_surface_drives(curve)
+        family = reference.get("observedStateResponseFamily", "")
+        row = {
+            "galaxy": curve["name"],
+            "set": "clean-high-rmse" if curve["name"] in high_names else "clean-protected",
+            "lockedRoute": curve.get("lockedModelRoute", ""),
+            "baselineRmse": baseline["rmse"],
+            "referenceRmse": reference["rmse"],
+            "referenceRoute": reference.get("candidateRoute", ""),
+            "referenceGainKmS": baseline["rmse"] - reference["rmse"],
+            "responseFamily": family,
+            "diagnosticBranchOnly": reference.get("observedStateBranchDiagnosticOnly", ""),
+            "referenceAmp": reference.get("observedStateAmp", 1.0),
+            "referenceQ": reference.get("observedStateQ", Q_DEFAULT),
+        }
+        for family_name, drive in drives.items():
+            row[f"drive_{safe_file_stem(family_name)}"] = drive
+        rows.append(row)
+    return rows
+
+
+def observed_state_v1812_family_configs(reference_rows: list[dict]) -> dict[str, dict]:
+    configs: dict[str, dict] = {}
+    for family in V18_12_FAMILY_NATIVE_FAMILIES:
+        high_rows = [
+            row
+            for row in reference_rows
+            if row["set"] == "clean-high-rmse" and row["responseFamily"] == family
+        ]
+        protected_rows = [row for row in reference_rows if row["set"] == "clean-protected"]
+        drive_key = f"drive_{safe_file_stem(family)}"
+        high_drives = [parse_float(row.get(drive_key), 0.0) for row in high_rows]
+        protected_drives = [parse_float(row.get(drive_key), 0.0) for row in protected_rows]
+        amp_values = [parse_float(row.get("referenceAmp"), 1.0) for row in high_rows]
+        q_values = [parse_float(row.get("referenceQ"), Q_DEFAULT) for row in high_rows]
+        min_high = min(high_drives) if high_drives else math.nan
+        max_high = max(high_drives) if high_drives else math.nan
+        max_protected = max(protected_drives) if protected_drives else 0.0
+        configs[family] = {
+            "family": family,
+            "driveKey": drive_key,
+            "amp": safe_median(amp_values) if amp_values else 1.0,
+            "q": safe_median(q_values) if q_values else Q_DEFAULT,
+            "highReferenceCount": len(high_rows),
+            "minHighDrive": min_high,
+            "medianHighDrive": safe_median(high_drives) if high_drives else math.nan,
+            "maxHighDrive": max_high,
+            "maxProtectedDrive": max_protected,
+            "safeThreshold": min(1.000001, max_protected + 1e-6),
+            "recallThreshold": max(0.0, min_high if math.isfinite(min_high) else 1.000001),
+            "driveSeparable": bool(high_drives) and min_high > max_protected,
+        }
+    return configs
+
+
+def observed_state_v1812_score_with_thresholds(curve: dict, configs: dict[str, dict], thresholds: dict[str, float]) -> dict:
+    drives = observed_state_v1807_family_surface_drives(curve)
+    active = []
+    for family, config in configs.items():
+        threshold = thresholds.get(family, 1.000001)
+        drive = drives.get(family, 0.0)
+        if drive >= threshold and threshold <= 1.0:
+            denom = max(1e-9, 1.0 - threshold)
+            active.append(((drive - threshold) / denom, drive, family, config))
+    if not active:
+        score = score_curve(curve)
+        score["observedStateV1812Family"] = "canonical fallback"
+        score["observedStateV1812Drive"] = 0.0
+        score["observedStateV1812Threshold"] = ""
+        score["observedStateV1812Amp"] = 1.0
+        score["observedStateV1812Q"] = Q_DEFAULT
+        return score
+    _margin, drive, family, config = max(active, key=lambda item: (item[0], item[1]))
+    score = score_curve_with_params(curve, parse_float(config["amp"], 1.0), parse_float(config["q"], Q_DEFAULT))
+    score["observedStateV1812Family"] = family
+    score["observedStateV1812Drive"] = drive
+    score["observedStateV1812Threshold"] = thresholds.get(family, "")
+    score["observedStateV1812Amp"] = config["amp"]
+    score["observedStateV1812Q"] = config["q"]
+    return score
+
+
+def observed_state_v1812_threshold_candidates(config: dict) -> list[float]:
+    values = {
+        0.0,
+        0.05,
+        0.10,
+        0.15,
+        0.20,
+        0.25,
+        0.30,
+        0.35,
+        0.40,
+        0.45,
+        0.50,
+        0.60,
+        0.70,
+        0.80,
+        0.90,
+        parse_float(config.get("recallThreshold"), 1.0),
+        parse_float(config.get("safeThreshold"), 1.000001),
+    }
+    return sorted(value for value in values if math.isfinite(value) and value >= 0.0)
+
+
+def observed_state_v1812_oracle_thresholds(
+    clean_curves: list[dict],
+    high_names: set[str],
+    configs: dict[str, dict],
+) -> dict[str, float]:
+    thresholds = {family: 1.000001 for family in configs}
+    baseline_scores = {curve["name"]: score_curve(curve) for curve in clean_curves}
+    for family, config in configs.items():
+        best_threshold = 1.000001
+        best_score = -1e99
+        for threshold in observed_state_v1812_threshold_candidates(config):
+            local_thresholds = {name: 1.000001 for name in configs}
+            local_thresholds[family] = threshold
+            paired = []
+            for curve in clean_curves:
+                candidate = observed_state_v1812_score_with_thresholds(curve, configs, local_thresholds)
+                paired.append((curve, baseline_scores[curve["name"]], candidate))
+            metric = observed_state_v1803_track_summary(paired, high_names)
+            utility = (
+                metric["highGainPct"]
+                - 3.0 * metric["highAbove20"]
+                - 5.0 * metric["protectedWorseCount"]
+                - 2.0 * max(0.0, metric["maxProtectedRegressionKmS"])
+            )
+            if utility > best_score:
+                best_score = utility
+                best_threshold = threshold
+        thresholds[family] = best_threshold
+    return thresholds
+
+
+def write_observed_state_v18_family_native_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_12_family_native"
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    redteam_dir = DEFAULT_OBSERVED_STATE_V18_REDTEAM_OUT
+    compression_dir = DEFAULT_OBSERVED_STATE_V18_RELEASE_COMPRESSION_OUT
+    if not (redteam_dir / "mts_v18_redteam_scores.csv").exists():
+        write_observed_state_v18_redteam_artifacts(redteam_dir)
+    if not (compression_dir / "mts_v18_11_compression_scores.csv").exists():
+        write_observed_state_v18_release_compression_artifacts(compression_dir)
+
+    redteam_summary = read_csv_rows(redteam_dir / "mts_v18_redteam_scores.csv")[0]
+    reference_rows = observed_state_v1812_family_reference_rows(clean_curves, high_names, fit, amp_cap)
+    configs = observed_state_v1812_family_configs(reference_rows)
+    baseline_scores = {curve["name"]: score_curve(curve) for curve in clean_curves}
+    reference_scores = {
+        curve["name"]: observed_state_v1807_family_surface_score_curve(curve, fit, amp_cap)
+        for curve in clean_curves
+    }
+    tracks = {
+        "safe-drive-threshold": {
+            "promotable": True,
+            "thresholds": {family: config["safeThreshold"] for family, config in configs.items()},
+            "notes": "activates only above the maximum protected drive seen for each family",
+        },
+        "recall-drive-threshold": {
+            "promotable": False,
+            "thresholds": {family: config["recallThreshold"] for family, config in configs.items()},
+            "notes": "recovers high-family drive support aggressively; expected to expose protected overlap",
+        },
+        "drive-threshold-oracle": {
+            "promotable": False,
+            "thresholds": observed_state_v1812_oracle_thresholds(clean_curves, high_names, configs),
+            "notes": "diagnostic upper-bound threshold selection using clean labels; not a transport law",
+        },
+    }
+
+    score_rows: list[dict] = []
+    case_rows: list[dict] = []
+    mismatch_rows: list[dict] = []
+    protected_rows: list[dict] = []
+    threshold_rows: list[dict] = []
+
+    for family, config in configs.items():
+        threshold_rows.append(
+            {
+                "responseFamily": family,
+                "ampMedianFromReference": config["amp"],
+                "qMedianFromReference": config["q"],
+                "highReferenceCount": config["highReferenceCount"],
+                "minHighDrive": config["minHighDrive"],
+                "medianHighDrive": config["medianHighDrive"],
+                "maxHighDrive": config["maxHighDrive"],
+                "maxProtectedDrive": config["maxProtectedDrive"],
+                "driveSeparable": config["driveSeparable"],
+                "safeThreshold": config["safeThreshold"],
+                "recallThreshold": config["recallThreshold"],
+                "oracleThreshold": tracks["drive-threshold-oracle"]["thresholds"][family],
+            }
+        )
+
+    for track, spec in tracks.items():
+        paired = []
+        track_case_rows = []
+        for curve in clean_curves:
+            candidate = observed_state_v1812_score_with_thresholds(curve, configs, spec["thresholds"])
+            baseline = baseline_scores[curve["name"]]
+            reference = reference_scores[curve["name"]]
+            paired.append((curve, baseline, candidate))
+            rmse_delta = candidate["rmse"] - reference["rmse"]
+            route_delta = candidate.get("candidateRoute", "") != reference.get("candidateRoute", "")
+            row = {
+                "track": track,
+                "galaxy": curve["name"],
+                "set": "clean-high-rmse" if curve["name"] in high_names else "clean-protected",
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "referenceFamily": reference.get("observedStateResponseFamily", ""),
+                "candidateFamily": candidate.get("observedStateV1812Family", ""),
+                "familyDrive": candidate.get("observedStateV1812Drive", 0.0),
+                "familyThreshold": candidate.get("observedStateV1812Threshold", ""),
+                "candidateAmp": candidate.get("observedStateV1812Amp", ""),
+                "candidateQ": candidate.get("observedStateV1812Q", ""),
+                "baselineRmse": baseline["rmse"],
+                "v18_10ReferenceRmse": reference["rmse"],
+                "familyNativeRmse": candidate["rmse"],
+                "rmseDeltaVsV18_10": rmse_delta,
+                "referenceRoute": reference.get("candidateRoute", ""),
+                "candidateRoute": candidate.get("candidateRoute", ""),
+                "routeMismatchVsV18_10": route_delta,
+                "gainKmS": baseline["rmse"] - candidate["rmse"],
+                "protectedRegressionKmS": max(0.0, candidate["rmse"] - baseline["rmse"]) if curve["name"] not in high_names else 0.0,
+                "stillAbove20": candidate["rmse"] >= 20.0 if curve["name"] in high_names else "",
+            }
+            track_case_rows.append(row)
+            if abs(rmse_delta) > 0.05 or route_delta:
+                mismatch_rows.append(row)
+            if row["set"] == "clean-protected" and parse_float(row["protectedRegressionKmS"], 0.0) > 1e-9:
+                protected_rows.append(row)
+        metric = observed_state_v1803_track_summary(paired, high_names)
+        reference_high_gain = parse_float(redteam_summary.get("cleanHighGainPct"))
+        reference_clean_gain = parse_float(redteam_summary.get("cleanGainPct"))
+        high_retention = 100.0 * metric["highGainPct"] / max(reference_high_gain, 1e-9)
+        clean_retention = 100.0 * metric["cleanGainPct"] / max(reference_clean_gain, 1e-9)
+        track_mismatches = [
+            row
+            for row in track_case_rows
+            if abs(parse_float(row["rmseDeltaVsV18_10"], 0.0)) > 0.05 or parse_bool(row["routeMismatchVsV18_10"])
+        ]
+        track_protected = [
+            row
+            for row in track_case_rows
+            if row["set"] == "clean-protected" and parse_float(row["protectedRegressionKmS"], 0.0) > 1e-9
+        ]
+        track_passes = (
+            spec["promotable"]
+            and metric["highGainPct"] >= 60.0
+            and high_retention >= 90.0
+            and metric["cleanGainPct"] >= 38.0
+            and metric["highAbove20"] <= 2
+            and len(track_protected) == 0
+            and len(track_mismatches) == 0
+        )
+        score_rows.append(
+            {
+                "track": track,
+                "promotableTrack": spec["promotable"],
+                "verdict": "compressed native parity passed" if track_passes else "compressed native parity blocked",
+                "highGainPct": metric["highGainPct"],
+                "cleanGainPct": metric["cleanGainPct"],
+                "highGainRetentionPct": high_retention,
+                "cleanGainRetentionPct": clean_retention,
+                "highAbove20": metric["highAbove20"],
+                "protectedWorseCount": metric["protectedWorseCount"],
+                "maxProtectedRegressionKmS": metric["maxProtectedRegressionKmS"],
+                "mismatchVsV18_10Count": len(track_mismatches),
+                "routeMismatchVsV18_10Count": sum(1 for row in track_mismatches if parse_bool(row["routeMismatchVsV18_10"])),
+                "activeFamilyHitCount": sum(1 for row in track_case_rows if row["candidateFamily"] != "canonical fallback"),
+                "activeHighHitCount": sum(1 for row in track_case_rows if row["set"] == "clean-high-rmse" and row["candidateFamily"] != "canonical fallback"),
+                "activeProtectedHitCount": sum(1 for row in track_case_rows if row["set"] == "clean-protected" and row["candidateFamily"] != "canonical fallback"),
+                "notes": spec["notes"],
+            }
+        )
+        case_rows.extend(track_case_rows)
+
+    promotable_scores = [row for row in score_rows if parse_bool(row["promotableTrack"])]
+    best_promotable = max(promotable_scores, key=lambda row: parse_float(row["highGainPct"], -1e9)) if promotable_scores else {}
+    oracle_score = next((row for row in score_rows if row["track"] == "drive-threshold-oracle"), {})
+    passes = best_promotable.get("verdict") == "compressed native parity passed"
+    verdict = "v18.12 compressed native parity passed" if passes else "v18.12 family-native compression blocked"
+    summary = {
+        "candidateId": "observed-state-response-v18.12-family-native-parity",
+        "referenceCandidate": "observed-state-response-v18.10-redteam",
+        "verdict": verdict,
+        "bestPromotableTrack": best_promotable.get("track", ""),
+        "bestPromotableHighGainPct": parse_float(best_promotable.get("highGainPct"), math.nan),
+        "bestPromotableHighRetentionPct": parse_float(best_promotable.get("highGainRetentionPct"), math.nan),
+        "bestPromotableCleanGainPct": parse_float(best_promotable.get("cleanGainPct"), math.nan),
+        "bestPromotableAbove20": int(parse_float(best_promotable.get("highAbove20"), 0.0)) if best_promotable else "",
+        "bestPromotableProtectedWorseCount": int(parse_float(best_promotable.get("protectedWorseCount"), 0.0)) if best_promotable else "",
+        "bestPromotableMismatchVsV18_10Count": int(parse_float(best_promotable.get("mismatchVsV18_10Count"), 0.0)) if best_promotable else "",
+        "oracleHighGainPct": parse_float(oracle_score.get("highGainPct"), math.nan),
+        "oracleProtectedWorseCount": int(parse_float(oracle_score.get("protectedWorseCount"), 0.0)) if oracle_score else "",
+        "oracleMismatchVsV18_10Count": int(parse_float(oracle_score.get("mismatchVsV18_10Count"), 0.0)) if oracle_score else "",
+        "referenceHighGainPct": parse_float(redteam_summary.get("cleanHighGainPct")),
+        "referenceCleanGainPct": parse_float(redteam_summary.get("cleanGainPct")),
+        "weakSystematicsLeakage": 0,
+        "browserUpdated": False,
+    }
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_family_thresholds.csv", threshold_rows)
+    write_csv(out_dir / f"{prefix}_mismatch_ledger.csv", mismatch_rows)
+    write_csv(out_dir / f"{prefix}_protected_regressions.csv", protected_rows)
+    formula = {
+        "candidateId": summary["candidateId"],
+        "status": "blocked" if not passes else "parity passed",
+        "mechanism": "six-family drive thresholds with per-family median amp/q derived from v18.10 reference families",
+        "tracks": tracks,
+        "familyConfigs": configs,
+        "supportForm": "S_family_native = Gamma0 * L_eff * A_family * (1 - exp(-(r / L_eff)^q_family))",
+        "browserCanUseThisExpression": passes,
+        "browserUpdated": False,
+        "forbiddenInputsUsed": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.12 Family-Native Parity",
+        "",
+        "This mode tries to replace the long v18.10 native expression with a shorter six-family drive expression. It does not alter canonical constants and does not update the browser unless parity passes.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Best promotable track: `{summary['bestPromotableTrack']}`.",
+        f"- Best promotable high-RMSE gain: `{fmt(summary['bestPromotableHighGainPct'])}%`.",
+        f"- Best promotable high-gain retention: `{fmt(summary['bestPromotableHighRetentionPct'])}%`.",
+        f"- Best promotable high-RMSE above 20: `{summary['bestPromotableAbove20']}`.",
+        f"- Best promotable protected worse count: `{summary['bestPromotableProtectedWorseCount']}`.",
+        f"- Best promotable mismatches vs v18.10: `{summary['bestPromotableMismatchVsV18_10Count']}`.",
+        f"- Diagnostic oracle high-RMSE gain: `{fmt(summary['oracleHighGainPct'])}%`.",
+        f"- Diagnostic oracle protected worse count: `{summary['oracleProtectedWorseCount']}`.",
+        "",
+        "## Track Scores",
+        "",
+        "| Track | Promotable | High gain | Retention | Above 20 | Protected worse | Mismatches |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['track']} | {row['promotableTrack']} | {fmt(row['highGainPct'])} | {fmt(row['highGainRetentionPct'])} | {row['highAbove20']} | {row['protectedWorseCount']} | {row['mismatchVsV18_10Count']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "The six-family explanation is strong, but drive-only family activation must also protect lookalike galaxies. If the safe-drive track is blocked while recall/oracle tracks hit protected systems, the current shorter family drives are not yet enough to replace the v18.10 native expression. In that case v18.10 remains the browser source of truth and v18.11 remains the paper explanation layer.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-observed-v18-family-native-v1",
+        "candidateId": summary["candidateId"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_family_thresholds.csv",
+            f"{prefix}_mismatch_ledger.csv",
+            f"{prefix}_protected_regressions.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18familynative(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_FAMILY_NATIVE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_family_native_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.12 family-native parity")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={summary['bestPromotableTrack']}",
+                f"high={fmt(summary['bestPromotableHighGainPct'])}%",
+                f"retained={fmt(summary['bestPromotableHighRetentionPct'])}%",
+                f"above20={summary['bestPromotableAbove20']}",
+                f"protected={summary['bestPromotableProtectedWorseCount']}",
+                f"mismatch={summary['bestPromotableMismatchVsV18_10Count']}",
+                f"oracle_high={fmt(summary['oracleHighGainPct'])}%",
+                f"browser_updated={summary['browserUpdated']}",
+            ]
+        )
+    )
+    print(f"Wrote v18.12 family-native audit to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_paper_section_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     evidence_dir = DEFAULT_OBSERVED_STATE_V18_EVIDENCE_EXPORT_OUT
@@ -72498,6 +72923,8 @@ def build_parser() -> argparse.ArgumentParser:
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
+            "v18familynative",
+            "observedstatev18familynative",
             "observedstatev18papersection",
             "observedstatev18docxbundle",
             "observedstatev18integrateddocx",
@@ -72765,6 +73192,8 @@ def main() -> None:
         cmd_v18releasematerials(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
+    elif args.mode in {"v18familynative", "observedstatev18familynative"}:
+        cmd_v18familynative(args)
     elif args.mode == "observedstatev18papersection":
         cmd_observedstatev18papersection(args)
     elif args.mode == "observedstatev18docxbundle":
