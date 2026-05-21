@@ -186,6 +186,7 @@ DEFAULT_OBSERVED_STATE_V18_COMPETITOR_FIGURES_OUT = OUTPUT_PACK_ROOT / "mts-v18-
 DEFAULT_OBSERVED_STATE_V18_NFW_GAP_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-gap-audit-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_GAP_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-gap-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_STRUCTURE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-structure-candidate-v1"
+DEFAULT_OBSERVED_STATE_V18_MASS_SCALE_OUT = OUTPUT_PACK_ROOT / "mts-v18-official-mass-scale-candidate-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -64040,6 +64041,518 @@ def cmd_v18legacystructurecandidate(args: argparse.Namespace) -> None:
     print(f"Wrote v18 legacy-structure candidate to {out_dir.resolve()}")
 
 
+def v18_mass_scale_table1_path() -> Path:
+    candidates = [
+        DEFAULT_OFFICIAL_SOURCE_CACHE / "SPARC_Lelli2016c.mrt",
+        Path(r"D:\Users\ollet\Desktop\g project\source-cache\external-baryon-build-v2\sparc\SPARC_Lelli2016c.mrt"),
+        Path(r"D:\Users\ollet\Desktop\g project\source-cache\external-validation-v1\sparc\SPARC_Lelli2016c.mrt"),
+        Path(r"D:\Users\ollet\Desktop\g project\source-cache\external-native-components-v11\sparc\SPARC_Lelli2016c.mrt"),
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
+def v18_mass_scale_table1() -> tuple[dict[str, dict], dict, Path]:
+    path = v18_mass_scale_table1_path()
+    rows, header = parse_official_table1(path)
+    return rows, header, path
+
+
+def v18_official_mass_scale_features(curve: dict, table1_by_name: dict[str, dict]) -> dict:
+    table = table1_by_name.get(curve["name"], {})
+    if not table:
+        return {
+            "officialTable1Coverage": False,
+            "mStar_1e9Msun": math.nan,
+            "mGas_1e9Msun": math.nan,
+            "mBar_1e9Msun": math.nan,
+            "logMBar_1e9Msun": math.nan,
+            "tableGasFraction": math.nan,
+            "rDiskKpc": math.nan,
+            "rHiKpc": math.nan,
+            "rHiOverRdisk": math.nan,
+            "sigmaBar_1e9MsunPerKpc2": math.nan,
+            "logSigmaBar": math.nan,
+            "qualityCode": "",
+        }
+    m_star = 0.5 * table["luminosity36_1e9Lsun"]
+    m_gas = 1.4 * table["hiMass_1e9Msun"]
+    m_bar = m_star + m_gas
+    r_disk = table["diskScaleLengthKpc"]
+    r_hi = table["hiRadiusKpc"]
+    sigma_bar = m_bar / (2.0 * math.pi * r_disk * r_disk) if r_disk > 0.0 else math.nan
+    return {
+        "officialTable1Coverage": True,
+        "mStar_1e9Msun": m_star,
+        "mGas_1e9Msun": m_gas,
+        "mBar_1e9Msun": m_bar,
+        "logMBar_1e9Msun": math.log10(m_bar) if m_bar > 0.0 else math.nan,
+        "tableGasFraction": m_gas / m_bar if m_bar > 0.0 else math.nan,
+        "rDiskKpc": r_disk,
+        "rHiKpc": r_hi,
+        "rHiOverRdisk": r_hi / r_disk if r_disk > 0.0 else math.nan,
+        "sigmaBar_1e9MsunPerKpc2": sigma_bar,
+        "logSigmaBar": math.log10(sigma_bar) if sigma_bar > 0.0 else math.nan,
+        "qualityCode": table.get("qualityCode", ""),
+    }
+
+
+def v18_official_mass_scale_completion_family(curve: dict, mass_features: dict) -> str:
+    if curve["lockedModelRoute"] != "low-load" or not mass_features.get("officialTable1Coverage"):
+        return ""
+    m_bar = mass_features["mBar_1e9Msun"]
+    gas_fraction = mass_features["tableGasFraction"]
+    sigma_bar = mass_features["sigmaBar_1e9MsunPerKpc2"]
+    rhi_over_rd = mass_features["rHiOverRdisk"]
+    stellar_threshold = (
+        6.0 <= m_bar <= 12.0
+        and gas_fraction <= 0.25
+        and 0.20 <= sigma_bar <= 0.45
+        and 2.40 <= curve["memoryLoad"] <= 4.00
+        and curve["lockedModelUOut"] >= 0.40
+        and curve["lockedModelUMax"] < 0.90
+    )
+    gas_rich_threshold = (
+        7.0 <= m_bar <= 9.0
+        and gas_fraction >= 0.75
+        and sigma_bar <= 0.18
+        and rhi_over_rd >= 6.0
+        and 1.20 <= curve["memoryLoad"] <= 2.00
+        and curve["lockedModelUOut"] <= 0.32
+        and curve["lockedModelUMax"] < 0.86
+    )
+    if stellar_threshold:
+        return "official stellar-threshold completion"
+    if gas_rich_threshold:
+        return "official gas-rich threshold completion"
+    return ""
+
+
+def v18_mass_scale_activations(curve: dict, table1_by_name: dict[str, dict]) -> tuple[dict, dict, dict, str, str]:
+    legacy_acts, legacy_features, legacy_family = v18_legacy_structure_activations(curve)
+    mass_features = v18_official_mass_scale_features(curve, table1_by_name)
+    official_family = "" if legacy_family else v18_official_mass_scale_completion_family(curve, mass_features)
+    acts = dict(legacy_acts)
+    if official_family:
+        acts["completion"] = max(acts.get("completion", 0.0), 1.0)
+    acts["anyActivation"] = max(
+        acts.get("completion", 0.0),
+        acts.get("lowSuppression", 0.0),
+        acts.get("bufferedSuppression", 0.0),
+        acts.get("radialOuterTransfer", 0.0),
+        acts.get("radialInnerTransfer", 0.0),
+    )
+    return acts, legacy_features, mass_features, legacy_family, official_family
+
+
+def v18_mass_scale_supports(
+    curve: dict,
+    v18_supports: list[float],
+    strengths: dict[str, float],
+    table1_by_name: dict[str, dict],
+    forced: dict | None = None,
+) -> tuple[list[float], dict, dict, dict, str, str]:
+    if forced is None:
+        acts, legacy_features, mass_features, legacy_family, official_family = v18_mass_scale_activations(curve, table1_by_name)
+    else:
+        acts = forced.get("activations", {})
+        legacy_features = v18_legacy_structure_features(curve)
+        mass_features = v18_official_mass_scale_features(curve, table1_by_name)
+        legacy_family = forced.get("legacyFamily", "")
+        official_family = forced.get("officialFamily", "")
+    if not acts:
+        acts = {
+            "completion": 0.0,
+            "lowSuppression": 0.0,
+            "bufferedSuppression": 0.0,
+            "radialOuterTransfer": 0.0,
+            "radialInnerTransfer": 0.0,
+            "anyActivation": 0.0,
+        }
+    completion_strength = 0.0
+    if legacy_family:
+        completion_strength = strengths["legacyCompletion"]
+    elif official_family:
+        completion_strength = strengths["officialCompletion"]
+    out: list[float] = []
+    for point, support in zip(curve["points"], v18_supports):
+        x_val = point.get("x", point["r"] / max(curve["rOut"], 1e-9))
+        radial_completion = 0.35 + 0.65 * v18_nfw_gap_candidate_smooth(x_val, 0.28, 0.82)
+        radial_suppression = 0.45 + 0.55 * v18_nfw_gap_candidate_smooth(x_val, 0.20, 0.90)
+        factor = 1.0
+        factor += completion_strength * acts.get("completion", 0.0) * radial_completion
+        factor -= strengths["lowSuppression"] * acts.get("lowSuppression", 0.0) * radial_suppression
+        factor -= strengths["bufferedSuppression"] * acts.get("bufferedSuppression", 0.0) * radial_suppression
+        out.append(max(0.0, support * clamp(factor, 0.35, 2.25)))
+    acts = {
+        "completion": acts.get("completion", 0.0),
+        "lowSuppression": acts.get("lowSuppression", 0.0),
+        "bufferedSuppression": acts.get("bufferedSuppression", 0.0),
+        "radialOuterTransfer": 0.0,
+        "radialInnerTransfer": 0.0,
+        "anyActivation": max(
+            acts.get("completion", 0.0),
+            acts.get("lowSuppression", 0.0),
+            acts.get("bufferedSuppression", 0.0),
+        ),
+    }
+    return out, acts, legacy_features, mass_features, legacy_family, official_family
+
+
+def v18_mass_scale_score_rows(
+    curves: list[dict],
+    strengths: dict[str, float],
+    table1_by_name: dict[str, dict],
+    v18_lookup: dict[tuple[str, int], float],
+    weak_names: set[str],
+    high_names: set[str],
+    priority_names: set[str],
+    split_names: tuple[set[str], set[str]] | None = None,
+    forced_by_name: dict[str, dict] | None = None,
+) -> list[dict]:
+    train_names, holdout_names = split_names if split_names is not None else (set(), set())
+    rows: list[dict] = []
+    for curve in curves:
+        name = curve["name"]
+        v18_supports = [v18_lookup[(name, index)] for index in range(len(curve["points"]))]
+        if name in weak_names:
+            acts = {
+                "completion": 0.0,
+                "lowSuppression": 0.0,
+                "bufferedSuppression": 0.0,
+                "radialOuterTransfer": 0.0,
+                "radialInnerTransfer": 0.0,
+                "anyActivation": 0.0,
+            }
+            legacy_features = v18_legacy_structure_features(curve)
+            mass_features = v18_official_mass_scale_features(curve, table1_by_name)
+            legacy_family = ""
+            official_family = ""
+            candidate_supports = v18_supports[:]
+        else:
+            candidate_supports, acts, legacy_features, mass_features, legacy_family, official_family = v18_mass_scale_supports(
+                curve,
+                v18_supports,
+                strengths,
+                table1_by_name,
+                forced_by_name.get(name) if forced_by_name else None,
+            )
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        v18_score = v18_competitor_support_score(curve, v18_supports)
+        candidate = v18_competitor_support_score(curve, candidate_supports)
+        set_label = v18_nfw_gap_candidate_set_label(name, weak_names, high_names)
+        split = "weak-excluded" if name in weak_names else ("holdout" if name in holdout_names else "train" if name in train_names else "")
+        branch_hits = [key for key, value in acts.items() if key != "anyActivation" and value >= 0.20]
+        rows.append(
+            {
+                "galaxy": name,
+                "set": set_label,
+                "split": split,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "priorityNfwGapCase": name in priority_names,
+                "canonicalRmse": canonical["rmse"],
+                "v18Rmse": v18_score["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "candidateGainVsV18KmS": v18_score["rmse"] - candidate["rmse"],
+                "candidateGainVsV18Pct": pct_improvement(v18_score["rmse"], candidate["rmse"]),
+                "candidateRegressionVsV18KmS": max(0.0, candidate["rmse"] - v18_score["rmse"]),
+                "completionActivation": acts["completion"],
+                "lowSuppressionActivation": acts["lowSuppression"],
+                "bufferedSuppressionActivation": acts["bufferedSuppression"],
+                "anyActivation": acts["anyActivation"],
+                "legacyCompletionFamily": legacy_family,
+                "officialMassScaleFamily": official_family,
+                "branchHits": "; ".join(branch_hits),
+                "mBarGlobal": legacy_features["mBarGlobal"],
+                "mBarOuter": legacy_features["mBarOuter"],
+                "gasDiskCrossoverX": legacy_features["gasDiskCrossoverX"],
+                "outerGasMean": legacy_features["outerGasMean"],
+                "mBar_1e9Msun": mass_features["mBar_1e9Msun"],
+                "mStar_1e9Msun": mass_features["mStar_1e9Msun"],
+                "mGas_1e9Msun": mass_features["mGas_1e9Msun"],
+                "tableGasFraction": mass_features["tableGasFraction"],
+                "rDiskKpc": mass_features["rDiskKpc"],
+                "rHiKpc": mass_features["rHiKpc"],
+                "rHiOverRdisk": mass_features["rHiOverRdisk"],
+                "sigmaBar_1e9MsunPerKpc2": mass_features["sigmaBar_1e9MsunPerKpc2"],
+                "officialQualityCode": mass_features["qualityCode"],
+                "memoryLoad": curve["memoryLoad"],
+                "uOut": curve["lockedModelUOut"],
+                "uMax": curve["lockedModelUMax"],
+                "above20Candidate": candidate["rmse"] >= 20.0,
+                "above20V18": v18_score["rmse"] >= 20.0,
+                "protectedRegressionKmS": max(0.0, candidate["rmse"] - v18_score["rmse"]) if set_label == "clean-protected" else "",
+            }
+        )
+    return rows
+
+
+def v18_mass_scale_null_rows(
+    clean_curves: list[dict],
+    rows: list[dict],
+    strengths: dict[str, float],
+    table1_by_name: dict[str, dict],
+    v18_lookup: dict[tuple[str, int], float],
+    weak_names: set[str],
+    high_names: set[str],
+    priority_names: set[str],
+) -> list[dict]:
+    output: list[dict] = []
+    low_load_names = [curve["name"] for curve in clean_curves if curve["lockedModelRoute"] == "low-load"]
+    official_count = sum(1 for row in rows if row["officialMassScaleFamily"])
+    legacy_count = sum(1 for row in rows if row["legacyCompletionFamily"])
+    for seed in V18_NFW_GAP_SEEDS:
+        rng = random.Random(seed)
+        pool = low_load_names[:]
+        rng.shuffle(pool)
+        forced: dict[str, dict] = {}
+        for name in pool[:official_count]:
+            forced[name] = {
+                "activations": {
+                    "completion": 1.0,
+                    "lowSuppression": 0.0,
+                    "bufferedSuppression": 0.0,
+                    "radialOuterTransfer": 0.0,
+                    "radialInnerTransfer": 0.0,
+                    "anyActivation": 1.0,
+                },
+                "officialFamily": "random official-mass completion",
+            }
+        random_rows = v18_mass_scale_score_rows(
+            clean_curves,
+            strengths,
+            table1_by_name,
+            v18_lookup,
+            weak_names,
+            high_names,
+            priority_names,
+            forced_by_name=forced,
+        )
+        metric = v18_nfw_gap_candidate_metric(random_rows)
+        output.append(
+            {
+                "nullType": "same-active-count-official-mass-random",
+                "seed": seed,
+                "highGainVsV18Pct": metric["highGainVsV18Pct"],
+                "priorityGainVsV18Pct": metric["priorityGainVsV18Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "activeForcedCount": official_count,
+            }
+        )
+
+        pool = low_load_names[:]
+        rng.shuffle(pool)
+        forced = {}
+        for index, name in enumerate(pool[: legacy_count + official_count]):
+            forced[name] = {
+                "activations": {
+                    "completion": 1.0,
+                    "lowSuppression": 0.0,
+                    "bufferedSuppression": 0.0,
+                    "radialOuterTransfer": 0.0,
+                    "radialInnerTransfer": 0.0,
+                    "anyActivation": 1.0,
+                },
+                "legacyFamily": "random legacy completion" if index < legacy_count else "",
+                "officialFamily": "" if index < legacy_count else "random official-mass completion",
+            }
+        random_rows = v18_mass_scale_score_rows(
+            clean_curves,
+            strengths,
+            table1_by_name,
+            v18_lookup,
+            weak_names,
+            high_names,
+            priority_names,
+            forced_by_name=forced,
+        )
+        metric = v18_nfw_gap_candidate_metric(random_rows)
+        output.append(
+            {
+                "nullType": "same-active-count-all-completion-random",
+                "seed": seed,
+                "highGainVsV18Pct": metric["highGainVsV18Pct"],
+                "priorityGainVsV18Pct": metric["priorityGainVsV18Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "activeForcedCount": legacy_count + official_count,
+            }
+        )
+    return output
+
+
+def write_v18_mass_scale_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_mass_scale_candidate"
+    lock_capsule = write_observed_state_v18_release_lock_final_artifacts(DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_FINAL_OUT)
+    context = observed_state_candidate_context()
+    curves = context["curves"]
+    clean_curves = context["cleanCurves"]
+    weak_names = context["weakNames"]
+    high_names = context["highNames"]
+    train_names, holdout_names = observed_state_split(clean_curves, SPLIT_SEED, HOLDOUT_FRACTION)
+    expression = observed_state_app_expression(context["fit"], context["ampCap"])
+    v18_lookup = observed_state_browser_formula_supports(curves, expression)
+    priority_names, _priority_rows = v18_nfw_gap_candidate_priority_names()
+    table1_by_name, table1_header, table1_path = v18_mass_scale_table1()
+    strengths = {"legacyCompletion": 0.50, "officialCompletion": 0.35, "lowSuppression": 0.30, "bufferedSuppression": 0.10}
+    rows = v18_mass_scale_score_rows(
+        curves,
+        strengths,
+        table1_by_name,
+        v18_lookup,
+        weak_names,
+        high_names,
+        priority_names,
+        (train_names, holdout_names),
+    )
+    all_metric = v18_nfw_gap_candidate_metric(rows)
+    holdout_metric = v18_nfw_gap_candidate_metric(rows, "holdout")
+    null_rows = v18_mass_scale_null_rows(clean_curves, rows, strengths, table1_by_name, v18_lookup, weak_names, high_names, priority_names)
+    best_null = max([parse_float(row["priorityGainVsV18Pct"]) for row in null_rows] or [math.nan])
+    null_margin = all_metric["priorityGainVsV18Pct"] - best_null if math.isfinite(best_null) else math.nan
+    official_feature_rows = [
+        {
+            "galaxy": row["galaxy"],
+            "set": row["set"],
+            "lockedRoute": row["lockedRoute"],
+            "mBar_1e9Msun": row["mBar_1e9Msun"],
+            "mStar_1e9Msun": row["mStar_1e9Msun"],
+            "mGas_1e9Msun": row["mGas_1e9Msun"],
+            "tableGasFraction": row["tableGasFraction"],
+            "rDiskKpc": row["rDiskKpc"],
+            "rHiKpc": row["rHiKpc"],
+            "rHiOverRdisk": row["rHiOverRdisk"],
+            "sigmaBar_1e9MsunPerKpc2": row["sigmaBar_1e9MsunPerKpc2"],
+            "officialMassScaleFamily": row["officialMassScaleFamily"],
+            "sourceFile": str(table1_path),
+        }
+        for row in rows
+    ]
+    score_summary = {
+        "candidateId": "observed-state-response-v18.20-official-mass-scale-candidate",
+        "baseCandidate": "MTS v18.10 observed-state response release candidate",
+        "v18ReferenceHighGainPct": lock_capsule["summary"]["cleanHighGainPct"],
+        "v18ReferenceCleanGainPct": lock_capsule["summary"]["cleanGainPct"],
+        "candidateHighGainVsV18Pct": all_metric["highGainVsV18Pct"],
+        "candidatePriorityGainVsV18Pct": all_metric["priorityGainVsV18Pct"],
+        "holdoutHighGainVsV18Pct": holdout_metric["highGainVsV18Pct"],
+        "holdoutPriorityGainVsV18Pct": holdout_metric["priorityGainVsV18Pct"],
+        "candidateHighAbove20": all_metric["highAbove20Candidate"],
+        "candidateProtectedMaxRegressionKmS": all_metric["protectedMaxRegressionKmS"],
+        "weakSystematicsLeakage": all_metric["weakSystematicsLeakage"],
+        "officialTable1CoverageCount": sum(1 for row in rows if row["mBar_1e9Msun"] != ""),
+        "officialMassScaleHighHits": sum(1 for row in rows if row["set"] == "clean-high-rmse" and row["officialMassScaleFamily"]),
+        "officialMassScaleProtectedHits": sum(1 for row in rows if row["set"] == "clean-protected" and row["officialMassScaleFamily"]),
+        "bestNullPriorityGainPct": best_null,
+        "nullMarginPriorityPct": null_margin,
+    }
+    passes = {
+        "highGainOverV18AtLeast5Pct": score_summary["candidateHighGainVsV18Pct"] >= 5.0,
+        "priorityGainAtLeast15Pct": score_summary["candidatePriorityGainVsV18Pct"] >= 15.0,
+        "highAbove20Zero": score_summary["candidateHighAbove20"] == 0,
+        "protectedRegressionBelow3": score_summary["candidateProtectedMaxRegressionKmS"] < 3.0,
+        "weakLeakageZero": score_summary["weakSystematicsLeakage"] == 0,
+        "nullMarginAtLeast10Pct": math.isfinite(null_margin) and null_margin >= 10.0,
+    }
+    verdict = "v18.20 candidate promoted for review" if all(passes.values()) else "v18.20 candidate not promoted"
+    score_summary["verdict"] = verdict
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_summary])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", rows)
+    write_csv(out_dir / f"{prefix}_official_mass_features.csv", official_feature_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    formula = {
+        "candidateId": score_summary["candidateId"],
+        "baseCandidate": score_summary["baseCandidate"],
+        "lawChange": "v18.10 plus v18.19 legacy structure completion plus official SPARC Table1 mass-scale completion branches",
+        "strengths": strengths,
+        "officialSource": str(table1_path),
+        "officialVariables": [
+            "Mstar = 0.5 * L[3.6]",
+            "Mgas = 1.4 * MHI",
+            "Mbar = Mstar + Mgas",
+            "tableGasFraction = Mgas / Mbar",
+            "sigmaBar = Mbar / (2*pi*Rdisk^2)",
+            "RHI / Rdisk",
+        ],
+        "officialCompletionFamilies": {
+            "official stellar-threshold completion": "low-load, 6 <= Mbar(1e9Msun) <= 12, fgas <= 0.25, moderate SigmaBar, memoryLoad 2.4-4.0, uOut >= 0.40, uMax < 0.90",
+            "official gas-rich threshold completion": "low-load, 7 <= Mbar(1e9Msun) <= 9, fgas >= 0.75, low SigmaBar, RHI/Rdisk >= 6, memoryLoad 1.2-2.0, uOut <= 0.32, uMax < 0.86",
+        },
+        "canonicalMtsChanged": False,
+        "forbiddenInputsUsed": False,
+        "forbiddenInputs": ["galaxy name", "NFW parameters", "raw residual lookup", "raw RMSE as formula input", "weak/systematics fitting"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-official-mass-scale-candidate-v1",
+        "verdict": verdict,
+        "summary": score_summary,
+        "passes": passes,
+        "sourceFile": str(table1_path),
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    changed = sorted(
+        [row for row in rows if row["set"] == "clean-high-rmse" and abs(parse_float(row["candidateGainVsV18KmS"], 0.0)) > 0.05],
+        key=lambda row: -parse_float(row["candidateGainVsV18KmS"], 0.0),
+    )[:22]
+    report = [
+        "# MTS v18.20 Official Mass-Scale Candidate",
+        "",
+        "This mode tests whether official SPARC Table1 mass/scale variables add a real framework signal on top of locked v18.10 and the v18.19 legacy-structure response.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- High-RMSE gain over v18.10: `{fmt(score_summary['candidateHighGainVsV18Pct'])}%`.",
+        f"- Priority NFW-gap gain over v18.10: `{fmt(score_summary['candidatePriorityGainVsV18Pct'])}%`.",
+        f"- Holdout high-RMSE gain over v18.10: `{fmt(score_summary['holdoutHighGainVsV18Pct'])}%`.",
+        f"- Protected max regression: `{fmt(score_summary['candidateProtectedMaxRegressionKmS'])}` km/s.",
+        f"- Official mass-scale high hits: `{score_summary['officialMassScaleHighHits']}`.",
+        f"- Official mass-scale protected hits: `{score_summary['officialMassScaleProtectedHits']}`.",
+        f"- Null margin on priority gap: `{fmt(score_summary['nullMarginPriorityPct'])}` points.",
+        "",
+        "## Changed High-RMSE Cases",
+        "",
+        "| Galaxy | v18 RMSE | candidate RMSE | gain | family | Mbar | fgas | SigmaBar |",
+        "| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |",
+        *[
+            f"| {row['galaxy']} | {fmt(row['v18Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['candidateGainVsV18KmS'])} | {row['officialMassScaleFamily'] or row['legacyCompletionFamily'] or row['branchHits']} | {fmt(row['mBar_1e9Msun'])} | {fmt(row['tableGasFraction'])} | {fmt(row['sigmaBar_1e9MsunPerKpc2'])} |"
+            for row in changed
+        ],
+        "",
+        "## Acceptance Gates",
+        "",
+        "| Gate | Pass |",
+        "| --- | ---: |",
+        *[f"| {key} | `{value}` |" for key, value in passes.items()],
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    return capsule
+
+
+def cmd_v18massscalecandidate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_MASS_SCALE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_mass_scale_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.20 official mass-scale candidate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high_gain_vs_v18={fmt(summary['candidateHighGainVsV18Pct'])}%",
+                f"priority_gain_vs_v18={fmt(summary['candidatePriorityGainVsV18Pct'])}%",
+                f"official_high_hits={summary['officialMassScaleHighHits']}",
+                f"official_protected_hits={summary['officialMassScaleProtectedHits']}",
+                f"protected={fmt(summary['candidateProtectedMaxRegressionKmS'])}",
+                f"null_margin={fmt(summary['nullMarginPriorityPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 official mass-scale candidate to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -77064,6 +77577,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwgapcandidate",
             "v18legacystructurecandidate",
             "observedstatev18legacystructurecandidate",
+            "v18massscalecandidate",
+            "observedstatev18massscalecandidate",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -77350,6 +77865,8 @@ def main() -> None:
         cmd_v18nfwgapcandidate(args)
     elif args.mode in {"v18legacystructurecandidate", "observedstatev18legacystructurecandidate"}:
         cmd_v18legacystructurecandidate(args)
+    elif args.mode in {"v18massscalecandidate", "observedstatev18massscalecandidate"}:
+        cmd_v18massscalecandidate(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
