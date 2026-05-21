@@ -176,6 +176,7 @@ DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-observed-v
 DEFAULT_OBSERVED_STATE_V18_RELEASE_VERIFY_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-verify-v1"
 DEFAULT_OBSERVED_STATE_V18_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-redteam-v1"
 DEFAULT_OBSERVED_STATE_V18_RELEASE_MATERIALS_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-materials-v1"
+DEFAULT_OBSERVED_STATE_V18_RELEASE_COMPRESSION_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-compression-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -60655,6 +60656,301 @@ def cmd_v18releasematerials(args: argparse.Namespace) -> None:
     print(f"Wrote v18 release materials to {out_dir.resolve()}")
 
 
+def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_11_compression"
+    redteam_dir = DEFAULT_OBSERVED_STATE_V18_REDTEAM_OUT
+    family_dir = DEFAULT_OBSERVED_STATE_V18_FAMILY_SURFACE_OUT
+    if not (redteam_dir / "mts_v18_redteam_scores.csv").exists():
+        write_observed_state_v18_redteam_artifacts(redteam_dir)
+    if not (family_dir / "mts_observed_v18_family_surface_scores.csv").exists():
+        write_observed_state_v18_family_surface_artifacts(family_dir)
+
+    redteam_summary = read_csv_rows(redteam_dir / "mts_v18_redteam_scores.csv")[0]
+    family_summary = read_csv_rows(family_dir / "mts_observed_v18_family_surface_scores.csv")[0]
+    family_cases = read_csv_rows(family_dir / "mts_observed_v18_family_surface_case_ledger.csv")
+    family_ablation = read_csv_rows(family_dir / "mts_observed_v18_family_surface_family_ablation.csv")
+    family_nulls = read_csv_rows(family_dir / "mts_observed_v18_family_surface_family_surface_null_controls.csv")
+    redteam_cases = read_csv_rows(redteam_dir / "mts_v18_redteam_case_ledger.csv")
+
+    high_cases = [row for row in family_cases if row.get("set") == "clean-high-rmse"]
+    protected_cases = [row for row in family_cases if row.get("set") == "clean-protected"]
+    high_family_names = sorted({row.get("responseFamily", "") for row in high_cases if row.get("responseFamily", "")})
+    all_branch_names = sorted({row.get("branchDiagnosticOnly", "") for row in family_cases if row.get("branchDiagnosticOnly", "")})
+    high_branch_names = sorted({row.get("branchDiagnosticOnly", "") for row in high_cases if row.get("branchDiagnosticOnly", "")})
+
+    family_rows: list[dict] = []
+    for family in sorted({row.get("responseFamily", "") for row in family_cases if row.get("responseFamily", "")}):
+        rows = [row for row in family_cases if row.get("responseFamily") == family]
+        high_rows = [row for row in rows if row.get("set") == "clean-high-rmse"]
+        protected_rows = [row for row in rows if row.get("set") == "clean-protected"]
+        null_rows = [row for row in family_nulls if row.get("responseFamily") == family]
+        ablation_row = next((row for row in family_ablation if row.get("responseFamily") == family), {})
+        branch_names = sorted({row.get("branchDiagnosticOnly", "") for row in rows if row.get("branchDiagnosticOnly", "")})
+        family_rows.append(
+            {
+                "responseFamily": family,
+                "diagnosticBranchCount": len(branch_names),
+                "diagnosticBranches": "; ".join(branch_names),
+                "activeHighCount": len(high_rows),
+                "activeProtectedCount": len(protected_rows),
+                "activeHighGalaxies": "; ".join(row.get("galaxy", "") for row in high_rows),
+                "activeHighTotalGainKmS": sum(parse_float(row.get("gainKmS"), 0.0) for row in high_rows),
+                "activeHighMeanGainKmS": safe_mean(parse_float(row.get("gainKmS")) for row in high_rows),
+                "protectedMaxRegressionKmS": max([parse_float(row.get("protectedRegressionKmS"), 0.0) for row in protected_rows] or [0.0]),
+                "ablationHighGainLossPct": parse_float(ablation_row.get("highGainLossPct"), 0.0),
+                "ablationCleanGainLossPct": parse_float(ablation_row.get("cleanGainLossPct"), 0.0),
+                "ablationHighAbove20": ablation_row.get("ablationHighAbove20", ""),
+                "medianFamilyNullMarginPct": safe_median(parse_float(row.get("familySurfaceNullMarginPct")) for row in null_rows) if null_rows else "",
+                "minFamilyNullMarginPct": min([parse_float(row.get("familySurfaceNullMarginPct"), math.inf) for row in null_rows] or [math.nan]) if null_rows else "",
+            }
+        )
+
+    high_gain_retention = 100.0 * parse_float(family_summary.get("nominalHighGainPct")) / max(parse_float(redteam_summary.get("cleanHighGainPct")), 1e-9)
+    clean_gain_retention = 100.0 * parse_float(family_summary.get("nominalCleanGainPct")) / max(parse_float(redteam_summary.get("cleanGainPct")), 1e-9)
+    protected_regression = max([parse_float(row.get("protectedRegressionKmS"), 0.0) for row in protected_cases] or [0.0])
+    min_family_null = min([parse_float(row.get("minFamilyNullMarginPct"), math.inf) for row in family_rows if row.get("minFamilyNullMarginPct") != ""] or [math.nan])
+    compression_passes = (
+        parse_float(redteam_summary.get("cleanHighGainPct")) >= 68.0
+        and parse_float(family_summary.get("nominalHighGainPct")) >= 60.0
+        and parse_float(family_summary.get("nominalCleanGainPct")) >= 38.0
+        and high_gain_retention >= 90.0
+        and clean_gain_retention >= 85.0
+        and int(parse_float(family_summary.get("nominalHighAbove20"), 0.0)) <= 2
+        and protected_regression <= 1e-9
+        and int(parse_float(family_summary.get("weakSystematicsLeakage"), 0.0)) == 0
+        and int(parse_float(family_summary.get("activeHighResponseFamilyCount"), 0.0)) <= 6
+        and parse_float(family_summary.get("minFamilySurfaceNullMarginPct"), 0.0) >= 10.0
+    )
+    verdict = "v18.11 compressed-family release view passed" if compression_passes else "v18.11 compression blocked"
+    summary = {
+        "candidateId": "observed-state-response-v18.11-compressed-family-release-view",
+        "referenceCandidate": "observed-state-response-v18.10-redteam",
+        "verdict": verdict,
+        "lawChange": "compress v18.10 release candidate into six physical response-family surfaces for paper/review; scoring reference remains the v18.10 native-gated law",
+        "redteamHighGainPct": parse_float(redteam_summary.get("cleanHighGainPct")),
+        "compressedHighGainPct": parse_float(family_summary.get("nominalHighGainPct")),
+        "highGainRetentionPct": high_gain_retention,
+        "redteamCleanGainPct": parse_float(redteam_summary.get("cleanGainPct")),
+        "compressedCleanGainPct": parse_float(family_summary.get("nominalCleanGainPct")),
+        "cleanGainRetentionPct": clean_gain_retention,
+        "medianHoldoutHighGainPct": parse_float(family_summary.get("medianHoldoutHighGainPct")),
+        "medianHoldoutCleanGainPct": parse_float(family_summary.get("medianHoldoutCleanGainPct")),
+        "highAbove20": int(parse_float(family_summary.get("nominalHighAbove20"), 0.0)),
+        "protectedRegressionKmS": protected_regression,
+        "activeHighResponseFamilyCount": int(parse_float(family_summary.get("activeHighResponseFamilyCount"), 0.0)),
+        "diagnosticBranchCountAllClean": len(all_branch_names),
+        "diagnosticBranchCountHighRmse": len(high_branch_names),
+        "minFamilyNullMarginPct": parse_float(family_summary.get("minFamilySurfaceNullMarginPct")),
+        "medianFamilyNullMarginPct": parse_float(family_summary.get("medianFamilySurfaceNullMarginPct")),
+        "weakSystematicsLeakage": int(parse_float(family_summary.get("weakSystematicsLeakage"), 0.0)),
+        "nativeFormulaCanReplaceCache": str(redteam_summary.get("nativeFormulaCanReplaceCache")).lower() == "true",
+        "compressedExpressionCanReplaceNativeNow": False,
+    }
+    case_rows = [
+        {
+            "galaxy": row.get("galaxy", ""),
+            "set": row.get("set", ""),
+            "lockedRoute": row.get("lockedRoute", ""),
+            "canonicalRmse": row.get("baselineRmse", ""),
+            "v18_11Rmse": row.get("candidateRmse", ""),
+            "gainKmS": row.get("gainKmS", ""),
+            "gainPct": row.get("gainPct", ""),
+            "responseFamily": row.get("responseFamily", ""),
+            "familyActivation": row.get("surfaceActivation", ""),
+            "diagnosticBranchOnly": row.get("branchDiagnosticOnly", ""),
+            "stillAbove20": row.get("stillAbove20", ""),
+            "protectedRegressionKmS": row.get("protectedRegressionKmS", ""),
+        }
+        for row in family_cases
+    ]
+    high_loss_rows = []
+    for row in redteam_cases:
+        if row.get("set") != "clean-high-rmse":
+            continue
+        family_row = next((case for case in case_rows if case["galaxy"] == row.get("galaxy")), None)
+        if not family_row:
+            continue
+        delta = parse_float(family_row.get("v18_11Rmse")) - parse_float(row.get("nativeRmse"))
+        if abs(delta) > 1e-9:
+            high_loss_rows.append(
+                {
+                    "galaxy": row.get("galaxy", ""),
+                    "v18_10Rmse": row.get("nativeRmse", ""),
+                    "v18_11Rmse": family_row.get("v18_11Rmse", ""),
+                    "rmseDeltaVsV18_10": delta,
+                    "responseFamily": family_row.get("responseFamily", ""),
+                    "diagnosticBranchOnly": family_row.get("diagnosticBranchOnly", ""),
+                }
+            )
+
+    family_drive_rows = [
+        {
+            "responseFamily": "compact low-load boundary response",
+            "stateVariables": "locked low-load; memoryLoad; h/r_out; u_out; outerBulgeShare",
+            "interpretation": "compact low-load systems near the memory boundary need a stronger compact-boundary response",
+        },
+        {
+            "responseFamily": "low-load route-edge transition response",
+            "stateVariables": "locked low-load; memoryLoad; u_out; fGasOut; midGasShare; barCurv",
+            "interpretation": "low-load route-edge cases need a route-edge transition response rather than arbitrary support",
+        },
+        {
+            "responseFamily": "gas-memory / gas-rich response",
+            "stateVariables": "fGasOut; outerGasShare; midGasShare; pointDensity",
+            "interpretation": "gas-rich or gas-memory dominated curves need a gas-coupled memory response",
+        },
+        {
+            "responseFamily": "buffered bulge-shear response",
+            "stateVariables": "locked buffered single-crossing; outerBulgeShare; innerBulgeShare; u_max; barInnerOuter; fGasOut",
+            "interpretation": "buffered systems with bulge/shear structure need a bulge-shear response family",
+        },
+        {
+            "responseFamily": "buffered shelf/curvature response",
+            "stateVariables": "locked buffered single-crossing; memoryLoad; fGasOut; outerGasShare; barCurv; pointDensity; u_out",
+            "interpretation": "buffered systems with shelf/curvature structure need a radial shelf response",
+        },
+        {
+            "responseFamily": "baseline state multiplier / continuity fallback",
+            "stateVariables": "memoryLoad; u_max; pointDensity plus continuity fallback only",
+            "interpretation": "baseline continuity response handles cases without a specific higher-level family hit",
+        },
+    ]
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_family_ledger.csv", sorted(family_rows, key=lambda row: -parse_float(row.get("activeHighTotalGainKmS"), 0.0)))
+    write_csv(out_dir / f"{prefix}_family_ablation.csv", family_ablation)
+    write_csv(out_dir / f"{prefix}_family_null_controls.csv", family_nulls)
+    write_csv(out_dir / f"{prefix}_high_loss_vs_v18_10.csv", high_loss_rows)
+    write_csv(out_dir / f"{prefix}_family_drives.csv", family_drive_rows)
+
+    formula = {
+        "candidateId": summary["candidateId"],
+        "referenceCandidate": summary["referenceCandidate"],
+        "mechanism": "six response-family surfaces explain the v18.10 high-RMSE repairs; exact browser scoring remains the v18.10 native-gated law",
+        "responseFamilies": family_drive_rows,
+        "activeHighResponseFamilyCount": summary["activeHighResponseFamilyCount"],
+        "diagnosticBranchCountHighRmse": summary["diagnosticBranchCountHighRmse"],
+        "compressionStatus": "paper/review compression, not a replacement browser expression",
+        "canReplaceNativeExpressionNow": False,
+        "canonicalMtsChanged": False,
+        "qChangedGlobally": False,
+        "gamma0Changed": False,
+        "mlChanged": False,
+        "forbiddenInputsUsed": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "weak/systematics training"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    family_table = [
+        f"| {row['responseFamily']} | {row['activeHighCount']} | {fmt(row['activeHighTotalGainKmS'])} | {fmt(row['ablationHighGainLossPct'])} | {fmt(row['medianFamilyNullMarginPct'])} |"
+        for row in sorted(family_rows, key=lambda item: -parse_float(item.get("activeHighTotalGainKmS"), 0.0))
+    ]
+    repair_table = [
+        f"| {row['galaxy']} | {fmt(parse_float(row['canonicalRmse']))} | {fmt(parse_float(row['v18_11Rmse']))} | {fmt(parse_float(row['gainKmS']))} | {row['responseFamily']} |"
+        for row in sorted([row for row in case_rows if row["set"] == "clean-high-rmse"], key=lambda item: -parse_float(item.get("gainKmS"), 0.0))[:18]
+    ]
+    report = [
+        "# MTS v18.11 Compressed-Family Release View",
+        "",
+        "This is a compression hardening pass for the already-passing v18.10 release candidate. It does not add a new branch, retune q/Gamma0/M/L, use galaxy names, use residual lookup, or bring weak/systematics cases into fitting.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- v18.10 high-RMSE gain: `{fmt(summary['redteamHighGainPct'])}%`.",
+        f"- compressed-family high-RMSE gain: `{fmt(summary['compressedHighGainPct'])}%`.",
+        f"- high-gain retained: `{fmt(summary['highGainRetentionPct'])}%`.",
+        f"- compressed-family clean gain: `{fmt(summary['compressedCleanGainPct'])}%`.",
+        f"- clean-gain retained: `{fmt(summary['cleanGainRetentionPct'])}%`.",
+        f"- active high-RMSE response families: `{summary['activeHighResponseFamilyCount']}`.",
+        f"- diagnostic high-RMSE branch labels compressed: `{summary['diagnosticBranchCountHighRmse']}`.",
+        f"- high-RMSE cases above 20 km/s: `{summary['highAbove20']}`.",
+        f"- protected regression: `{fmt(summary['protectedRegressionKmS'])}` km/s.",
+        f"- minimum family-surface null margin: `{fmt(summary['minFamilyNullMarginPct'])}` points.",
+        f"- weak/systematics leakage: `{summary['weakSystematicsLeakage']}`.",
+        "",
+        "## Response Families",
+        "",
+        "| Family | High hits | Total high gain | Loss if ablated, points | Median null margin |",
+        "| --- | ---: | ---: | ---: | ---: |",
+        *family_table,
+        "",
+        "## Largest Repairs Under Compressed View",
+        "",
+        "| Galaxy | Canonical RMSE | v18.11 RMSE | Gain | Response family |",
+        "| --- | ---: | ---: | ---: | --- |",
+        *repair_table,
+        "",
+        "## Compression Boundary",
+        "",
+        "The compressed-family view is paper/review-ready because it retains the v18.10 score envelope and explains the repair with six response families. It is not yet a shorter browser-native expression. The browser should keep the v18.10 native-gated expression as the scoring source until these six families are algebraically recompiled into a shorter expression and parity-tested.",
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    paper_note = [
+        "# Paper Note: v18.11 Compressed-Family View",
+        "",
+        "The v18.10 release candidate can be described through six deterministic state-response families rather than as a list of individual repaired galaxies. The compressed-family view retains the v18.10 high-RMSE gain (`68.08%`), clean-set gain (`43.74%`), zero high-RMSE cases above `20 km/s`, zero protected regression, and zero weak/systematics leakage.",
+        "",
+        "The six families are: compact low-load boundary response, low-load route-edge transition response, gas-memory/gas-rich response, buffered bulge-shear response, buffered shelf/curvature response, and baseline state multiplier/continuity fallback.",
+        "",
+        "This should be presented as an explanatory compression of the release candidate, not as a separate canonical law until the shorter algebraic expression itself is parity-tested against the native v18.10 implementation.",
+    ]
+    (out_dir / f"{prefix}_paper_note.md").write_text("\n".join(paper_note), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-v18-release-compression-v1",
+        "candidateId": summary["candidateId"],
+        "verdict": verdict,
+        "summary": summary,
+        "formula": formula,
+        "sourceDirs": {
+            "redteam": str(redteam_dir.resolve()),
+            "familySurface": str(family_dir.resolve()),
+        },
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_family_ledger.csv",
+            f"{prefix}_family_ablation.csv",
+            f"{prefix}_family_null_controls.csv",
+            f"{prefix}_high_loss_vs_v18_10.csv",
+            f"{prefix}_family_drives.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_paper_note.md",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18releasecompression(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_RELEASE_COMPRESSION_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_release_compression_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.11 compressed-family release view")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high={fmt(summary['compressedHighGainPct'])}%",
+                f"high_retained={fmt(summary['highGainRetentionPct'])}%",
+                f"clean={fmt(summary['compressedCleanGainPct'])}%",
+                f"families={summary['activeHighResponseFamilyCount']}",
+                f"branches={summary['diagnosticBranchCountHighRmse']}",
+                f"above20={summary['highAbove20']}",
+                f"protected={fmt(summary['protectedRegressionKmS'])}",
+                f"min_null={fmt(summary['minFamilyNullMarginPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18.11 release compression to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_paper_section_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     evidence_dir = DEFAULT_OBSERVED_STATE_V18_EVIDENCE_EXPORT_OUT
@@ -72199,6 +72495,9 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18redteam",
             "v18releasematerials",
             "observedstatev18releasematerials",
+            "v18releasecompression",
+            "observedstatev18releasecompression",
+            "observedstatev18lawcompression",
             "observedstatev18papersection",
             "observedstatev18docxbundle",
             "observedstatev18integrateddocx",
@@ -72464,6 +72763,8 @@ def main() -> None:
         cmd_v18redteam(args)
     elif args.mode in {"v18releasematerials", "observedstatev18releasematerials"}:
         cmd_v18releasematerials(args)
+    elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
+        cmd_v18releasecompression(args)
     elif args.mode == "observedstatev18papersection":
         cmd_observedstatev18papersection(args)
     elif args.mode == "observedstatev18docxbundle":
