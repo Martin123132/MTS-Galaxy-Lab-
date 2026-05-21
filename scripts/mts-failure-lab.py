@@ -190,6 +190,7 @@ DEFAULT_OBSERVED_STATE_V18_MASS_SCALE_OUT = OUTPUT_PACK_ROOT / "mts-v18-official
 DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial-phase-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial-phase-redteam-v1"
 DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BROWSER_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial-phase-browser-lock-v1"
+DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial-phase-benchmark-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -65867,6 +65868,363 @@ def cmd_v18radialphasebrowserlock(args: argparse.Namespace) -> None:
     print(f"Wrote v18.21 browser lock to {out_dir.resolve()}")
 
 
+def write_v18_radial_phase_benchmark_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_radial_phase_benchmark"
+    browser_capsule = write_v18_radial_phase_browser_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BROWSER_OUT)
+    base = v18_radial_phase_base_context()
+    curves = base["curves"]
+    clean_curves = base["cleanCurves"]
+    weak_names = base["weakNames"]
+    high_names = base["highNames"]
+    train_names, holdout_names = observed_state_split(clean_curves, SPLIT_SEED, HOLDOUT_FRACTION)
+    mond_global_a0, mond_grid_rows = v18_competitor_fit_mond_a0(clean_curves, train_names)
+
+    case_rows: list[dict] = []
+    mond_param_rows: list[dict] = []
+    nfw_param_rows: list[dict] = []
+
+    for curve in curves:
+        name = curve["name"]
+        set_label = v18_competitor_set_label(name, weak_names, high_names)
+        split = "weak-excluded" if name in weak_names else ("train" if name in train_names else "holdout")
+        baryon = v18_competitor_support_score(curve, [0.0 for _ in curve["points"]])
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        v18_supports = [base["v18Lookup"][(name, index)] for index in range(len(curve["points"]))]
+        v18_score = v18_competitor_support_score(curve, v18_supports)
+        if name in weak_names:
+            v1821_supports = v18_supports[:]
+            branch_hits = ""
+            radial_hits = ""
+        else:
+            v1821_supports, acts, _profile_values, _mass_features, _legacy_features, legacy_family, official_family = v18_radial_phase_supports(
+                curve,
+                v18_supports,
+                base["baseStrengths"],
+                base["table1ByName"],
+            )
+            radial_hits_list = [family for family in V18_RADIAL_PHASE_STRENGTHS if parse_float(acts.get(family), 0.0) >= 0.20]
+            base_hits = [key for key in ["completion", "lowSuppression", "bufferedSuppression"] if parse_float(acts.get(key), 0.0) >= 0.20]
+            family_hits = [value for value in [legacy_family, official_family] if value]
+            branch_hits = "; ".join(base_hits + radial_hits_list + family_hits)
+            radial_hits = "; ".join(radial_hits_list)
+        v1821_score = v18_competitor_support_score(curve, v1821_supports)
+        mond_fixed = v18_competitor_support_score(curve, v18_competitor_mond_supports(curve, V18_COMPETITOR_A0_FIXED))
+        mond_global = v18_competitor_support_score(curve, v18_competitor_mond_supports(curve, mond_global_a0))
+        mond_oracle_a0, mond_oracle = v18_competitor_fit_mond_oracle(curve)
+        _v200_free, _c_free, nfw_free, nfw_free_params = v18_competitor_fit_nfw(curve, concentration_prior=False)
+        _v200_prior, _c_prior, nfw_prior, nfw_prior_params = v18_competitor_fit_nfw(curve, concentration_prior=True)
+
+        scores = {
+            "baryon_fixed_ml": baryon,
+            "canonical_mts": canonical,
+            "v18_10_release": v18_score,
+            "v18_21_radial_phase": v1821_score,
+            "mond_fixed_a0": mond_fixed,
+            "mond_global_a0": mond_global,
+            "mond_per_galaxy_a0_oracle": mond_oracle,
+            "nfw_free": nfw_free,
+            "nfw_concentration_prior": nfw_prior,
+        }
+        rmse_items = sorted((score["rmse"], model_id) for model_id, score in scores.items())
+        winner_rmse, winner_model = rmse_items[0]
+        second_rmse, second_model = rmse_items[1] if len(rmse_items) > 1 else (math.nan, "")
+        row = {
+            "galaxy": name,
+            "set": set_label,
+            "split": split,
+            "pointCount": len(curve["points"]),
+            "lockedRoute": curve.get("lockedModelRoute", ""),
+            "rOut": curve.get("rOut", math.nan),
+            "h": curve.get("h", math.nan),
+            "fGasOut": curve.get("fGasOut", math.nan),
+            "memoryLoad": curve.get("memoryLoad", math.nan),
+            "branchHitsV1821": branch_hits,
+            "radialPhaseFamilies": radial_hits,
+            "winnerRawRmse": winner_model,
+            "winnerRmse": winner_rmse,
+            "secondRawRmse": second_model,
+            "secondRmse": second_rmse,
+            "v1821BeatsV1810": v1821_score["rmse"] < v18_score["rmse"],
+            "v1821BeatsMondFixed": v1821_score["rmse"] < mond_fixed["rmse"],
+            "v1821BeatsMondGlobal": v1821_score["rmse"] < mond_global["rmse"],
+            "v1821BeatsNfwPrior": v1821_score["rmse"] < nfw_prior["rmse"],
+            "v1821BeatsNfwFree": v1821_score["rmse"] < nfw_free["rmse"],
+        }
+        for model_id, score in scores.items():
+            row[f"{model_id}Rmse"] = score["rmse"]
+            row[f"{model_id}Sse"] = score["sse"]
+            row[f"{model_id}Chi2"] = score["chi2"]
+            row[f"{model_id}Route"] = score.get("candidateRoute", "")
+        row.update(
+            {
+                "v1821GainVsCanonicalKmS": canonical["rmse"] - v1821_score["rmse"],
+                "v1821GainVsCanonicalPct": pct_improvement(canonical["rmse"], v1821_score["rmse"]),
+                "v1821GainVsV1810KmS": v18_score["rmse"] - v1821_score["rmse"],
+                "v1821GainVsV1810Pct": pct_improvement(v18_score["rmse"], v1821_score["rmse"]),
+                "v1821MinusMondFixedKmS": v1821_score["rmse"] - mond_fixed["rmse"],
+                "v1821MinusMondGlobalKmS": v1821_score["rmse"] - mond_global["rmse"],
+                "v1821MinusNfwPriorKmS": v1821_score["rmse"] - nfw_prior["rmse"],
+                "v1821MinusNfwFreeKmS": v1821_score["rmse"] - nfw_free["rmse"],
+                "protectedV1821RegressionVsV1810KmS": max(0.0, v1821_score["rmse"] - v18_score["rmse"]) if set_label == "clean-protected" else "",
+                "protectedV1821RegressionVsCanonicalKmS": max(0.0, v1821_score["rmse"] - canonical["rmse"]) if set_label == "clean-protected" else "",
+            }
+        )
+        case_rows.append(row)
+        mond_param_rows.extend(
+            [
+                {
+                    "track": "fixed-a0",
+                    "galaxy": name,
+                    "set": set_label,
+                    "a0SI": V18_COMPETITOR_A0_FIXED,
+                    "rmse": mond_fixed["rmse"],
+                    "fittedScope": "fixed literature value",
+                    "promotable": True,
+                },
+                {
+                    "track": "global-a0-train",
+                    "galaxy": name,
+                    "set": set_label,
+                    "a0SI": mond_global_a0,
+                    "rmse": mond_global["rmse"],
+                    "fittedScope": "one global parameter fitted on clean train split only",
+                    "promotable": True,
+                },
+                {
+                    "track": "per-galaxy-a0-oracle",
+                    "galaxy": name,
+                    "set": set_label,
+                    "a0SI": mond_oracle_a0,
+                    "rmse": mond_oracle["rmse"],
+                    "fittedScope": "per-galaxy oracle",
+                    "promotable": False,
+                },
+            ]
+        )
+        for track, score, params in [
+            ("nfw-free", nfw_free, nfw_free_params),
+            ("nfw-concentration-prior", nfw_prior, nfw_prior_params),
+        ]:
+            nfw_param_rows.append(
+                {
+                    "track": track,
+                    "galaxy": name,
+                    "set": set_label,
+                    "v200KmS": params["v200KmS"],
+                    "concentration": params["concentration"],
+                    "r200Kpc": params["r200Kpc"],
+                    "expectedConcentration": params["expectedConcentration"],
+                    "priorPenalty": params["priorPenalty"],
+                    "objectiveChi2PlusPrior": params["objectiveChi2PlusPrior"],
+                    "rmse": score["rmse"],
+                    "fittedScope": "two per-galaxy halo parameters",
+                    "promotableAsMtsLaw": False,
+                }
+            )
+
+    model_specs = [
+        ("baryon_fixed_ml", 0, 0, 2, "fixed baryonic baseline"),
+        ("canonical_mts", 0, 0, 4, "locked MTS law"),
+        ("v18_10_release", 0, 0, 4, "locked MTS v18.10 release candidate"),
+        ("v18_21_radial_phase", 0, 0, 4, "locked MTS v18.21 radial-phase candidate"),
+        ("mond_fixed_a0", 0, 0, 1, "fixed MOND simple-interpolation law"),
+        ("mond_global_a0", 1, 0, 1, "MOND one global train-fit parameter"),
+        ("mond_per_galaxy_a0_oracle", 0, 1, 1, "per-galaxy MOND oracle"),
+        ("nfw_free", 0, 2, 2, "per-galaxy NFW high-flexibility ceiling"),
+        ("nfw_concentration_prior", 0, 2, 2, "per-galaxy NFW with concentration prior"),
+    ]
+    set_names = ["all", "clean-high-rmse", "clean-protected", "weak-systematics-excluded"]
+    score_rows: list[dict] = []
+    cost_rows: list[dict] = []
+    for model_id, global_params, per_galaxy_params, law_params, model_class in model_specs:
+        for set_name in set_names:
+            summary_row = v18_competitor_summary_row(
+                model_id,
+                case_rows,
+                set_name,
+                global_params,
+                per_galaxy_params,
+                law_params,
+                model_class,
+            )
+            score_rows.append(summary_row)
+            cost_rows.append(summary_row.copy())
+
+    high_rows = [row for row in case_rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [row for row in case_rows if row["set"] == "clean-protected"]
+    high_win_rows = [
+        {
+            "galaxy": row["galaxy"],
+            "lockedRoute": row["lockedRoute"],
+            "winnerRawRmse": row["winnerRawRmse"],
+            "canonicalRmse": row["canonical_mtsRmse"],
+            "v18_10Rmse": row["v18_10_releaseRmse"],
+            "v18_21Rmse": row["v18_21_radial_phaseRmse"],
+            "mondFixedRmse": row["mond_fixed_a0Rmse"],
+            "mondGlobalRmse": row["mond_global_a0Rmse"],
+            "nfwPriorRmse": row["nfw_concentration_priorRmse"],
+            "nfwFreeRmse": row["nfw_freeRmse"],
+            "v1821GainVsCanonicalPct": row["v1821GainVsCanonicalPct"],
+            "v1821GainVsV1810KmS": row["v1821GainVsV1810KmS"],
+            "v1821MinusMondGlobalKmS": row["v1821MinusMondGlobalKmS"],
+            "v1821MinusNfwPriorKmS": row["v1821MinusNfwPriorKmS"],
+            "branchHitsV1821": row["branchHitsV1821"],
+        }
+        for row in high_rows
+    ]
+    protected_ledger = [
+        {
+            "galaxy": row["galaxy"],
+            "lockedRoute": row["lockedRoute"],
+            "canonicalRmse": row["canonical_mtsRmse"],
+            "v18_10Rmse": row["v18_10_releaseRmse"],
+            "v18_21Rmse": row["v18_21_radial_phaseRmse"],
+            "v1821ProtectedRegressionVsV1810KmS": row["protectedV1821RegressionVsV1810KmS"],
+            "v1821ProtectedRegressionVsCanonicalKmS": row["protectedV1821RegressionVsCanonicalKmS"],
+            "mondGlobalRmse": row["mond_global_a0Rmse"],
+            "nfwPriorRmse": row["nfw_concentration_priorRmse"],
+            "winnerRawRmse": row["winnerRawRmse"],
+            "branchHitsV1821": row["branchHitsV1821"],
+        }
+        for row in protected_rows
+    ]
+
+    score_lookup = {(row["modelId"], row["set"]): row for row in score_rows}
+    v1821_all = score_lookup[("v18_21_radial_phase", "all")]
+    v1821_high = score_lookup[("v18_21_radial_phase", "clean-high-rmse")]
+    v1810_all = score_lookup[("v18_10_release", "all")]
+    mond_global_all = score_lookup[("mond_global_a0", "all")]
+    nfw_prior_all = score_lookup[("nfw_concentration_prior", "all")]
+    mond_global_high = score_lookup[("mond_global_a0", "clean-high-rmse")]
+    nfw_prior_high = score_lookup[("nfw_concentration_prior", "clean-high-rmse")]
+    browser_summary = browser_capsule["summary"]
+    verdict = (
+        "v18.21 competitor benchmark ready"
+        if browser_capsule["verdict"] == "v18.21 browser release lock passed"
+        and int(parse_float(browser_summary["weakSystematicsLeakage"], 1.0)) == 0
+        else "v18.21 competitor benchmark blocked"
+    )
+    summary = {
+        "analysisName": "mts-v18-radial-phase-benchmark-v1",
+        "verdict": verdict,
+        "lockedCandidate": "observed-state-response-v18.21-radial-phase-release-candidate",
+        "allGalaxyBaselineMean": browser_summary["allGalaxyLockedMtsMeanRmse"],
+        "cleanBaselineMean": browser_summary["cleanSetLockedMtsMeanRmse"],
+        "weakSystematicsLeakage": browser_summary["weakSystematicsLeakage"],
+        "v1821CleanHighGainPct": browser_summary["v1821HighGainPct"],
+        "v1821CleanGainPct": browser_summary["v1821CleanGainPct"],
+        "v1821GainOverV1810HighPct": browser_summary["v1821HighGainVsV18Pct"],
+        "v1821PriorityGainOverV1810Pct": browser_summary["v1821PriorityGainVsV18Pct"],
+        "v1821ProtectedMaxRegressionVsV1810KmS": browser_summary["v1821ProtectedMaxRegressionVsV18KmS"],
+        "mondGlobalA0SI": mond_global_a0,
+        "v1810AllMeanRmse": v1810_all["meanRmse"],
+        "v1821AllMeanRmse": v1821_all["meanRmse"],
+        "mondGlobalAllMeanRmse": mond_global_all["meanRmse"],
+        "nfwPriorAllMeanRmse": nfw_prior_all["meanRmse"],
+        "v1821MinusV1810AllMeanRmse": v1821_all["meanRmse"] - v1810_all["meanRmse"],
+        "v1821MinusMondGlobalAllMeanRmse": v1821_all["meanRmse"] - mond_global_all["meanRmse"],
+        "v1821MinusNfwPriorAllMeanRmse": v1821_all["meanRmse"] - nfw_prior_all["meanRmse"],
+        "v1821HighMeanRmse": v1821_high["meanRmse"],
+        "mondGlobalHighMeanRmse": mond_global_high["meanRmse"],
+        "nfwPriorHighMeanRmse": nfw_prior_high["meanRmse"],
+        "nfwFreeIsFlexibilityCeiling": True,
+    }
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_model_costs.csv", cost_rows)
+    write_csv(out_dir / f"{prefix}_high_rmse_wins.csv", high_win_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_ledger)
+    write_csv(out_dir / f"{prefix}_mond_params.csv", mond_grid_rows + mond_param_rows)
+    write_csv(out_dir / f"{prefix}_nfw_params.csv", nfw_param_rows)
+
+    report = [
+        "# MTS v18.21 Radial-Phase Competitor Benchmark",
+        "",
+        "This benchmark keeps v18.21 locked and compares it against canonical MTS, baryon-only, fixed/global/per-galaxy MOND tracks, and NFW halo ceilings. It does not tune v18.21.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- v18.21 clean high-RMSE gain vs canonical: `{fmt(summary['v1821CleanHighGainPct'])}%`.",
+        f"- v18.21 clean-set gain vs canonical: `{fmt(summary['v1821CleanGainPct'])}%`.",
+        f"- v18.21 high-RMSE gain over v18.10: `{fmt(summary['v1821GainOverV1810HighPct'])}%`.",
+        f"- v18.21 priority NFW-gap gain over v18.10: `{fmt(summary['v1821PriorityGainOverV1810Pct'])}%`.",
+        f"- Protected max regression vs v18.10: `{fmt(summary['v1821ProtectedMaxRegressionVsV1810KmS'])}` km/s.",
+        f"- MOND train-only global a0: `{summary['mondGlobalA0SI']:.6e}` m/s^2.",
+        f"- All-galaxy mean RMSE, v18.10: `{fmt(summary['v1810AllMeanRmse'])}`.",
+        f"- All-galaxy mean RMSE, v18.21: `{fmt(summary['v1821AllMeanRmse'])}`.",
+        f"- All-galaxy mean RMSE, MOND global a0: `{fmt(summary['mondGlobalAllMeanRmse'])}`.",
+        f"- All-galaxy mean RMSE, NFW concentration prior: `{fmt(summary['nfwPriorAllMeanRmse'])}`.",
+        f"- Clean high-RMSE mean RMSE, v18.21: `{fmt(summary['v1821HighMeanRmse'])}`.",
+        f"- Clean high-RMSE mean RMSE, MOND global a0: `{fmt(summary['mondGlobalHighMeanRmse'])}`.",
+        f"- Clean high-RMSE mean RMSE, NFW concentration prior: `{fmt(summary['nfwPriorHighMeanRmse'])}`.",
+        "",
+        "## Model Score Table",
+        "",
+        "| Model | Set | Mean RMSE | High gain vs canonical | High above 20 | AIC | BIC | Fitted params |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in score_rows:
+        if row["set"] in {"all", "clean-high-rmse"}:
+            report.append(
+                f"| {row['modelId']} | {row['set']} | {fmt(row['meanRmse'])} | {fmt(row['highGainVsCanonicalPct'])}% | {row['highAbove20Count']} | {fmt(row['aic'])} | {fmt(row['bic'])} | {row['benchmarkFittedTotalParamsOnSet']} |"
+            )
+    report.extend(
+        [
+            "",
+            "## Labels",
+            "",
+            "- `mond_per_galaxy_a0_oracle` is non-promotable because it fits one acceleration scale per galaxy.",
+            "- `nfw_free` is a high-flexibility halo ceiling because it fits two halo parameters per galaxy.",
+            "- `nfw_concentration_prior` is still a fitted halo comparison, but with a concentration prior included in the objective.",
+            "- v18.21 uses no benchmark fitting in this mode; it is the locked exact-cache radial-phase candidate.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": summary["analysisName"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_model_costs.csv",
+            f"{prefix}_high_rmse_wins.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_mond_params.csv",
+            f"{prefix}_nfw_params.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18radialphasebenchmark(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BENCHMARK_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_radial_phase_benchmark_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.21 radial-phase competitor benchmark")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"v18_21_all={fmt(summary['v1821AllMeanRmse'])}",
+                f"v18_10_all={fmt(summary['v1810AllMeanRmse'])}",
+                f"mond_global_all={fmt(summary['mondGlobalAllMeanRmse'])}",
+                f"nfw_prior_all={fmt(summary['nfwPriorAllMeanRmse'])}",
+                f"high_gain={fmt(summary['v1821CleanHighGainPct'])}%",
+                f"a0_global={summary['mondGlobalA0SI']:.6e}",
+            ]
+        )
+    )
+    print(f"Wrote v18.21 competitor benchmark to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -78899,6 +79257,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18radialphaseredteam",
             "v18radialphasebrowserlock",
             "observedstatev18radialphasebrowserlock",
+            "v18radialphasebenchmark",
+            "observedstatev18radialphasebenchmark",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -79193,6 +79553,8 @@ def main() -> None:
         cmd_v18radialphaseredteam(args)
     elif args.mode in {"v18radialphasebrowserlock", "observedstatev18radialphasebrowserlock"}:
         cmd_v18radialphasebrowserlock(args)
+    elif args.mode in {"v18radialphasebenchmark", "observedstatev18radialphasebenchmark"}:
+        cmd_v18radialphasebenchmark(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
