@@ -184,6 +184,7 @@ DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v1
 DEFAULT_OBSERVED_STATE_V18_LAW_SPEC_OUT = OUTPUT_PACK_ROOT / "mts-v18-law-spec-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_FIGURES_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-figures-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_GAP_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-gap-audit-v1"
+DEFAULT_OBSERVED_STATE_V18_NFW_GAP_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-gap-candidate-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -62833,6 +62834,719 @@ def cmd_v18nfwgapaudit(args: argparse.Namespace) -> None:
     print(f"Wrote v18 NFW-gap audit to {out_dir.resolve()}")
 
 
+V18_NFW_GAP_COMPLETION_GRID = [0.0, 0.18, 0.32, 0.48, 0.66, 0.84]
+V18_NFW_GAP_LOW_SUPPRESSION_GRID = [0.0, 0.08, 0.12, 0.18, 0.24, 0.30]
+V18_NFW_GAP_BUFFERED_SUPPRESSION_GRID = [0.0, 0.10, 0.18, 0.26, 0.34, 0.44]
+V18_NFW_GAP_TRANSFER_GRID = [0.0, 0.10, 0.18, 0.28, 0.38]
+V18_NFW_GAP_SEEDS = [20260511, 20260512, 20260513, 20260514, 20260515, 314159, 271828, 42, 12345]
+
+
+def v18_nfw_gap_candidate_smooth(value: float, low: float, high: float) -> float:
+    if high <= low:
+        return 0.0
+    x_val = clamp((value - low) / (high - low), 0.0, 1.0)
+    return x_val * x_val * (3.0 - 2.0 * x_val)
+
+
+def v18_nfw_gap_candidate_curve_state(curve: dict) -> dict:
+    values = observed_state_values(curve)
+    values["u075"] = curve.get("lockedModelU075", math.nan)
+    values["route"] = curve.get("lockedModelRoute", "")
+    values["rOutOverH"] = 1.0 / max(values.get("hOverRout", 1e-9), 1e-9)
+    return values
+
+
+def v18_nfw_gap_candidate_activations(curve: dict) -> dict:
+    values = v18_nfw_gap_candidate_curve_state(curve)
+    route = values["route"]
+    low_load = route == "low-load"
+    buffered = route == "buffered single-crossing"
+
+    low_load_stretch_lookalike = values["hOverRout"] > 0.35 and values["memoryLoad"] < 1.45 and values["uOut"] > 0.38
+    low_load_high_u_safety = values["uMax"] > 0.90 and values["memoryLoad"] > 4.0 and (
+        values["fGasOut"] > 0.62 or values["uOut"] < 0.34
+    )
+
+    gas_edge = (
+        v18_nfw_gap_candidate_smooth(values["u075"], 0.32, 0.48)
+        * v18_nfw_gap_candidate_smooth(0.34 - values["hOverRout"], 0.0, 0.18)
+        * v18_nfw_gap_candidate_smooth(0.86 - values["uMax"], 0.0, 0.16)
+    )
+    disk_edge = (
+        v18_nfw_gap_candidate_smooth(values["uOut"], 0.30, 0.44)
+        * v18_nfw_gap_candidate_smooth(0.34 - values["hOverRout"], 0.0, 0.18)
+        * v18_nfw_gap_candidate_smooth(0.92 - values["uMax"], 0.0, 0.20)
+    )
+    compact_edge = (
+        v18_nfw_gap_candidate_smooth(values["memoryLoad"], 2.5, 10.0)
+        * v18_nfw_gap_candidate_smooth(0.93 - values["uMax"], 0.0, 0.22)
+        * v18_nfw_gap_candidate_smooth(0.40 - values["uOut"], 0.0, 0.18)
+        * v18_nfw_gap_candidate_smooth(0.24 - values["hOverRout"], 0.0, 0.16)
+    )
+    completion = max(gas_edge, disk_edge, compact_edge) if low_load and not low_load_stretch_lookalike and not low_load_high_u_safety else 0.0
+
+    low_suppress_stretch = (
+        v18_nfw_gap_candidate_smooth(values["hOverRout"], 0.30, 0.45)
+        * v18_nfw_gap_candidate_smooth(0.56 - values["hOverRout"], 0.0, 0.16)
+        * v18_nfw_gap_candidate_smooth(values["memoryLoad"], 0.65, 1.10)
+        * v18_nfw_gap_candidate_smooth(1.55 - values["memoryLoad"], 0.0, 0.75)
+        * v18_nfw_gap_candidate_smooth(values["uOut"], 0.36, 0.46)
+    )
+    low_suppress_high_u = (
+        v18_nfw_gap_candidate_smooth(values["uMax"], 0.88, 1.00)
+        * v18_nfw_gap_candidate_smooth(values["memoryLoad"], 4.0, 10.0)
+        * max(
+            v18_nfw_gap_candidate_smooth(values["fGasOut"], 0.60, 0.78),
+            v18_nfw_gap_candidate_smooth(0.25 - values["outerGasShare"], 0.0, 0.18),
+        )
+    )
+    low_suppression = max(low_suppress_stretch, low_suppress_high_u) if low_load else 0.0
+
+    buffered_shelf_suppression = (
+        v18_nfw_gap_candidate_smooth(values["uMax"], 1.08, 1.35)
+        * v18_nfw_gap_candidate_smooth(values["hOverRout"], 0.16, 0.24)
+        * v18_nfw_gap_candidate_smooth(0.38 - values["outerGasShare"], 0.0, 0.24)
+        * v18_nfw_gap_candidate_smooth(-4.0 - values["barCurv"], 0.0, 28.0)
+    )
+    buffered_dense_suppression = (
+        v18_nfw_gap_candidate_smooth(values["uMax"], 1.30, 1.55)
+        * v18_nfw_gap_candidate_smooth(values["memoryLoad"], 5.0, 7.0)
+        * v18_nfw_gap_candidate_smooth(0.11 - values["hOverRout"], 0.0, 0.06)
+    )
+    buffered_suppression = max(buffered_shelf_suppression, buffered_dense_suppression) if buffered else 0.0
+
+    buffered_outer_transfer = (
+        v18_nfw_gap_candidate_smooth(values["uMax"], 1.10, 1.42)
+        * v18_nfw_gap_candidate_smooth(-15.0 - values["barCurv"], 0.0, 35.0)
+        * v18_nfw_gap_candidate_smooth(values["hOverRout"], 0.11, 0.20)
+        * v18_nfw_gap_candidate_smooth(0.60 - values["outerGasShare"], 0.0, 0.32)
+    )
+    low_inner_transfer = (
+        v18_nfw_gap_candidate_smooth(-28.0 - values["barCurv"], 0.0, 40.0)
+        * v18_nfw_gap_candidate_smooth(values["hOverRout"], 0.14, 0.23)
+        * v18_nfw_gap_candidate_smooth(0.22 - values["fGasOut"], 0.0, 0.18)
+    )
+    return {
+        "completion": clamp(completion, 0.0, 1.0),
+        "lowSuppression": clamp(low_suppression, 0.0, 1.0),
+        "bufferedSuppression": clamp(buffered_suppression, 0.0, 1.0),
+        "radialOuterTransfer": clamp(buffered_outer_transfer, 0.0, 1.0) if buffered else 0.0,
+        "radialInnerTransfer": clamp(low_inner_transfer, 0.0, 1.0) if low_load else 0.0,
+    }
+
+
+def v18_nfw_gap_candidate_supports(
+    curve: dict,
+    v18_supports: list[float],
+    strengths: dict[str, float],
+    forced_activations: dict[str, float] | None = None,
+) -> tuple[list[float], dict]:
+    acts = forced_activations if forced_activations is not None else v18_nfw_gap_candidate_activations(curve)
+    completion = acts.get("completion", 0.0)
+    low_suppression = acts.get("lowSuppression", 0.0)
+    buffered_suppression = acts.get("bufferedSuppression", 0.0)
+    outer_transfer = acts.get("radialOuterTransfer", 0.0)
+    inner_transfer = acts.get("radialInnerTransfer", 0.0)
+    out: list[float] = []
+    for point, support in zip(curve["points"], v18_supports):
+        x_val = point.get("x", point["r"] / max(curve["rOut"], 1e-9))
+        radial_completion = 0.35 + 0.65 * v18_nfw_gap_candidate_smooth(x_val, 0.28, 0.82)
+        radial_suppression = 0.45 + 0.55 * v18_nfw_gap_candidate_smooth(x_val, 0.20, 0.90)
+        outer_transfer_shape = -0.35 + 1.10 * v18_nfw_gap_candidate_smooth(x_val, 0.25, 0.90)
+        inner_transfer_shape = 0.85 - 1.15 * v18_nfw_gap_candidate_smooth(x_val, 0.20, 0.90)
+        factor = 1.0
+        factor += strengths["completion"] * completion * radial_completion
+        factor -= strengths["lowSuppression"] * low_suppression * radial_suppression
+        factor -= strengths["bufferedSuppression"] * buffered_suppression * radial_suppression
+        factor += strengths["transfer"] * outer_transfer * outer_transfer_shape
+        factor += strengths["transfer"] * inner_transfer * inner_transfer_shape
+        out.append(max(0.0, support * clamp(factor, 0.35, 2.25)))
+    active = {
+        "completion": completion,
+        "lowSuppression": low_suppression,
+        "bufferedSuppression": buffered_suppression,
+        "radialOuterTransfer": outer_transfer,
+        "radialInnerTransfer": inner_transfer,
+        "anyActivation": max(completion, low_suppression, buffered_suppression, outer_transfer, inner_transfer),
+    }
+    return out, active
+
+
+def v18_nfw_gap_candidate_set_label(name: str, weak_names: set[str], high_names: set[str]) -> str:
+    return v18_competitor_set_label(name, weak_names, high_names)
+
+
+def v18_nfw_gap_candidate_priority_names() -> tuple[set[str], dict[str, dict]]:
+    audit_dir = DEFAULT_OBSERVED_STATE_V18_NFW_GAP_OUT
+    audit_path = audit_dir / "mts_v18_nfw_gap_priority_targets.csv"
+    if not audit_path.exists():
+        write_v18_nfw_gap_audit_artifacts(audit_dir)
+    rows = read_csv_rows(audit_path)
+    names = {row["galaxy"] for row in rows if parse_float(row.get("v18MinusNfwPriorKmS"), 0.0) >= 3.0}
+    return names, {row["galaxy"]: row for row in rows}
+
+
+def v18_nfw_gap_candidate_score_rows(
+    curves: list[dict],
+    strengths: dict[str, float],
+    v18_lookup: dict[tuple[str, int], float],
+    weak_names: set[str],
+    high_names: set[str],
+    priority_names: set[str],
+    split_names: tuple[set[str], set[str]] | None = None,
+    random_forced: dict[str, dict[str, float]] | None = None,
+) -> list[dict]:
+    train_names, holdout_names = split_names if split_names is not None else (set(), set())
+    rows: list[dict] = []
+    for curve in curves:
+        name = curve["name"]
+        v18_supports = [v18_lookup[(name, index)] for index in range(len(curve["points"]))]
+        if name in weak_names:
+            candidate_supports = v18_supports[:]
+            acts = {
+                "completion": 0.0,
+                "lowSuppression": 0.0,
+                "bufferedSuppression": 0.0,
+                "radialOuterTransfer": 0.0,
+                "radialInnerTransfer": 0.0,
+                "anyActivation": 0.0,
+            }
+        else:
+            forced = random_forced.get(name) if random_forced else None
+            candidate_supports, acts = v18_nfw_gap_candidate_supports(curve, v18_supports, strengths, forced)
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        v18_score = v18_competitor_support_score(curve, v18_supports)
+        candidate = v18_competitor_support_score(curve, candidate_supports)
+        set_label = v18_nfw_gap_candidate_set_label(name, weak_names, high_names)
+        split = "weak-excluded" if name in weak_names else ("holdout" if name in holdout_names else "train" if name in train_names else "")
+        branch_hits = [key for key, value in acts.items() if key != "anyActivation" and value >= 0.20]
+        rows.append(
+            {
+                "galaxy": name,
+                "set": set_label,
+                "split": split,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "priorityNfwGapCase": name in priority_names,
+                "canonicalRmse": canonical["rmse"],
+                "v18Rmse": v18_score["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "candidateRoute": candidate.get("candidateRoute", ""),
+                "v18Route": v18_score.get("candidateRoute", ""),
+                "candidateGainVsV18KmS": v18_score["rmse"] - candidate["rmse"],
+                "candidateGainVsV18Pct": pct_improvement(v18_score["rmse"], candidate["rmse"]),
+                "candidateGainVsCanonicalPct": pct_improvement(canonical["rmse"], candidate["rmse"]),
+                "candidateRegressionVsV18KmS": max(0.0, candidate["rmse"] - v18_score["rmse"]),
+                "completionActivation": acts["completion"],
+                "lowSuppressionActivation": acts["lowSuppression"],
+                "bufferedSuppressionActivation": acts["bufferedSuppression"],
+                "radialOuterTransferActivation": acts["radialOuterTransfer"],
+                "radialInnerTransferActivation": acts["radialInnerTransfer"],
+                "anyActivation": acts["anyActivation"],
+                "branchHits": "; ".join(branch_hits),
+                "above20Candidate": candidate["rmse"] >= 20.0,
+                "above20V18": v18_score["rmse"] >= 20.0,
+                "protectedRegressionKmS": max(0.0, candidate["rmse"] - v18_score["rmse"]) if set_label == "clean-protected" else "",
+            }
+        )
+    return rows
+
+
+def v18_nfw_gap_candidate_metric(rows: list[dict], split_filter: str | None = None) -> dict:
+    selected = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+    if split_filter:
+        selected = [row for row in selected if row.get("split") == split_filter]
+    high = [row for row in selected if row["set"] == "clean-high-rmse"]
+    protected = [row for row in selected if row["set"] == "clean-protected"]
+    priority = [row for row in high if parse_bool(row.get("priorityNfwGapCase"))]
+    v18_high_mean = safe_mean(parse_float(row["v18Rmse"]) for row in high)
+    cand_high_mean = safe_mean(parse_float(row["candidateRmse"]) for row in high)
+    v18_priority_mean = safe_mean(parse_float(row["v18Rmse"]) for row in priority)
+    cand_priority_mean = safe_mean(parse_float(row["candidateRmse"]) for row in priority)
+    protected_regressions = [parse_float(row.get("protectedRegressionKmS"), 0.0) for row in protected]
+    return {
+        "split": split_filter or "all-clean",
+        "cleanHighCount": len(high),
+        "priorityGapCount": len(priority),
+        "protectedCount": len(protected),
+        "v18HighMeanRmse": v18_high_mean,
+        "candidateHighMeanRmse": cand_high_mean,
+        "highGainVsV18Pct": pct_improvement(v18_high_mean, cand_high_mean),
+        "v18PriorityMeanRmse": v18_priority_mean,
+        "candidatePriorityMeanRmse": cand_priority_mean,
+        "priorityGainVsV18Pct": pct_improvement(v18_priority_mean, cand_priority_mean),
+        "highAbove20Candidate": sum(1 for row in high if parse_bool(row["above20Candidate"])),
+        "protectedMaxRegressionKmS": max(protected_regressions or [0.0]),
+        "protectedRegressionOver3Count": sum(1 for value in protected_regressions if value > 3.0),
+        "weakSystematicsLeakage": sum(1 for row in rows if row["set"] == "weak-systematics-excluded" and row["anyActivation"] >= 0.20),
+    }
+
+
+def v18_nfw_gap_candidate_select_strengths(
+    clean_curves: list[dict],
+    v18_lookup: dict[tuple[str, int], float],
+    weak_names: set[str],
+    high_names: set[str],
+    priority_names: set[str],
+    train_names: set[str],
+    holdout_names: set[str],
+) -> tuple[dict[str, float], list[dict]]:
+    trial_rows: list[dict] = []
+    best_strengths = {"completion": 0.0, "lowSuppression": 0.0, "bufferedSuppression": 0.0, "transfer": 0.0}
+    best_utility = -math.inf
+    for completion in V18_NFW_GAP_COMPLETION_GRID:
+        for low_suppression in V18_NFW_GAP_LOW_SUPPRESSION_GRID:
+            for buffered_suppression in V18_NFW_GAP_BUFFERED_SUPPRESSION_GRID:
+                for transfer in V18_NFW_GAP_TRANSFER_GRID:
+                    strengths = {
+                        "completion": completion,
+                        "lowSuppression": low_suppression,
+                        "bufferedSuppression": buffered_suppression,
+                        "transfer": transfer,
+                    }
+                    rows = v18_nfw_gap_candidate_score_rows(
+                        clean_curves,
+                        strengths,
+                        v18_lookup,
+                        weak_names,
+                        high_names,
+                        priority_names,
+                        (train_names, holdout_names),
+                    )
+                    train_metric = v18_nfw_gap_candidate_metric(rows, "train")
+                    holdout_metric = v18_nfw_gap_candidate_metric(rows, "holdout")
+                    protection_penalty = max(0.0, train_metric["protectedMaxRegressionKmS"] - 1.5) * 4.0
+                    above20_penalty = train_metric["highAbove20Candidate"] * 5.0
+                    utility = (
+                        train_metric["priorityGainVsV18Pct"]
+                        + 0.75 * train_metric["highGainVsV18Pct"]
+                        - protection_penalty
+                        - above20_penalty
+                    )
+                    trial_rows.append(
+                        {
+                            "completionStrength": completion,
+                            "lowSuppressionStrength": low_suppression,
+                            "bufferedSuppressionStrength": buffered_suppression,
+                            "transferStrength": transfer,
+                            "trainHighGainVsV18Pct": train_metric["highGainVsV18Pct"],
+                            "trainPriorityGainVsV18Pct": train_metric["priorityGainVsV18Pct"],
+                            "trainProtectedMaxRegressionKmS": train_metric["protectedMaxRegressionKmS"],
+                            "trainHighAbove20Candidate": train_metric["highAbove20Candidate"],
+                            "holdoutHighGainVsV18Pct": holdout_metric["highGainVsV18Pct"],
+                            "holdoutPriorityGainVsV18Pct": holdout_metric["priorityGainVsV18Pct"],
+                            "holdoutProtectedMaxRegressionKmS": holdout_metric["protectedMaxRegressionKmS"],
+                            "utility": utility,
+                        }
+                    )
+                    if (
+                        utility > best_utility
+                        and train_metric["protectedMaxRegressionKmS"] <= 3.0
+                        and train_metric["highAbove20Candidate"] == 0
+                    ):
+                        best_utility = utility
+                        best_strengths = strengths
+    trial_rows.sort(
+        key=lambda row: (
+            -parse_float(row["utility"]),
+            row["completionStrength"],
+            row["lowSuppressionStrength"],
+            row["bufferedSuppressionStrength"],
+            row["transferStrength"],
+        )
+    )
+    return best_strengths, trial_rows
+
+
+def v18_nfw_gap_candidate_branch_rows(rows: list[dict], null_rows: list[dict]) -> list[dict]:
+    branch_specs = [
+        ("completion", "completionActivation"),
+        ("lowSuppression", "lowSuppressionActivation"),
+        ("bufferedSuppression", "bufferedSuppressionActivation"),
+        ("radialOuterTransfer", "radialOuterTransferActivation"),
+        ("radialInnerTransfer", "radialInnerTransferActivation"),
+    ]
+    out: list[dict] = []
+    same_active_p95 = max(
+        [parse_float(row["priorityGainVsV18Pct"]) for row in null_rows if row.get("nullType") == "same-active-count-random"] or [0.0]
+    )
+    for branch, column in branch_specs:
+        active = [row for row in rows if parse_float(row.get(column), 0.0) >= 0.20]
+        high = [row for row in active if row["set"] == "clean-high-rmse"]
+        protected = [row for row in active if row["set"] == "clean-protected"]
+        priority = [row for row in high if parse_bool(row.get("priorityNfwGapCase"))]
+        protected_reg = [parse_float(row.get("protectedRegressionKmS"), 0.0) for row in protected]
+        branch_priority_gain = pct_improvement(
+            safe_mean(parse_float(row["v18Rmse"]) for row in priority),
+            safe_mean(parse_float(row["candidateRmse"]) for row in priority),
+        )
+        out.append(
+            {
+                "branch": branch,
+                "activeCleanHighCount": len(high),
+                "activePriorityGapCount": len(priority),
+                "activeProtectedCount": len(protected),
+                "priorityGainVsV18Pct": branch_priority_gain,
+                "protectedMaxRegressionKmS": max(protected_reg or [0.0]),
+                "sameActiveRandomP95PriorityGainPct": same_active_p95,
+                "nullMarginPct": branch_priority_gain - same_active_p95,
+                "branchAccepted": bool(priority and branch_priority_gain >= 5.0 and max(protected_reg or [0.0]) <= 3.0),
+            }
+        )
+    return out
+
+
+def v18_nfw_gap_candidate_null_rows(
+    clean_curves: list[dict],
+    strengths: dict[str, float],
+    v18_lookup: dict[tuple[str, int], float],
+    weak_names: set[str],
+    high_names: set[str],
+    priority_names: set[str],
+    reference_rows: list[dict],
+) -> list[dict]:
+    branch_columns = {
+        "completion": "completionActivation",
+        "lowSuppression": "lowSuppressionActivation",
+        "bufferedSuppression": "bufferedSuppressionActivation",
+        "radialOuterTransfer": "radialOuterTransferActivation",
+        "radialInnerTransfer": "radialInnerTransferActivation",
+    }
+    active_counts = {
+        branch: sum(1 for row in reference_rows if row["set"] != "weak-systematics-excluded" and parse_float(row.get(column), 0.0) >= 0.20)
+        for branch, column in branch_columns.items()
+    }
+    curve_by_name = {curve["name"]: curve for curve in clean_curves}
+    clean_names = sorted(curve_by_name)
+    rows: list[dict] = []
+    for null_type in ["same-active-count-random", "branch-label-shuffle", "protected-lookalike-stress"]:
+        for seed in V18_NFW_GAP_SEEDS:
+            rng = random.Random(seed + sum(ord(char) for char in null_type))
+            forced: dict[str, dict[str, float]] = {}
+            if null_type == "same-active-count-random":
+                for branch, count in active_counts.items():
+                    pool = clean_names[:]
+                    rng.shuffle(pool)
+                    for name in pool[:count]:
+                        forced.setdefault(name, {})[branch] = 1.0
+            elif null_type == "branch-label-shuffle":
+                branch_names = list(branch_columns)
+                for row in reference_rows:
+                    if row["set"] == "weak-systematics-excluded":
+                        continue
+                    active = [branch for branch, column in branch_columns.items() if parse_float(row.get(column), 0.0) >= 0.20]
+                    if not active:
+                        continue
+                    shuffled_branch = rng.choice(branch_names)
+                    forced.setdefault(row["galaxy"], {})[shuffled_branch] = max(forced.setdefault(row["galaxy"], {}).get(shuffled_branch, 0.0), 1.0)
+            else:
+                protected_names = sorted(row["galaxy"] for row in reference_rows if row["set"] == "clean-protected")
+                for branch, count in active_counts.items():
+                    pool = protected_names[:]
+                    rng.shuffle(pool)
+                    for name in pool[:count]:
+                        forced.setdefault(name, {})[branch] = 1.0
+            scored = v18_nfw_gap_candidate_score_rows(
+                clean_curves,
+                strengths,
+                v18_lookup,
+                weak_names,
+                high_names,
+                priority_names,
+                None,
+                random_forced=forced,
+            )
+            metric = v18_nfw_gap_candidate_metric(scored)
+            rows.append(
+                {
+                    "nullType": null_type,
+                    "seed": seed,
+                    "activeForcedCount": sum(len(item) for item in forced.values()),
+                    "highGainVsV18Pct": metric["highGainVsV18Pct"],
+                    "priorityGainVsV18Pct": metric["priorityGainVsV18Pct"],
+                    "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                    "highAbove20Candidate": metric["highAbove20Candidate"],
+                }
+            )
+    return rows
+
+
+def write_v18_nfw_gap_candidate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_nfw_gap_candidate"
+    lock_capsule = write_observed_state_v18_release_lock_final_artifacts(DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_FINAL_OUT)
+    write_v18_nfw_gap_audit_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_GAP_OUT)
+    context = observed_state_candidate_context()
+    curves = context["curves"]
+    clean_curves = context["cleanCurves"]
+    weak_names = context["weakNames"]
+    high_names = context["highNames"]
+    train_names, holdout_names = observed_state_split(clean_curves, SPLIT_SEED, HOLDOUT_FRACTION)
+    expression = observed_state_app_expression(context["fit"], context["ampCap"])
+    v18_lookup = observed_state_browser_formula_supports(curves, expression)
+    priority_names, priority_rows_by_name = v18_nfw_gap_candidate_priority_names()
+    selected_strengths, trial_rows = v18_nfw_gap_candidate_select_strengths(
+        clean_curves,
+        v18_lookup,
+        weak_names,
+        high_names,
+        priority_names,
+        train_names,
+        holdout_names,
+    )
+    rows = v18_nfw_gap_candidate_score_rows(
+        curves,
+        selected_strengths,
+        v18_lookup,
+        weak_names,
+        high_names,
+        priority_names,
+        (train_names, holdout_names),
+    )
+    all_metric = v18_nfw_gap_candidate_metric(rows)
+    holdout_metric = v18_nfw_gap_candidate_metric(rows, "holdout")
+    train_metric = v18_nfw_gap_candidate_metric(rows, "train")
+    null_rows = v18_nfw_gap_candidate_null_rows(clean_curves, selected_strengths, v18_lookup, weak_names, high_names, priority_names, rows)
+    branch_rows = v18_nfw_gap_candidate_branch_rows(rows, null_rows)
+
+    holdout_rows: list[dict] = []
+    for seed in V18_NFW_GAP_SEEDS:
+        seed_train, seed_holdout = observed_state_split(clean_curves, seed, HOLDOUT_FRACTION)
+        seed_rows = v18_nfw_gap_candidate_score_rows(
+            clean_curves,
+            selected_strengths,
+            v18_lookup,
+            weak_names,
+            high_names,
+            priority_names,
+            (seed_train, seed_holdout),
+        )
+        metric = v18_nfw_gap_candidate_metric(seed_rows, "holdout")
+        metric["seed"] = seed
+        holdout_rows.append(metric)
+
+    competitor_gap_rows: list[dict] = []
+    audit_case_rows = {
+        row["galaxy"]: row for row in read_csv_rows(DEFAULT_OBSERVED_STATE_V18_NFW_GAP_OUT / "mts_v18_nfw_gap_case_ledger.csv")
+    }
+    for row in rows:
+        if row["set"] != "clean-high-rmse":
+            continue
+        audit_row = audit_case_rows.get(row["galaxy"], {})
+        nfw_prior_rmse = parse_float(audit_row.get("nfwPriorRmse"))
+        competitor_gap_rows.append(
+            {
+                "galaxy": row["galaxy"],
+                "lockedRoute": row["lockedRoute"],
+                "gapClass": audit_row.get("gapClass", ""),
+                "nextLawTarget": audit_row.get("nextLawTarget", ""),
+                "v18Rmse": row["v18Rmse"],
+                "candidateRmse": row["candidateRmse"],
+                "nfwPriorRmse": nfw_prior_rmse,
+                "v18MinusNfwPriorKmS": parse_float(row["v18Rmse"]) - nfw_prior_rmse,
+                "candidateMinusNfwPriorKmS": parse_float(row["candidateRmse"]) - nfw_prior_rmse,
+                "gapClosedVsV18KmS": parse_float(row["v18Rmse"]) - parse_float(row["candidateRmse"]),
+                "priorityNfwGapCase": row["priorityNfwGapCase"],
+                "branchHits": row["branchHits"],
+            }
+        )
+    competitor_gap_rows.sort(key=lambda row: (-parse_float(row["v18MinusNfwPriorKmS"], 0.0), row["galaxy"]))
+
+    protected_rows = [
+        {
+            "galaxy": row["galaxy"],
+            "lockedRoute": row["lockedRoute"],
+            "v18Rmse": row["v18Rmse"],
+            "candidateRmse": row["candidateRmse"],
+            "protectedRegressionKmS": row["protectedRegressionKmS"],
+            "branchHits": row["branchHits"],
+            "anyActivation": row["anyActivation"],
+        }
+        for row in rows
+        if row["set"] == "clean-protected" and (parse_float(row["protectedRegressionKmS"], 0.0) > 0.0 or parse_float(row["anyActivation"], 0.0) >= 0.20)
+    ]
+    score_rows = [
+        {"metric": key, "value": value}
+        for key, value in {
+            "v18ReferenceHighGainPct": lock_capsule["summary"]["cleanHighGainPct"],
+            "v18ReferenceCleanGainPct": lock_capsule["summary"]["cleanGainPct"],
+            "v18ReferenceHighAbove20": lock_capsule["summary"]["cleanHighAbove20Native"],
+            "v18ReferenceProtectedRegressionKmS": lock_capsule["summary"]["maxProtectedRegressionKmS"],
+            "candidateHighGainVsV18Pct": all_metric["highGainVsV18Pct"],
+            "candidatePriorityGainVsV18Pct": all_metric["priorityGainVsV18Pct"],
+            "holdoutHighGainVsV18Pct": holdout_metric["highGainVsV18Pct"],
+            "holdoutPriorityGainVsV18Pct": holdout_metric["priorityGainVsV18Pct"],
+            "candidateHighAbove20": all_metric["highAbove20Candidate"],
+            "candidateProtectedMaxRegressionKmS": all_metric["protectedMaxRegressionKmS"],
+            "weakSystematicsLeakage": all_metric["weakSystematicsLeakage"],
+        }.items()
+    ]
+    same_active_p95 = max(
+        [parse_float(row["priorityGainVsV18Pct"]) for row in null_rows if row.get("nullType") == "same-active-count-random"] or [0.0]
+    )
+    branch_shuffle_p95 = max(
+        [parse_float(row["priorityGainVsV18Pct"]) for row in null_rows if row.get("nullType") == "branch-label-shuffle"] or [0.0]
+    )
+    null_margin = all_metric["priorityGainVsV18Pct"] - max(same_active_p95, branch_shuffle_p95)
+    passes = {
+        "highGainOverV18AtLeast5Pct": all_metric["highGainVsV18Pct"] >= 5.0,
+        "priorityGainAtLeast15Pct": all_metric["priorityGainVsV18Pct"] >= 15.0,
+        "highAbove20Zero": all_metric["highAbove20Candidate"] == 0,
+        "protectedRegressionBelow3": all_metric["protectedMaxRegressionKmS"] < 3.0,
+        "weakLeakageZero": all_metric["weakSystematicsLeakage"] == 0,
+        "nullMarginAtLeast10Pct": null_margin >= 10.0,
+    }
+    verdict = "v18.18 candidate improves v18.10" if all(passes.values()) else "v18.18 candidate not promoted"
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", rows)
+    write_csv(out_dir / f"{prefix}_branch_ledger.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_holdout_replay.csv", holdout_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_competitor_gap.csv", competitor_gap_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_strength_trials.csv", trial_rows[:40])
+
+    formula = {
+        "candidateId": "observed-state-response-v18.18-nfw-gap-candidate",
+        "status": verdict,
+        "baseLaw": "locked v18.10 native support expression",
+        "selectedStrengths": selected_strengths,
+        "allowedInputs": [
+            "locked route",
+            "memoryLoad",
+            "u_0.75",
+            "u_out",
+            "u_max",
+            "fGasOut",
+            "h/rOut",
+            "gas/disk/bulge profile shares",
+            "bar profile curvature",
+            "point density",
+        ],
+        "forbiddenInputs": ["galaxy names", "NFW parameters", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+        "responseFamilies": [
+            "low-load outer/mid support completion",
+            "support safety/suppression",
+            "radial transfer/shape",
+        ],
+        "gateNote": "Thresholds are fixed in code; grid search selects only family strengths on the clean train split.",
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    report = [
+        "# MTS v18.18 NFW-Gap Closure Candidate",
+        "",
+        "This mode starts from locked v18.10 and tests a constrained state-gated extension against the remaining NFW-prior gap. NFW is used only as a competitor ceiling, not as a formula input.",
+        "",
+        "## Verdict",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Selected strengths: completion `{fmt(selected_strengths['completion'])}`, low-load suppression `{fmt(selected_strengths['lowSuppression'])}`, buffered suppression `{fmt(selected_strengths['bufferedSuppression'])}`, transfer `{fmt(selected_strengths['transfer'])}`.",
+        f"- Clean high-RMSE gain over v18.10: `{fmt(all_metric['highGainVsV18Pct'])}%`.",
+        f"- Priority NFW-gap gain over v18.10: `{fmt(all_metric['priorityGainVsV18Pct'])}%`.",
+        f"- Holdout high-RMSE gain over v18.10: `{fmt(holdout_metric['highGainVsV18Pct'])}%`.",
+        f"- Holdout priority-gap gain over v18.10: `{fmt(holdout_metric['priorityGainVsV18Pct'])}%`.",
+        f"- Candidate high above 20 km/s: `{all_metric['highAbove20Candidate']}`.",
+        f"- Protected max regression: `{fmt(all_metric['protectedMaxRegressionKmS'])}` km/s.",
+        f"- Null margin on priority gap: `{fmt(null_margin)}` percentage points.",
+        "",
+        "## Acceptance Gates",
+        "",
+        "| Gate | Pass |",
+        "| --- | ---: |",
+    ]
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.extend(
+        [
+            "",
+            "## Branch Ledger",
+            "",
+            "| Branch | Active high | Active priority | Active protected | Priority gain | Protected max regression |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in branch_rows:
+        report.append(
+            f"| {row['branch']} | {row['activeCleanHighCount']} | {row['activePriorityGapCount']} | {row['activeProtectedCount']} | {fmt(row['priorityGainVsV18Pct'])}% | {fmt(row['protectedMaxRegressionKmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Top Remaining/Filled Competitor Gaps",
+            "",
+            "| Galaxy | Gap class | v18 RMSE | candidate RMSE | NFW-prior RMSE | gap closed | branch |",
+            "| --- | --- | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for row in competitor_gap_rows[:16]:
+        report.append(
+            f"| {row['galaxy']} | {row['gapClass']} | {fmt(row['v18Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['nfwPriorRmse'])} | {fmt(row['gapClosedVsV18KmS'])} | {row['branchHits']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "- If the verdict is not promoted, v18.10 remains the release candidate.",
+            "- A failed v18.18 still identifies which of completion, suppression, or radial transfer has useful signal without broadening the law.",
+            "- No browser preset is changed by this mode.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-v18-nfw-gap-candidate-v1",
+        "verdict": verdict,
+        "selectedStrengths": selected_strengths,
+        "summary": {
+            "highGainVsV18Pct": all_metric["highGainVsV18Pct"],
+            "priorityGainVsV18Pct": all_metric["priorityGainVsV18Pct"],
+            "holdoutHighGainVsV18Pct": holdout_metric["highGainVsV18Pct"],
+            "holdoutPriorityGainVsV18Pct": holdout_metric["priorityGainVsV18Pct"],
+            "protectedMaxRegressionKmS": all_metric["protectedMaxRegressionKmS"],
+            "highAbove20Candidate": all_metric["highAbove20Candidate"],
+            "weakSystematicsLeakage": all_metric["weakSystematicsLeakage"],
+            "nullMarginPriorityPct": null_margin,
+            "passes": passes,
+        },
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_branch_ledger.csv",
+            f"{prefix}_holdout_replay.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_competitor_gap.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18nfwgapcandidate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NFW_GAP_CANDIDATE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_nfw_gap_candidate_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.18 NFW-gap candidate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high_gain_vs_v18={fmt(summary['highGainVsV18Pct'])}%",
+                f"priority_gain_vs_v18={fmt(summary['priorityGainVsV18Pct'])}%",
+                f"protected={fmt(summary['protectedMaxRegressionKmS'])}",
+                f"above20={summary['highAbove20Candidate']}",
+                f"null_margin={fmt(summary['nullMarginPriorityPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 NFW-gap candidate to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -75853,6 +76567,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18competitorfigures",
             "v18nfwgapaudit",
             "observedstatev18nfwgapaudit",
+            "v18nfwgapcandidate",
+            "observedstatev18nfwgapcandidate",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -76135,6 +76851,8 @@ def main() -> None:
         cmd_v18competitorfigures(args)
     elif args.mode in {"v18nfwgapaudit", "observedstatev18nfwgapaudit"}:
         cmd_v18nfwgapaudit(args)
+    elif args.mode in {"v18nfwgapcandidate", "observedstatev18nfwgapcandidate"}:
+        cmd_v18nfwgapcandidate(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
