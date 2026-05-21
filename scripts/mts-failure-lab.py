@@ -178,6 +178,7 @@ DEFAULT_OBSERVED_STATE_V18_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-re
 DEFAULT_OBSERVED_STATE_V18_RELEASE_MATERIALS_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-materials-v1"
 DEFAULT_OBSERVED_STATE_V18_RELEASE_COMPRESSION_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-compression-v1"
 DEFAULT_OBSERVED_STATE_V18_FAMILY_NATIVE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-family-native-v1"
+DEFAULT_OBSERVED_STATE_V18_FAMILY_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-family-discriminator-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -61376,6 +61377,753 @@ def cmd_v18familynative(args: argparse.Namespace) -> None:
     print(f"Wrote v18.12 family-native audit to {out_dir.resolve()}")
 
 
+V18_13_DISCRIMINATOR_FEATURES = [
+    "memoryLoad",
+    "u075",
+    "uOut",
+    "uMax",
+    "LgapOverH",
+    "hOverRout",
+    "leffOverH",
+    "rOutOverH",
+    "fGasOut",
+    "innerGasShare",
+    "midGasShare",
+    "outerGasShare",
+    "innerDiskShare",
+    "midDiskShare",
+    "outerDiskShare",
+    "innerBulgeShare",
+    "midBulgeShare",
+    "outerBulgeShare",
+    "barInnerOuter",
+    "barMidOuter",
+    "barCurv",
+    "pointDensity",
+]
+
+V18_13_RULE_STRATEGIES = {
+    "one-feature-strict": {
+        "promotable": True,
+        "protectedMode": "no-active-protected",
+        "notes": "one secondary state/profile discriminator per family; rejects rules that activate any protected training case",
+    },
+    "one-feature-no-regression": {
+        "promotable": True,
+        "protectedMode": "no-protected-regression",
+        "notes": "one secondary state/profile discriminator per family; allows protected activation only when the training score does not regress",
+    },
+    "one-feature-gain-seeking": {
+        "promotable": False,
+        "protectedMode": "penalized",
+        "notes": "diagnostic high-gain track with protected penalties; not promotable unless protections also pass",
+    },
+}
+
+V18_13_FAMILY_FEATURES = {
+    "compact low-load boundary response": ["fGasOut", "outerGasShare", "outerDiskShare", "barMidOuter", "leffOverH"],
+    "low-load route-edge transition response": ["fGasOut", "outerGasShare", "outerDiskShare", "memoryLoad", "uOut", "barInnerOuter"],
+    "gas-memory / gas-rich response": ["leffOverH", "uOut", "memoryLoad", "pointDensity", "outerGasShare"],
+    "buffered bulge-shear response": ["innerBulgeShare", "barInnerOuter", "fGasOut", "outerBulgeShare", "innerDiskShare"],
+    "buffered shelf/curvature response": ["outerDiskShare", "outerGasShare", "fGasOut", "midDiskShare", "barCurv"],
+}
+
+
+def observed_state_v1813_reference_rows(
+    clean_curves: list[dict],
+    high_names: set[str],
+    fit: dict,
+    amp_cap: float,
+) -> list[dict]:
+    rows = observed_state_v1812_family_reference_rows(clean_curves, high_names, fit, amp_cap)
+    curves_by_name = {curve["name"]: curve for curve in clean_curves}
+    for row in rows:
+        curve = curves_by_name[row["galaxy"]]
+        values = observed_state_v18_state_values(curve)
+        for feature in V18_13_DISCRIMINATOR_FEATURES:
+            row[feature] = values.get(feature, math.nan)
+    return rows
+
+
+def observed_state_v1813_quantile_grid(values: list[float], fractions: list[float]) -> list[float]:
+    clean = [value for value in values if math.isfinite(value)]
+    if not clean:
+        return []
+    grid = {v19_quantile(clean, fraction) for fraction in fractions}
+    grid.update({min(clean), max(clean), safe_median(clean)})
+    return sorted(value for value in grid if math.isfinite(value))
+
+
+def observed_state_v1813_drive_thresholds(rows: list[dict], family: str, train_names: set[str], config: dict) -> list[float]:
+    drive_key = config["driveKey"]
+    train_rows = [row for row in rows if row["galaxy"] in train_names]
+    target_rows = [row for row in train_rows if row["set"] == "clean-high-rmse" and row["responseFamily"] == family]
+    target_drives = [parse_float(row.get(drive_key), math.nan) for row in target_rows]
+    all_drives = [parse_float(row.get(drive_key), math.nan) for row in train_rows]
+    values = {0.0, 0.10, 0.25, 0.40}
+    values.update(observed_state_v1813_quantile_grid(target_drives, [0.3, 0.5, 0.7]))
+    values.update(observed_state_v1813_quantile_grid(all_drives, [0.85]))
+    values.add(parse_float(config.get("recallThreshold"), 1.000001))
+    values.add(parse_float(config.get("safeThreshold"), 1.000001))
+    return sorted(value for value in values if math.isfinite(value) and 0.0 <= value <= 1.000001)
+
+
+def observed_state_v1813_feature_thresholds(rows: list[dict], train_names: set[str], feature: str) -> list[float]:
+    train_values = [parse_float(row.get(feature), math.nan) for row in rows if row["galaxy"] in train_names]
+    return observed_state_v1813_quantile_grid(train_values, [0.3, 0.5, 0.7])
+
+
+def observed_state_v1813_rule_id(rule: dict) -> str:
+    feature = rule.get("feature", "none")
+    if feature == "none":
+        return f"{safe_file_stem(rule['family'])}-drive-{fmt(rule['driveThreshold'], 3)}"
+    return (
+        f"{safe_file_stem(rule['family'])}-drive-{fmt(rule['driveThreshold'], 3)}-"
+        f"{safe_file_stem(feature)}-{rule['direction']}-{fmt(rule['featureThreshold'], 3)}"
+    )
+
+
+def observed_state_v1813_rule_fires(row: dict, rule: dict) -> bool:
+    drive = parse_float(row.get(rule["driveKey"]), 0.0)
+    if drive < parse_float(rule["driveThreshold"], 1.000001):
+        return False
+    feature = rule.get("feature", "none")
+    if feature == "none":
+        return True
+    value = parse_float(row.get(feature), math.nan)
+    threshold = parse_float(rule.get("featureThreshold"), math.nan)
+    if not math.isfinite(value) or not math.isfinite(threshold):
+        return False
+    if rule.get("direction") == "ge":
+        return value >= threshold
+    return value <= threshold
+
+
+def observed_state_v1813_candidate_score_cache(clean_curves: list[dict], configs: dict[str, dict]) -> dict[str, dict[str, dict]]:
+    cache: dict[str, dict[str, dict]] = {}
+    for family, config in configs.items():
+        amp = parse_float(config.get("amp"), 1.0)
+        q_value = parse_float(config.get("q"), Q_DEFAULT)
+        cache[family] = {curve["name"]: score_curve_with_params(curve, amp, q_value) for curve in clean_curves}
+    return cache
+
+
+def observed_state_v1813_score_rows_for_rules(
+    rows: list[dict],
+    row_names: set[str],
+    rules_by_family: dict[str, dict],
+    baseline_scores: dict[str, dict],
+    family_score_cache: dict[str, dict[str, dict]],
+    curves_by_name: dict[str, dict],
+) -> tuple[list[tuple[dict, dict, dict]], list[dict]]:
+    paired = []
+    case_rows = []
+    for row in rows:
+        name = row["galaxy"]
+        if name not in row_names:
+            continue
+        active = []
+        for family, rule in rules_by_family.items():
+            if observed_state_v1813_rule_fires(row, rule):
+                drive = parse_float(row.get(rule["driveKey"]), 0.0)
+                drive_threshold = parse_float(rule.get("driveThreshold"), 1.000001)
+                denom = max(1e-9, 1.0 - min(drive_threshold, 1.0))
+                active.append(((drive - drive_threshold) / denom, drive, family, rule))
+        if active:
+            _margin, drive, family, rule = max(active, key=lambda item: (item[0], item[1]))
+            candidate = dict(family_score_cache[family][name])
+            candidate_family = family
+            active_rule = observed_state_v1813_rule_id(rule)
+        else:
+            candidate = dict(baseline_scores[name])
+            candidate_family = "canonical fallback"
+            drive = 0.0
+            active_rule = ""
+        baseline = baseline_scores[name]
+        curve = curves_by_name[name]
+        paired.append((curve, baseline, candidate))
+        case_rows.append(
+            {
+                "galaxy": name,
+                "set": row["set"],
+                "lockedRoute": row.get("lockedRoute", ""),
+                "referenceFamily": row.get("responseFamily", ""),
+                "candidateFamily": candidate_family,
+                "candidateRule": active_rule,
+                "familyDrive": drive,
+                "baselineRmse": baseline["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "gainKmS": baseline["rmse"] - candidate["rmse"],
+                "candidateRoute": candidate.get("candidateRoute", ""),
+                "protectedRegressionKmS": max(0.0, candidate["rmse"] - baseline["rmse"]) if row["set"] == "clean-protected" else 0.0,
+                "stillAbove20": candidate["rmse"] >= 20.0 if row["set"] == "clean-high-rmse" else "",
+            }
+        )
+    return paired, case_rows
+
+
+def observed_state_v1813_rule_metric(
+    rows: list[dict],
+    row_names: set[str],
+    rule: dict,
+    high_names: set[str],
+    baseline_scores: dict[str, dict],
+    family_score_cache: dict[str, dict[str, dict]],
+    curves_by_name: dict[str, dict],
+) -> dict:
+    paired, case_rows = observed_state_v1813_score_rows_for_rules(
+        rows,
+        row_names,
+        {rule["family"]: rule},
+        baseline_scores,
+        family_score_cache,
+        curves_by_name,
+    )
+    metric = observed_state_v1803_track_summary(paired, high_names)
+    active_rows = [row for row in case_rows if row["candidateFamily"] != "canonical fallback"]
+    active_target_rows = [
+        row
+        for row in active_rows
+        if row["set"] == "clean-high-rmse" and row["referenceFamily"] == rule["family"]
+    ]
+    active_wrong_high_rows = [
+        row
+        for row in active_rows
+        if row["set"] == "clean-high-rmse" and row["referenceFamily"] != rule["family"]
+    ]
+    active_protected_rows = [row for row in active_rows if row["set"] == "clean-protected"]
+    target_count = sum(
+        1
+        for row in rows
+        if row["galaxy"] in row_names and row["set"] == "clean-high-rmse" and row["responseFamily"] == rule["family"]
+    )
+    target_gain = sum(parse_float(row["gainKmS"], 0.0) for row in active_target_rows)
+    metric.update(
+        {
+            "activeCount": len(active_rows),
+            "activeTargetHighCount": len(active_target_rows),
+            "activeWrongHighCount": len(active_wrong_high_rows),
+            "activeProtectedCount": len(active_protected_rows),
+            "targetHighCount": target_count,
+            "targetRecallPct": 100.0 * len(active_target_rows) / max(target_count, 1),
+            "activeTargetGainKmS": target_gain,
+            "maxActiveProtectedRegressionKmS": max(
+                [parse_float(row["protectedRegressionKmS"], 0.0) for row in active_protected_rows] or [0.0]
+            ),
+        }
+    )
+    return metric
+
+
+def observed_state_v1813_rule_utility(metric: dict, strategy: str) -> float:
+    protected_mode = V18_13_RULE_STRATEGIES[strategy]["protectedMode"]
+    if metric["activeTargetHighCount"] <= 0:
+        return -1e12
+    if protected_mode == "no-active-protected" and metric["activeProtectedCount"] > 0:
+        return -1e11 - metric["activeProtectedCount"]
+    if protected_mode == "no-protected-regression" and metric["maxActiveProtectedRegressionKmS"] > 1e-9:
+        return -1e10 - 100.0 * metric["maxActiveProtectedRegressionKmS"]
+    return (
+        metric["activeTargetGainKmS"]
+        + 0.15 * metric["targetRecallPct"]
+        - 8.0 * metric["activeWrongHighCount"]
+        - 5.0 * metric["activeProtectedCount"]
+        - 25.0 * max(0.0, metric["maxActiveProtectedRegressionKmS"])
+        - 1.0 * metric["highAbove20"]
+    )
+
+
+def observed_state_v1813_candidate_rules(
+    rows: list[dict],
+    family: str,
+    config: dict,
+    train_names: set[str],
+) -> list[dict]:
+    drive_thresholds = observed_state_v1813_drive_thresholds(rows, family, train_names, config)
+    rules = []
+    for drive_threshold in drive_thresholds:
+        rules.append(
+            {
+                "family": family,
+                "driveKey": config["driveKey"],
+                "feature": "none",
+                "direction": "any",
+                "driveThreshold": drive_threshold,
+                "featureThreshold": "",
+                "amp": config["amp"],
+                "q": config["q"],
+            }
+        )
+        for feature in V18_13_FAMILY_FEATURES.get(family, V18_13_DISCRIMINATOR_FEATURES):
+            for threshold in observed_state_v1813_feature_thresholds(rows, train_names, feature):
+                for direction in ["ge", "le"]:
+                    rules.append(
+                        {
+                            "family": family,
+                            "driveKey": config["driveKey"],
+                            "feature": feature,
+                            "direction": direction,
+                            "driveThreshold": drive_threshold,
+                            "featureThreshold": threshold,
+                            "amp": config["amp"],
+                            "q": config["q"],
+                        }
+                    )
+    return rules
+
+
+def observed_state_v1813_select_rules(
+    rows: list[dict],
+    train_names: set[str],
+    high_names: set[str],
+    configs: dict[str, dict],
+    baseline_scores: dict[str, dict],
+    family_score_cache: dict[str, dict[str, dict]],
+    curves_by_name: dict[str, dict],
+    strategy: str,
+) -> tuple[dict[str, dict], list[dict]]:
+    selected: dict[str, dict] = {}
+    rule_rows: list[dict] = []
+    for family, config in configs.items():
+        target_count = sum(
+            1
+            for row in rows
+            if row["galaxy"] in train_names and row["set"] == "clean-high-rmse" and row["responseFamily"] == family
+        )
+        if target_count <= 0:
+            continue
+        best_rule = None
+        best_metric = None
+        best_utility = -1e99
+        for rule in observed_state_v1813_candidate_rules(rows, family, config, train_names):
+            metric = observed_state_v1813_rule_metric(
+                rows,
+                train_names,
+                rule,
+                high_names,
+                baseline_scores,
+                family_score_cache,
+                curves_by_name,
+            )
+            utility = observed_state_v1813_rule_utility(metric, strategy)
+            if utility > best_utility:
+                best_rule = rule
+                best_metric = metric
+                best_utility = utility
+        if best_rule is None or best_metric is None or best_utility <= -1e9:
+            continue
+        best_rule = dict(best_rule)
+        best_rule["ruleId"] = observed_state_v1813_rule_id(best_rule)
+        best_rule["trainUtility"] = best_utility
+        selected[family] = best_rule
+        rule_rows.append(
+            {
+                "strategy": strategy,
+                "family": family,
+                "ruleId": best_rule["ruleId"],
+                "feature": best_rule["feature"],
+                "direction": best_rule["direction"],
+                "driveThreshold": best_rule["driveThreshold"],
+                "featureThreshold": best_rule["featureThreshold"],
+                "amp": best_rule["amp"],
+                "q": best_rule["q"],
+                "trainUtility": best_utility,
+                "trainTargetHighCount": best_metric["targetHighCount"],
+                "trainActiveTargetHighCount": best_metric["activeTargetHighCount"],
+                "trainTargetRecallPct": best_metric["targetRecallPct"],
+                "trainActiveWrongHighCount": best_metric["activeWrongHighCount"],
+                "trainActiveProtectedCount": best_metric["activeProtectedCount"],
+                "trainMaxActiveProtectedRegressionKmS": best_metric["maxActiveProtectedRegressionKmS"],
+                "trainHighGainPct": best_metric["highGainPct"],
+                "trainHighAbove20": best_metric["highAbove20"],
+            }
+        )
+    return selected, rule_rows
+
+
+def observed_state_v1813_track_summary(
+    rows: list[dict],
+    names: set[str],
+    rules_by_family: dict[str, dict],
+    high_names: set[str],
+    baseline_scores: dict[str, dict],
+    family_score_cache: dict[str, dict[str, dict]],
+    curves_by_name: dict[str, dict],
+) -> tuple[dict, list[dict]]:
+    paired, case_rows = observed_state_v1813_score_rows_for_rules(
+        rows,
+        names,
+        rules_by_family,
+        baseline_scores,
+        family_score_cache,
+        curves_by_name,
+    )
+    metric = observed_state_v1803_track_summary(paired, high_names)
+    active_rows = [row for row in case_rows if row["candidateFamily"] != "canonical fallback"]
+    metric.update(
+        {
+            "activeFamilyHitCount": len(active_rows),
+            "activeHighHitCount": sum(1 for row in active_rows if row["set"] == "clean-high-rmse"),
+            "activeProtectedHitCount": sum(1 for row in active_rows if row["set"] == "clean-protected"),
+        }
+    )
+    return metric, case_rows
+
+
+def observed_state_v1813_random_null_rows(
+    seed: int,
+    rows: list[dict],
+    holdout_names: set[str],
+    rules_by_family: dict[str, dict],
+    high_names: set[str],
+    baseline_scores: dict[str, dict],
+    family_score_cache: dict[str, dict[str, dict]],
+    curves_by_name: dict[str, dict],
+) -> list[dict]:
+    rng = random.Random(f"v18.13-null:{seed}")
+    _, actual_cases = observed_state_v1813_track_summary(
+        rows,
+        holdout_names,
+        rules_by_family,
+        high_names,
+        baseline_scores,
+        family_score_cache,
+        curves_by_name,
+    )
+    family_counts: dict[str, int] = {}
+    for row in actual_cases:
+        if row["set"] == "clean-high-rmse" and row["candidateFamily"] != "canonical fallback":
+            family_counts[row["candidateFamily"]] = family_counts.get(row["candidateFamily"], 0) + 1
+    holdout_high = [row for row in rows if row["galaxy"] in holdout_names and row["set"] == "clean-high-rmse"]
+    null_rows: list[dict] = []
+    for null_idx in range(12):
+        selected: dict[str, str] = {}
+        available = holdout_high[:]
+        rng.shuffle(available)
+        for family, count in sorted(family_counts.items()):
+            for row in available[:count]:
+                selected[row["galaxy"]] = family
+            available = available[count:]
+        paired = []
+        for row in rows:
+            if row["galaxy"] not in holdout_names:
+                continue
+            name = row["galaxy"]
+            family = selected.get(name)
+            candidate = family_score_cache[family][name] if family else baseline_scores[name]
+            paired.append((curves_by_name[name], baseline_scores[name], candidate))
+        metric = observed_state_v1803_track_summary(paired, high_names)
+        null_rows.append(
+            {
+                "seed": seed,
+                "nullIndex": null_idx,
+                "nullType": "same-active-count-random-high",
+                "activeHighHitCount": sum(family_counts.values()),
+                "highGainPct": metric["highGainPct"],
+                "cleanGainPct": metric["cleanGainPct"],
+                "highAbove20": metric["highAbove20"],
+                "protectedWorseCount": metric["protectedWorseCount"],
+                "maxProtectedRegressionKmS": metric["maxProtectedRegressionKmS"],
+            }
+        )
+    return null_rows
+
+
+def write_observed_state_v18_family_discriminator_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_13_family_discriminator"
+    context = observed_state_candidate_context()
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+    redteam_dir = DEFAULT_OBSERVED_STATE_V18_REDTEAM_OUT
+    if not (redteam_dir / "mts_v18_redteam_scores.csv").exists():
+        write_observed_state_v18_redteam_artifacts(redteam_dir)
+    redteam_summary = read_csv_rows(redteam_dir / "mts_v18_redteam_scores.csv")[0]
+
+    rows = observed_state_v1813_reference_rows(clean_curves, high_names, fit, amp_cap)
+    configs = observed_state_v1812_family_configs(rows)
+    curves_by_name = {curve["name"]: curve for curve in clean_curves}
+    baseline_scores = {curve["name"]: score_curve(curve) for curve in clean_curves}
+    reference_scores = {
+        curve["name"]: observed_state_v1807_family_surface_score_curve(curve, fit, amp_cap)
+        for curve in clean_curves
+    }
+    reference_metric = observed_state_v1803_track_summary(
+        [(curve, baseline_scores[curve["name"]], reference_scores[curve["name"]]) for curve in clean_curves],
+        high_names,
+    )
+    family_score_cache = observed_state_v1813_candidate_score_cache(clean_curves, configs)
+
+    all_names = {curve["name"] for curve in clean_curves}
+    score_rows: list[dict] = []
+    case_rows: list[dict] = []
+    rule_rows: list[dict] = []
+    seed_rows: list[dict] = []
+    seed_case_rows: list[dict] = []
+    null_rows: list[dict] = []
+
+    full_track_data: dict[str, tuple[dict, list[dict], dict[str, dict]]] = {}
+    for strategy in V18_13_RULE_STRATEGIES:
+        rules, selected_rows = observed_state_v1813_select_rules(
+            rows,
+            all_names,
+            high_names,
+            configs,
+            baseline_scores,
+            family_score_cache,
+            curves_by_name,
+            strategy,
+        )
+        metric, track_case_rows = observed_state_v1813_track_summary(
+            rows,
+            all_names,
+            rules,
+            high_names,
+            baseline_scores,
+            family_score_cache,
+            curves_by_name,
+        )
+        full_track_data[strategy] = (metric, track_case_rows, rules)
+        rule_rows.extend(selected_rows)
+        for row in track_case_rows:
+            case_rows.append({"track": strategy, **row})
+        high_retention = 100.0 * metric["highGainPct"] / max(parse_float(redteam_summary["cleanHighGainPct"]), 1e-9)
+        clean_retention = 100.0 * metric["cleanGainPct"] / max(parse_float(redteam_summary["cleanGainPct"]), 1e-9)
+        score_rows.append(
+            {
+                "track": strategy,
+                "promotableTrack": V18_13_RULE_STRATEGIES[strategy]["promotable"],
+                "highGainPct": metric["highGainPct"],
+                "cleanGainPct": metric["cleanGainPct"],
+                "highGainRetentionPct": high_retention,
+                "cleanGainRetentionPct": clean_retention,
+                "highAbove20": metric["highAbove20"],
+                "protectedWorseCount": metric["protectedWorseCount"],
+                "maxProtectedRegressionKmS": metric["maxProtectedRegressionKmS"],
+                "activeFamilyHitCount": metric["activeFamilyHitCount"],
+                "activeHighHitCount": metric["activeHighHitCount"],
+                "activeProtectedHitCount": metric["activeProtectedHitCount"],
+                "selectedRuleCount": len(rules),
+                "notes": V18_13_RULE_STRATEGIES[strategy]["notes"],
+            }
+        )
+
+    for seed in OBSERVED_STATE_V1800_REPLAY_SEEDS:
+        train_names, holdout_names = observed_state_split(clean_curves, seed, HOLDOUT_FRACTION)
+        for strategy in V18_13_RULE_STRATEGIES:
+            rules, selected_rows = observed_state_v1813_select_rules(
+                rows,
+                train_names,
+                high_names,
+                configs,
+                baseline_scores,
+                family_score_cache,
+                curves_by_name,
+                strategy,
+            )
+            metric, track_case_rows = observed_state_v1813_track_summary(
+                rows,
+                holdout_names,
+                rules,
+                high_names,
+                baseline_scores,
+                family_score_cache,
+                curves_by_name,
+            )
+            for case_row in track_case_rows:
+                seed_case_rows.append({"seed": seed, "track": strategy, **case_row})
+            null_batch = observed_state_v1813_random_null_rows(
+                seed,
+                rows,
+                holdout_names,
+                rules,
+                high_names,
+                baseline_scores,
+                family_score_cache,
+                curves_by_name,
+            )
+            null_rows.extend({"track": strategy, **row} for row in null_batch)
+            median_null_high = safe_median(parse_float(row["highGainPct"]) for row in null_batch)
+            seed_rows.append(
+                {
+                    "seed": seed,
+                    "track": strategy,
+                    "holdoutCount": len(holdout_names),
+                    "selectedRuleCount": len(rules),
+                    "holdoutHighGainPct": metric["highGainPct"],
+                    "holdoutCleanGainPct": metric["cleanGainPct"],
+                    "holdoutHighAbove20": metric["highAbove20"],
+                    "holdoutProtectedWorseCount": metric["protectedWorseCount"],
+                    "holdoutMaxProtectedRegressionKmS": metric["maxProtectedRegressionKmS"],
+                    "holdoutActiveHighHitCount": metric["activeHighHitCount"],
+                    "holdoutActiveProtectedHitCount": metric["activeProtectedHitCount"],
+                    "medianRandomNullHighGainPct": median_null_high,
+                    "nullMarginPct": metric["highGainPct"] - median_null_high,
+                    "selectedRules": "; ".join(row["ruleId"] for row in selected_rows),
+                }
+            )
+
+    for row in score_rows:
+        strategy_seed_rows = [seed_row for seed_row in seed_rows if seed_row["track"] == row["track"]]
+        strategy_null_rows = [null_row for null_row in null_rows if null_row["track"] == row["track"]]
+        median_holdout_high = safe_median(parse_float(seed_row["holdoutHighGainPct"]) for seed_row in strategy_seed_rows)
+        median_holdout_clean = safe_median(parse_float(seed_row["holdoutCleanGainPct"]) for seed_row in strategy_seed_rows)
+        median_null = safe_median(parse_float(null_row["highGainPct"]) for null_row in strategy_null_rows)
+        row["medianHoldoutHighGainPct"] = median_holdout_high
+        row["medianHoldoutCleanGainPct"] = median_holdout_clean
+        row["medianRandomNullHighGainPct"] = median_null
+        row["medianNullMarginPct"] = median_holdout_high - median_null
+        row["maxSeedProtectedRegressionKmS"] = max(
+            [parse_float(seed_row["holdoutMaxProtectedRegressionKmS"], 0.0) for seed_row in strategy_seed_rows] or [0.0]
+        )
+        row["maxSeedProtectedWorseCount"] = max(
+            [int(parse_float(seed_row["holdoutProtectedWorseCount"], 0.0)) for seed_row in strategy_seed_rows] or [0]
+        )
+        row["verdict"] = (
+            "compressed discriminator passed"
+            if parse_bool(row["promotableTrack"])
+            and row["highGainPct"] >= 60.0
+            and row["cleanGainPct"] >= 38.0
+            and row["highAbove20"] <= 2
+            and row["protectedWorseCount"] == 0
+            and median_holdout_high >= 55.0
+            and row["medianNullMarginPct"] >= 10.0
+            and row["maxSeedProtectedRegressionKmS"] <= 0.0
+            else "compressed discriminator blocked"
+        )
+
+    promotable = [row for row in score_rows if parse_bool(row["promotableTrack"])]
+    best = max(promotable, key=lambda row: parse_float(row["medianHoldoutHighGainPct"], -1e9)) if promotable else {}
+    passes = bool(best) and best.get("verdict") == "compressed discriminator passed"
+    verdict = "v18.13 compressed discriminator passed" if passes else "v18.13 protected-overlap discriminator blocked"
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_seed_replay.csv", seed_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_seed_case_ledger.csv", seed_case_rows)
+    protected_seed_rows = [
+        row for row in seed_case_rows if row["set"] == "clean-protected" and parse_float(row["protectedRegressionKmS"], 0.0) > 1e-9
+    ]
+    write_csv(out_dir / f"{prefix}_protected_holdout_regressions.csv", protected_seed_rows)
+    write_csv(out_dir / f"{prefix}_rule_ledger.csv", rule_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    formula = {
+        "candidateId": "observed-state-response-v18.13-family-overlap-discriminator",
+        "status": "passed" if passes else "blocked",
+        "mechanism": "v18.12 six-family native compression plus one secondary pre-residual state/profile discriminator per family",
+        "selectedTrack": best.get("track", ""),
+        "selectedRules": full_track_data.get(best.get("track", ""), ({}, [], {}))[2] if best else {},
+        "referenceCandidate": "v18.10 native-gated browser law",
+        "browserCanUseThisExpression": passes,
+        "browserUpdated": False,
+        "forbiddenInputsUsed": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.13 Family Overlap Discriminator",
+        "",
+        "This mode tries to repair the v18.12 compression failure by adding one secondary pre-residual state/profile discriminator to each v18 family drive. It is a compression/parity test, not a new physics branch.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Best promotable track: `{best.get('track', '')}`.",
+        f"- Full high-RMSE gain: `{fmt(best.get('highGainPct', math.nan))}%`.",
+        f"- Median holdout high-RMSE gain: `{fmt(best.get('medianHoldoutHighGainPct', math.nan))}%`.",
+        f"- Median random-null high-RMSE gain: `{fmt(best.get('medianRandomNullHighGainPct', math.nan))}%`.",
+        f"- Median null margin: `{fmt(best.get('medianNullMarginPct', math.nan))}` points.",
+        f"- Full protected worse count: `{best.get('protectedWorseCount', '')}`.",
+        f"- Max seed protected regression: `{fmt(best.get('maxSeedProtectedRegressionKmS', math.nan))}` km/s.",
+        f"- v18.10 reference high gain: `{fmt(reference_metric['highGainPct'])}%`.",
+        f"- v18.10 reference clean gain: `{fmt(reference_metric['cleanGainPct'])}%`.",
+        "",
+        "## Track Scores",
+        "",
+        "| Track | Full high gain | Median holdout high | Median null | Null margin | Above20 | Protected worse | Verdict |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['track']} | {fmt(row['highGainPct'])} | {fmt(row['medianHoldoutHighGainPct'])} | "
+            f"{fmt(row['medianRandomNullHighGainPct'])} | {fmt(row['medianNullMarginPct'])} | "
+            f"{row['highAbove20']} | {row['protectedWorseCount']} | {row['verdict']} |"
+        )
+    protected_names = sorted({row["galaxy"] for row in protected_seed_rows})
+    report.extend(
+        [
+            "",
+            "## Holdout Protected Regressions",
+            "",
+            f"- Protected holdout regression rows: `{len(protected_seed_rows)}`.",
+            f"- Protected galaxies hit in seed replay: `{'; '.join(protected_names) if protected_names else 'none'}`.",
+            "",
+            "## Interpretation",
+            "",
+            "If this mode is blocked, the reason is precise: a compact one-feature discriminator cannot yet reproduce the v18.10 high-RMSE repairs while preserving protected lookalikes and beating same-active-count nulls. The browser should remain on v18.10 native-gated release law, with v18.11 as the explanatory compression layer.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-observed-v18-family-discriminator-v1",
+        "candidateId": "observed-state-response-v18.13-family-overlap-discriminator",
+        "verdict": verdict,
+        "summary": {
+            "bestTrack": best.get("track", ""),
+            "bestFullHighGainPct": parse_float(best.get("highGainPct"), math.nan),
+            "bestMedianHoldoutHighGainPct": parse_float(best.get("medianHoldoutHighGainPct"), math.nan),
+            "bestMedianNullHighGainPct": parse_float(best.get("medianRandomNullHighGainPct"), math.nan),
+            "bestMedianNullMarginPct": parse_float(best.get("medianNullMarginPct"), math.nan),
+            "bestProtectedWorseCount": int(parse_float(best.get("protectedWorseCount"), 0.0)) if best else "",
+            "bestHighAbove20": int(parse_float(best.get("highAbove20"), 0.0)) if best else "",
+            "protectedHoldoutRegressionRows": len(protected_seed_rows),
+            "protectedHoldoutRegressionGalaxies": sorted({row["galaxy"] for row in protected_seed_rows}),
+            "v18_10ReferenceHighGainPct": reference_metric["highGainPct"],
+            "v18_10ReferenceCleanGainPct": reference_metric["cleanGainPct"],
+            "browserUpdated": False,
+            "weakSystematicsLeakage": 0,
+        },
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_seed_replay.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_seed_case_ledger.csv",
+            f"{prefix}_protected_holdout_regressions.csv",
+            f"{prefix}_rule_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18familydiscriminator(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_FAMILY_DISCRIMINATOR_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_family_discriminator_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.13 family overlap discriminator")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={summary['bestTrack']}",
+                f"full_high={fmt(summary['bestFullHighGainPct'])}%",
+                f"holdout_high={fmt(summary['bestMedianHoldoutHighGainPct'])}%",
+                f"null={fmt(summary['bestMedianNullHighGainPct'])}%",
+                f"margin={fmt(summary['bestMedianNullMarginPct'])}",
+                f"above20={summary['bestHighAbove20']}",
+                f"protected={summary['bestProtectedWorseCount']}",
+            ]
+        )
+    )
+    print(f"Wrote v18.13 family discriminator audit to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_paper_section_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     evidence_dir = DEFAULT_OBSERVED_STATE_V18_EVIDENCE_EXPORT_OUT
@@ -72925,6 +73673,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18lawcompression",
             "v18familynative",
             "observedstatev18familynative",
+            "v18familydiscriminator",
+            "observedstatev18familydiscriminator",
             "observedstatev18papersection",
             "observedstatev18docxbundle",
             "observedstatev18integrateddocx",
@@ -73194,6 +73944,8 @@ def main() -> None:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
         cmd_v18familynative(args)
+    elif args.mode in {"v18familydiscriminator", "observedstatev18familydiscriminator"}:
+        cmd_v18familydiscriminator(args)
     elif args.mode == "observedstatev18papersection":
         cmd_observedstatev18papersection(args)
     elif args.mode == "observedstatev18docxbundle":
