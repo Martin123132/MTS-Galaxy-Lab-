@@ -191,6 +191,7 @@ DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial
 DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial-phase-redteam-v1"
 DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BROWSER_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial-phase-browser-lock-v1"
 DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial-phase-benchmark-v1"
+DEFAULT_OBSERVED_STATE_V18_NFW_TAIL_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-tail-candidate-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -66225,6 +66226,651 @@ def cmd_v18radialphasebenchmark(args: argparse.Namespace) -> None:
     print(f"Wrote v18.21 competitor benchmark to {out_dir.resolve()}")
 
 
+V18_NFW_TAIL_LOW_GRID = [0.0, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5]
+V18_NFW_TAIL_BUFFERED_GRID = [0.0, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5]
+V18_NFW_TAIL_DENSE_GRID = [0.0, 0.3, 0.5, 0.7, 1.0, 1.3, 1.6]
+V18_NFW_TAIL_SEEDS = [20260511, 20260512, 20260513, 20260514, 20260515, 314159, 271828, 42, 12345]
+
+
+def v18_nfw_tail_priority_names() -> tuple[set[str], dict[str, dict]]:
+    benchmark_dir = DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BENCHMARK_OUT
+    priority_path = benchmark_dir / "mts_v18_radial_phase_benchmark_high_rmse_wins.csv"
+    if not priority_path.exists():
+        write_v18_radial_phase_benchmark_artifacts(benchmark_dir)
+    rows = read_csv_rows(priority_path)
+    priority = {
+        row["galaxy"]
+        for row in rows
+        if parse_float(row.get("v1821MinusNfwPriorKmS"), 0.0) >= 3.0
+    }
+    return priority, {row["galaxy"]: row for row in rows}
+
+
+def v18_nfw_tail_activations(curve: dict, table1_by_name: dict[str, dict]) -> tuple[dict[str, float], dict, dict]:
+    values = observed_state_values(curve)
+    mass = v18_official_mass_scale_features(curve, table1_by_name)
+    route = curve.get("lockedModelRoute", "")
+    low_diffuse_tail = (
+        route == "low-load"
+        and v18_nfw_gap_candidate_smooth(values["hOverRout"], 0.32, 0.44)
+        * v18_nfw_gap_candidate_smooth(1.35 - curve["memoryLoad"], 0.0, 0.55)
+        * v18_nfw_gap_candidate_smooth(curve["lockedModelUOut"], 0.39, 0.46)
+        * v18_nfw_gap_candidate_smooth(0.88 - curve["lockedModelUMax"], 0.0, 0.16)
+        * v18_nfw_gap_candidate_smooth(values["outerGasShare"], 0.42, 0.58)
+    )
+    buffered_sparse_tail = (
+        route == "buffered single-crossing"
+        and v18_nfw_gap_candidate_smooth(curve["lockedModelUMax"], 1.08, 1.28)
+        * v18_nfw_gap_candidate_smooth(values["hOverRout"], 0.18, 0.27)
+        * v18_nfw_gap_candidate_smooth(0.38 - values["outerGasShare"], 0.0, 0.16)
+        * v18_nfw_gap_candidate_smooth(-8.0 - values["barCurv"], 0.0, 18.0)
+        * v18_nfw_gap_candidate_smooth(20.0 - mass["mBar_1e9Msun"], 0.0, 14.0)
+        * v18_nfw_gap_candidate_smooth(2.0 - values["pointDensity"], 0.0, 1.1)
+    )
+    buffered_dense_tail = (
+        route == "buffered single-crossing"
+        and v18_nfw_gap_candidate_smooth(curve["lockedModelUMax"], 1.20, 1.50)
+        * v18_nfw_gap_candidate_smooth(0.12 - values["hOverRout"], 0.0, 0.08)
+        * v18_nfw_gap_candidate_smooth(values["pointDensity"], 2.0, 3.4)
+        * v18_nfw_gap_candidate_smooth(values["outerGasShare"], 0.42, 0.62)
+        * v18_nfw_gap_candidate_smooth(15.0 - mass["mBar_1e9Msun"], 0.0, 10.0)
+    )
+    acts = {
+        "lowDiffuseTailSuppression": clamp(parse_float(low_diffuse_tail), 0.0, 1.0),
+        "bufferedSparseTailSuppression": clamp(parse_float(buffered_sparse_tail), 0.0, 1.0),
+        "bufferedDenseTailSuppression": clamp(parse_float(buffered_dense_tail), 0.0, 1.0),
+    }
+    acts["anyActivation"] = max(acts.values())
+    return acts, values, mass
+
+
+def v18_nfw_tail_supports(
+    curve: dict,
+    v1821_supports: list[float],
+    strengths: dict[str, float],
+    table1_by_name: dict[str, dict],
+    forced_activations: dict[str, float] | None = None,
+) -> tuple[list[float], dict[str, float], dict, dict]:
+    if forced_activations is None:
+        acts, values, mass = v18_nfw_tail_activations(curve, table1_by_name)
+    else:
+        acts = {
+            "lowDiffuseTailSuppression": parse_float(forced_activations.get("lowDiffuseTailSuppression"), 0.0),
+            "bufferedSparseTailSuppression": parse_float(forced_activations.get("bufferedSparseTailSuppression"), 0.0),
+            "bufferedDenseTailSuppression": parse_float(forced_activations.get("bufferedDenseTailSuppression"), 0.0),
+        }
+        acts["anyActivation"] = max(acts.values())
+        values = observed_state_values(curve)
+        mass = v18_official_mass_scale_features(curve, table1_by_name)
+    output: list[float] = []
+    for point, support in zip(curve["points"], v1821_supports):
+        x_value = point.get("x", point["r"] / max(curve["rOut"], 1e-9))
+        outer_tail_shape = 0.35 + 0.75 * v18_nfw_gap_candidate_smooth(x_value, 0.28, 0.92)
+        broad_tail_shape = 0.70 + 0.35 * v18_nfw_gap_candidate_smooth(x_value, 0.12, 0.88)
+        factor = 1.0
+        factor -= strengths["lowDiffuseTail"] * acts["lowDiffuseTailSuppression"] * outer_tail_shape
+        factor -= strengths["bufferedSparseTail"] * acts["bufferedSparseTailSuppression"] * outer_tail_shape
+        factor -= strengths["bufferedDenseTail"] * acts["bufferedDenseTailSuppression"] * broad_tail_shape
+        output.append(max(0.0, support * clamp(factor, 0.15, 1.25)))
+    return output, acts, values, mass
+
+
+def v18_nfw_tail_score_rows(
+    base: dict,
+    strengths: dict[str, float],
+    priority_names: set[str],
+    split_names: tuple[set[str], set[str]] | None = None,
+    forced_by_name: dict[str, dict[str, float]] | None = None,
+) -> list[dict]:
+    train_names, holdout_names = split_names if split_names is not None else (set(), set())
+    rows: list[dict] = []
+    for curve in base["curves"]:
+        name = curve["name"]
+        v18_supports = [base["v18Lookup"][(name, index)] for index in range(len(curve["points"]))]
+        if name in base["weakNames"]:
+            v1821_supports = v18_supports[:]
+            candidate_supports = v1821_supports[:]
+            acts = {
+                "lowDiffuseTailSuppression": 0.0,
+                "bufferedSparseTailSuppression": 0.0,
+                "bufferedDenseTailSuppression": 0.0,
+                "anyActivation": 0.0,
+            }
+            profile_values = observed_state_values(curve)
+            mass_features = v18_official_mass_scale_features(curve, base["table1ByName"])
+            radial_hits = ""
+        else:
+            v1821_supports, v1821_acts, _profile, _mass, _legacy, _legacy_family, _official_family = v18_radial_phase_supports(
+                curve,
+                v18_supports,
+                base["baseStrengths"],
+                base["table1ByName"],
+            )
+            forced = forced_by_name.get(name) if forced_by_name else None
+            candidate_supports, acts, profile_values, mass_features = v18_nfw_tail_supports(
+                curve,
+                v1821_supports,
+                strengths,
+                base["table1ByName"],
+                forced,
+            )
+            radial_hits = "; ".join(
+                family for family in V18_RADIAL_PHASE_STRENGTHS if parse_float(v1821_acts.get(family), 0.0) >= 0.20
+            )
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        v1821_score = v18_competitor_support_score(curve, v1821_supports)
+        candidate = v18_competitor_support_score(curve, candidate_supports)
+        set_label = v18_competitor_set_label(name, base["weakNames"], base["highNames"])
+        split = "weak-excluded" if name in base["weakNames"] else ("holdout" if name in holdout_names else "train" if name in train_names else "")
+        branch_hits = [
+            key
+            for key in ["lowDiffuseTailSuppression", "bufferedSparseTailSuppression", "bufferedDenseTailSuppression"]
+            if parse_float(acts.get(key), 0.0) >= 0.05
+        ]
+        rows.append(
+            {
+                "galaxy": name,
+                "set": set_label,
+                "split": split,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "priorityNfwGapCase": name in priority_names,
+                "canonicalRmse": canonical["rmse"],
+                "v18_21Rmse": v1821_score["rmse"],
+                "v18Rmse": v1821_score["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "candidateRoute": candidate.get("candidateRoute", ""),
+                "v18_21Route": v1821_score.get("candidateRoute", ""),
+                "candidateGainVsV1821KmS": v1821_score["rmse"] - candidate["rmse"],
+                "candidateGainVsV1821Pct": pct_improvement(v1821_score["rmse"], candidate["rmse"]),
+                "candidateGainVsV18KmS": v1821_score["rmse"] - candidate["rmse"],
+                "candidateGainVsV18Pct": pct_improvement(v1821_score["rmse"], candidate["rmse"]),
+                "candidateGainVsCanonicalPct": pct_improvement(canonical["rmse"], candidate["rmse"]),
+                "candidateRegressionVsV1821KmS": max(0.0, candidate["rmse"] - v1821_score["rmse"]),
+                "candidateRegressionVsV18KmS": max(0.0, candidate["rmse"] - v1821_score["rmse"]),
+                "lowDiffuseTailSuppressionActivation": acts["lowDiffuseTailSuppression"],
+                "bufferedSparseTailSuppressionActivation": acts["bufferedSparseTailSuppression"],
+                "bufferedDenseTailSuppressionActivation": acts["bufferedDenseTailSuppression"],
+                "anyActivation": acts["anyActivation"],
+                "branchHits": "; ".join(branch_hits),
+                "v1821RadialPhaseFamilies": radial_hits,
+                "memoryLoad": curve["memoryLoad"],
+                "uOut": curve["lockedModelUOut"],
+                "uMax": curve["lockedModelUMax"],
+                "hOverRout": profile_values["hOverRout"],
+                "outerGasShare": profile_values["outerGasShare"],
+                "outerDiskShare": profile_values["outerDiskShare"],
+                "barCurv": profile_values["barCurv"],
+                "pointDensity": profile_values["pointDensity"],
+                "mBar_1e9Msun": mass_features["mBar_1e9Msun"],
+                "tableGasFraction": mass_features["tableGasFraction"],
+                "rHiOverRdisk": mass_features["rHiOverRdisk"],
+                "sigmaBar_1e9MsunPerKpc2": mass_features["sigmaBar_1e9MsunPerKpc2"],
+                "above20Candidate": candidate["rmse"] >= 20.0,
+                "above20V1821": v1821_score["rmse"] >= 20.0,
+                "protectedRegressionKmS": max(0.0, candidate["rmse"] - v1821_score["rmse"]) if set_label == "clean-protected" else "",
+            }
+        )
+    return rows
+
+
+def v18_nfw_tail_metric(rows: list[dict], split_filter: str | None = None) -> dict:
+    selected = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+    if split_filter:
+        selected = [row for row in selected if row.get("split") == split_filter]
+    high = [row for row in selected if row["set"] == "clean-high-rmse"]
+    protected = [row for row in selected if row["set"] == "clean-protected"]
+    priority = [row for row in high if parse_bool(row.get("priorityNfwGapCase"))]
+    v1821_high_mean = safe_mean(parse_float(row["v18_21Rmse"]) for row in high)
+    cand_high_mean = safe_mean(parse_float(row["candidateRmse"]) for row in high)
+    v1821_priority_mean = safe_mean(parse_float(row["v18_21Rmse"]) for row in priority)
+    cand_priority_mean = safe_mean(parse_float(row["candidateRmse"]) for row in priority)
+    protected_regs = [parse_float(row.get("protectedRegressionKmS"), 0.0) for row in protected]
+    return {
+        "split": split_filter or "all-clean",
+        "cleanHighCount": len(high),
+        "priorityGapCount": len(priority),
+        "protectedCount": len(protected),
+        "v1821HighMeanRmse": v1821_high_mean,
+        "candidateHighMeanRmse": cand_high_mean,
+        "highGainVsV1821Pct": pct_improvement(v1821_high_mean, cand_high_mean),
+        "v1821PriorityMeanRmse": v1821_priority_mean,
+        "candidatePriorityMeanRmse": cand_priority_mean,
+        "priorityGainVsV1821Pct": pct_improvement(v1821_priority_mean, cand_priority_mean),
+        "highAbove20Candidate": sum(1 for row in high if parse_bool(row["above20Candidate"])),
+        "protectedMaxRegressionKmS": max(protected_regs or [0.0]),
+        "protectedRegressionOver1Count": sum(1 for value in protected_regs if value > 1.0),
+        "weakSystematicsLeakage": sum(1 for row in rows if row["set"] == "weak-systematics-excluded" and parse_float(row["anyActivation"], 0.0) >= 0.05),
+        "activeHighCount": sum(1 for row in high if parse_float(row["anyActivation"], 0.0) >= 0.05),
+        "activeProtectedCount": sum(1 for row in protected if parse_float(row["anyActivation"], 0.0) >= 0.05),
+    }
+
+
+def v18_nfw_tail_select_strengths(
+    base: dict,
+    priority_names: set[str],
+    train_names: set[str],
+    holdout_names: set[str],
+) -> tuple[dict[str, float], list[dict]]:
+    trial_rows: list[dict] = []
+    best_strengths = {"lowDiffuseTail": 0.0, "bufferedSparseTail": 0.0, "bufferedDenseTail": 0.0}
+    best_utility = -math.inf
+    for low_strength in V18_NFW_TAIL_LOW_GRID:
+        for sparse_strength in V18_NFW_TAIL_BUFFERED_GRID:
+            for dense_strength in V18_NFW_TAIL_DENSE_GRID:
+                strengths = {
+                    "lowDiffuseTail": low_strength,
+                    "bufferedSparseTail": sparse_strength,
+                    "bufferedDenseTail": dense_strength,
+                }
+                rows = v18_nfw_tail_score_rows(base, strengths, priority_names, (train_names, holdout_names))
+                train_metric = v18_nfw_tail_metric(rows, "train")
+                holdout_metric = v18_nfw_tail_metric(rows, "holdout")
+                utility = (
+                    train_metric["priorityGainVsV1821Pct"]
+                    + 0.70 * train_metric["highGainVsV1821Pct"]
+                    - max(0.0, train_metric["protectedMaxRegressionKmS"] - 1.0) * 10.0
+                    - train_metric["highAbove20Candidate"] * 20.0
+                )
+                trial_rows.append(
+                    {
+                        "lowDiffuseTailStrength": low_strength,
+                        "bufferedSparseTailStrength": sparse_strength,
+                        "bufferedDenseTailStrength": dense_strength,
+                        "trainHighGainVsV1821Pct": train_metric["highGainVsV1821Pct"],
+                        "trainPriorityGainVsV1821Pct": train_metric["priorityGainVsV1821Pct"],
+                        "trainProtectedMaxRegressionKmS": train_metric["protectedMaxRegressionKmS"],
+                        "trainHighAbove20Candidate": train_metric["highAbove20Candidate"],
+                        "holdoutHighGainVsV1821Pct": holdout_metric["highGainVsV1821Pct"],
+                        "holdoutPriorityGainVsV1821Pct": holdout_metric["priorityGainVsV1821Pct"],
+                        "holdoutProtectedMaxRegressionKmS": holdout_metric["protectedMaxRegressionKmS"],
+                        "utility": utility,
+                    }
+                )
+                if (
+                    utility > best_utility
+                    and train_metric["protectedMaxRegressionKmS"] <= 1.0
+                    and train_metric["highAbove20Candidate"] == 0
+                ):
+                    best_utility = utility
+                    best_strengths = strengths
+    trial_rows.sort(
+        key=lambda row: (
+            -parse_float(row["utility"]),
+            row["lowDiffuseTailStrength"],
+            row["bufferedSparseTailStrength"],
+            row["bufferedDenseTailStrength"],
+        )
+    )
+    return best_strengths, trial_rows
+
+
+def v18_nfw_tail_null_rows(
+    base: dict,
+    strengths: dict[str, float],
+    priority_names: set[str],
+    reference_rows: list[dict],
+) -> list[dict]:
+    branch_columns = {
+        "lowDiffuseTailSuppression": "lowDiffuseTailSuppressionActivation",
+        "bufferedSparseTailSuppression": "bufferedSparseTailSuppressionActivation",
+        "bufferedDenseTailSuppression": "bufferedDenseTailSuppressionActivation",
+    }
+    clean_curves = base["cleanCurves"]
+    by_route = {
+        route: [curve["name"] for curve in clean_curves if curve["lockedModelRoute"] == route]
+        for route in sorted({curve["lockedModelRoute"] for curve in clean_curves})
+    }
+    route_for_branch = {
+        "lowDiffuseTailSuppression": "low-load",
+        "bufferedSparseTailSuppression": "buffered single-crossing",
+        "bufferedDenseTailSuppression": "buffered single-crossing",
+    }
+    actual = {
+        row["galaxy"]: {
+            branch: parse_float(row.get(column), 0.0)
+            for branch, column in branch_columns.items()
+        }
+        for row in reference_rows
+        if row["set"] != "weak-systematics-excluded"
+    }
+    active_values = {
+        branch: [
+            parse_float(row.get(column), 0.0)
+            for row in reference_rows
+            if row["set"] != "weak-systematics-excluded" and parse_float(row.get(column), 0.0) >= 0.05
+        ]
+        for branch, column in branch_columns.items()
+    }
+    output: list[dict] = []
+    for seed in V18_NFW_TAIL_SEEDS:
+        rng = random.Random(seed)
+        names = sorted(actual)
+        shuffled_values = list(actual.values())
+        rng.shuffle(shuffled_values)
+        shuffled = dict(zip(names, shuffled_values))
+        shuffled_rows = v18_nfw_tail_score_rows(base, strengths, priority_names, None, shuffled)
+        metric = v18_nfw_tail_metric(shuffled_rows)
+        output.append(
+            {
+                "nullType": "activation-label-shuffle",
+                "seed": seed,
+                "highGainVsV1821Pct": metric["highGainVsV1821Pct"],
+                "priorityGainVsV1821Pct": metric["priorityGainVsV1821Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "activeForcedCount": sum(1 for acts in shuffled.values() for value in acts.values() if value >= 0.05),
+            }
+        )
+
+        forced: dict[str, dict[str, float]] = {}
+        for branch, values in active_values.items():
+            pool = by_route.get(route_for_branch[branch], [])[:]
+            rng.shuffle(pool)
+            for name, value in zip(pool, values):
+                forced.setdefault(
+                    name,
+                    {
+                        "lowDiffuseTailSuppression": 0.0,
+                        "bufferedSparseTailSuppression": 0.0,
+                        "bufferedDenseTailSuppression": 0.0,
+                    },
+                )[branch] = value
+        random_rows = v18_nfw_tail_score_rows(base, strengths, priority_names, None, forced)
+        metric = v18_nfw_tail_metric(random_rows)
+        output.append(
+            {
+                "nullType": "same-route-active-value-random",
+                "seed": seed,
+                "highGainVsV1821Pct": metric["highGainVsV1821Pct"],
+                "priorityGainVsV1821Pct": metric["priorityGainVsV1821Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "activeForcedCount": sum(1 for acts in forced.values() for value in acts.values() if value >= 0.05),
+            }
+        )
+
+        protected_names = [row["galaxy"] for row in reference_rows if row["set"] == "clean-protected"]
+        forced = {}
+        for branch, values in active_values.items():
+            route = route_for_branch[branch]
+            pool = [row["galaxy"] for row in reference_rows if row["set"] == "clean-protected" and row["lockedRoute"] == route]
+            rng.shuffle(pool)
+            for name, value in zip(pool, values):
+                forced.setdefault(
+                    name,
+                    {
+                        "lowDiffuseTailSuppression": 0.0,
+                        "bufferedSparseTailSuppression": 0.0,
+                        "bufferedDenseTailSuppression": 0.0,
+                    },
+                )[branch] = value
+        if not forced and protected_names:
+            forced[protected_names[0]] = {
+                "lowDiffuseTailSuppression": 0.0,
+                "bufferedSparseTailSuppression": 0.0,
+                "bufferedDenseTailSuppression": 0.0,
+            }
+        protected_rows = v18_nfw_tail_score_rows(base, strengths, priority_names, None, forced)
+        metric = v18_nfw_tail_metric(protected_rows)
+        output.append(
+            {
+                "nullType": "protected-lookalike-tail-stress",
+                "seed": seed,
+                "highGainVsV1821Pct": metric["highGainVsV1821Pct"],
+                "priorityGainVsV1821Pct": metric["priorityGainVsV1821Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "activeForcedCount": sum(1 for acts in forced.values() for value in acts.values() if value >= 0.05),
+            }
+        )
+    return output
+
+
+def write_v18_nfw_tail_candidate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_nfw_tail_candidate"
+    benchmark_capsule = write_v18_radial_phase_benchmark_artifacts(DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BENCHMARK_OUT)
+    base = v18_radial_phase_base_context()
+    train_names, holdout_names = observed_state_split(base["cleanCurves"], SPLIT_SEED, HOLDOUT_FRACTION)
+    priority_names, priority_rows_by_name = v18_nfw_tail_priority_names()
+    selected_strengths, trial_rows = v18_nfw_tail_select_strengths(base, priority_names, train_names, holdout_names)
+    rows = v18_nfw_tail_score_rows(base, selected_strengths, priority_names, (train_names, holdout_names))
+    all_metric = v18_nfw_tail_metric(rows)
+    train_metric = v18_nfw_tail_metric(rows, "train")
+    holdout_metric = v18_nfw_tail_metric(rows, "holdout")
+    null_rows = v18_nfw_tail_null_rows(base, selected_strengths, priority_names, rows)
+    best_null = max([parse_float(row["priorityGainVsV1821Pct"]) for row in null_rows] or [math.nan])
+    null_margin = all_metric["priorityGainVsV1821Pct"] - best_null if math.isfinite(best_null) else math.nan
+
+    high_rows = [row for row in rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [
+        row for row in rows
+        if row["set"] == "clean-protected"
+        and (parse_float(row["protectedRegressionKmS"], 0.0) > 0.0 or parse_float(row["anyActivation"], 0.0) >= 0.05)
+    ]
+    gap_rows: list[dict] = []
+    for row in high_rows:
+        prior = priority_rows_by_name.get(row["galaxy"], {})
+        nfw_prior_rmse = parse_float(prior.get("nfwPriorRmse"))
+        gap_rows.append(
+            {
+                "galaxy": row["galaxy"],
+                "lockedRoute": row["lockedRoute"],
+                "priorityNfwGapCase": row["priorityNfwGapCase"],
+                "v18_21Rmse": row["v18_21Rmse"],
+                "candidateRmse": row["candidateRmse"],
+                "nfwPriorRmse": nfw_prior_rmse,
+                "v1821MinusNfwPriorKmS": parse_float(row["v18_21Rmse"]) - nfw_prior_rmse,
+                "candidateMinusNfwPriorKmS": parse_float(row["candidateRmse"]) - nfw_prior_rmse,
+                "gapClosedVsV1821KmS": parse_float(row["v18_21Rmse"]) - parse_float(row["candidateRmse"]),
+                "branchHits": row["branchHits"],
+            }
+        )
+    gap_rows.sort(key=lambda row: (-parse_float(row["v1821MinusNfwPriorKmS"], 0.0), row["galaxy"]))
+
+    branch_rows: list[dict] = []
+    for branch, column in [
+        ("lowDiffuseTailSuppression", "lowDiffuseTailSuppressionActivation"),
+        ("bufferedSparseTailSuppression", "bufferedSparseTailSuppressionActivation"),
+        ("bufferedDenseTailSuppression", "bufferedDenseTailSuppressionActivation"),
+    ]:
+        active = [row for row in rows if parse_float(row.get(column), 0.0) >= 0.05]
+        active_high = [row for row in active if row["set"] == "clean-high-rmse"]
+        active_priority = [row for row in active_high if parse_bool(row.get("priorityNfwGapCase"))]
+        active_protected = [row for row in active if row["set"] == "clean-protected"]
+        protected_regs = [parse_float(row.get("protectedRegressionKmS"), 0.0) for row in active_protected]
+        branch_rows.append(
+            {
+                "branch": branch,
+                "activeCleanHighCount": len(active_high),
+                "activePriorityCount": len(active_priority),
+                "activeProtectedCount": len(active_protected),
+                "meanActivationHigh": safe_mean(parse_float(row.get(column), 0.0) for row in active_high),
+                "priorityGainVsV1821Pct": pct_improvement(
+                    safe_mean(parse_float(row["v18_21Rmse"]) for row in active_priority),
+                    safe_mean(parse_float(row["candidateRmse"]) for row in active_priority),
+                ),
+                "protectedMaxRegressionKmS": max(protected_regs or [0.0]),
+            }
+        )
+
+    holdout_rows: list[dict] = []
+    for seed in V18_NFW_TAIL_SEEDS:
+        seed_train, seed_holdout = observed_state_split(base["cleanCurves"], seed, HOLDOUT_FRACTION)
+        seed_rows = v18_nfw_tail_score_rows(base, selected_strengths, priority_names, (seed_train, seed_holdout))
+        metric = v18_nfw_tail_metric(seed_rows, "holdout")
+        metric["seed"] = seed
+        holdout_rows.append(metric)
+
+    passes = {
+        "priorityGainVsV1821AtLeast10Pct": all_metric["priorityGainVsV1821Pct"] >= 10.0,
+        "holdoutPriorityGainAtLeast8Pct": holdout_metric["priorityGainVsV1821Pct"] >= 8.0,
+        "highGainVsV1821Positive": all_metric["highGainVsV1821Pct"] > 0.0,
+        "highAbove20Zero": all_metric["highAbove20Candidate"] == 0,
+        "protectedRegressionBelow1": all_metric["protectedMaxRegressionKmS"] < 1.0,
+        "weakLeakageZero": all_metric["weakSystematicsLeakage"] == 0,
+        "nullMarginAtLeast5Pct": math.isfinite(null_margin) and null_margin >= 5.0,
+    }
+    verdict = "v18.22 tail candidate for review" if all(passes.values()) else "v18.22 tail candidate not promoted"
+
+    score_rows = [
+        {"metric": key, "value": value}
+        for key, value in {
+            "v1821AllMeanRmse": benchmark_capsule["summary"]["v1821AllMeanRmse"],
+            "v1821HighMeanRmse": benchmark_capsule["summary"]["v1821HighMeanRmse"],
+            "candidateHighGainVsV1821Pct": all_metric["highGainVsV1821Pct"],
+            "candidatePriorityGainVsV1821Pct": all_metric["priorityGainVsV1821Pct"],
+            "trainPriorityGainVsV1821Pct": train_metric["priorityGainVsV1821Pct"],
+            "holdoutPriorityGainVsV1821Pct": holdout_metric["priorityGainVsV1821Pct"],
+            "candidateProtectedMaxRegressionKmS": all_metric["protectedMaxRegressionKmS"],
+            "candidateHighAbove20": all_metric["highAbove20Candidate"],
+            "weakSystematicsLeakage": all_metric["weakSystematicsLeakage"],
+            "bestNullPriorityGainVsV1821Pct": best_null,
+            "nullMarginPriorityPct": null_margin,
+        }.items()
+    ]
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", rows)
+    write_csv(out_dir / f"{prefix}_competitor_gap.csv", gap_rows)
+    write_csv(out_dir / f"{prefix}_branch_ledger.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_holdout_replay.csv", holdout_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_strength_trials.csv", trial_rows[:40])
+
+    formula = {
+        "candidateId": "observed-state-response-v18.22-nfw-tail-trim-candidate",
+        "status": verdict,
+        "baseLaw": "locked v18.21 radial-phase release candidate",
+        "selectedStrengths": selected_strengths,
+        "mechanism": "narrow outer-tail support trimming for v18.21 cases where state/profile variables indicate diffuse low-load tails or buffered dense/sparse tail oversupport",
+        "allowedInputs": [
+            "locked route",
+            "memoryLoad",
+            "u_out",
+            "u_max",
+            "h/rOut",
+            "outerGasShare",
+            "outerDiskShare",
+            "barCurv",
+            "pointDensity",
+            "official baryonic mass",
+        ],
+        "forbiddenInputs": ["galaxy names", "NFW parameters", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    changed = [
+        row for row in high_rows
+        if abs(parse_float(row["candidateGainVsV1821KmS"], 0.0)) > 0.05
+    ]
+    changed.sort(key=lambda row: -parse_float(row["candidateGainVsV1821KmS"], 0.0))
+    report = [
+        "# MTS v18.22 NFW Tail Candidate",
+        "",
+        "This is a direct framework push after the v18.21 competitor benchmark. It starts from locked v18.21 and tests one narrow state/profile tail-trim response against the remaining NFW-prior gap cases. NFW values are used for evaluation only, never as formula inputs.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Selected strengths: low diffuse `{fmt(selected_strengths['lowDiffuseTail'])}`, buffered sparse `{fmt(selected_strengths['bufferedSparseTail'])}`, buffered dense `{fmt(selected_strengths['bufferedDenseTail'])}`.",
+        f"- Priority NFW-gap gain over v18.21: `{fmt(all_metric['priorityGainVsV1821Pct'])}%`.",
+        f"- Holdout priority NFW-gap gain over v18.21: `{fmt(holdout_metric['priorityGainVsV1821Pct'])}%`.",
+        f"- Clean high-RMSE gain over v18.21: `{fmt(all_metric['highGainVsV1821Pct'])}%`.",
+        f"- Protected max regression: `{fmt(all_metric['protectedMaxRegressionKmS'])}` km/s.",
+        f"- High above 20 km/s: `{all_metric['highAbove20Candidate']}`.",
+        f"- Best null priority gain: `{fmt(best_null)}`%.",
+        f"- Null margin: `{fmt(null_margin)}` points.",
+        "",
+        "## Changed High-RMSE Cases",
+        "",
+        "| Galaxy | Route | v18.21 RMSE | candidate RMSE | gain | NFW-prior RMSE | branch |",
+        "| --- | --- | ---: | ---: | ---: | ---: | --- |",
+    ]
+    gap_by_name = {row["galaxy"]: row for row in gap_rows}
+    for row in changed[:24]:
+        gap_row = gap_by_name.get(row["galaxy"], {})
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | {fmt(row['v18_21Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['candidateGainVsV1821KmS'])} | {fmt(gap_row.get('nfwPriorRmse', math.nan))} | {row['branchHits']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Acceptance Gates",
+            "",
+            "| Gate | Pass |",
+            "| --- | ---: |",
+        ]
+    )
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.extend(
+        [
+            "",
+            "## Guardrails",
+            "",
+            "- v18.21 remains locked unless this candidate is separately browser-hardened.",
+            "- No q, Gamma0, disk M/L, bulge M/L, galaxy-name, NFW-parameter, residual, or raw-RMSE lookup is introduced.",
+            "- Weak/systematics galaxies remain excluded from fitting and activation.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-v18-nfw-tail-candidate-v1",
+        "verdict": verdict,
+        "selectedStrengths": selected_strengths,
+        "summary": {
+            "candidateHighGainVsV1821Pct": all_metric["highGainVsV1821Pct"],
+            "candidatePriorityGainVsV1821Pct": all_metric["priorityGainVsV1821Pct"],
+            "trainPriorityGainVsV1821Pct": train_metric["priorityGainVsV1821Pct"],
+            "holdoutPriorityGainVsV1821Pct": holdout_metric["priorityGainVsV1821Pct"],
+            "protectedMaxRegressionKmS": all_metric["protectedMaxRegressionKmS"],
+            "highAbove20Candidate": all_metric["highAbove20Candidate"],
+            "weakSystematicsLeakage": all_metric["weakSystematicsLeakage"],
+            "bestNullPriorityGainVsV1821Pct": best_null,
+            "nullMarginPriorityPct": null_margin,
+            "passes": passes,
+        },
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_competitor_gap.csv",
+            f"{prefix}_branch_ledger.csv",
+            f"{prefix}_holdout_replay.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_strength_trials.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18nfwtailcandidate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NFW_TAIL_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_nfw_tail_candidate_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.22 NFW-tail candidate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high_gain_vs_v1821={fmt(summary['candidateHighGainVsV1821Pct'])}%",
+                f"priority_gain_vs_v1821={fmt(summary['candidatePriorityGainVsV1821Pct'])}%",
+                f"holdout_priority={fmt(summary['holdoutPriorityGainVsV1821Pct'])}%",
+                f"protected={fmt(summary['protectedMaxRegressionKmS'])}",
+                f"above20={summary['highAbove20Candidate']}",
+                f"null_margin={fmt(summary['nullMarginPriorityPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 NFW-tail candidate to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -79259,6 +79905,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18radialphasebrowserlock",
             "v18radialphasebenchmark",
             "observedstatev18radialphasebenchmark",
+            "v18nfwtailcandidate",
+            "observedstatev18nfwtailcandidate",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -79555,6 +80203,8 @@ def main() -> None:
         cmd_v18radialphasebrowserlock(args)
     elif args.mode in {"v18radialphasebenchmark", "observedstatev18radialphasebenchmark"}:
         cmd_v18radialphasebenchmark(args)
+    elif args.mode in {"v18nfwtailcandidate", "observedstatev18nfwtailcandidate"}:
+        cmd_v18nfwtailcandidate(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
