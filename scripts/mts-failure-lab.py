@@ -179,6 +179,7 @@ DEFAULT_OBSERVED_STATE_V18_RELEASE_MATERIALS_OUT = OUTPUT_PACK_ROOT / "mts-obser
 DEFAULT_OBSERVED_STATE_V18_RELEASE_COMPRESSION_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-compression-v1"
 DEFAULT_OBSERVED_STATE_V18_FAMILY_NATIVE_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-family-native-v1"
 DEFAULT_OBSERVED_STATE_V18_FAMILY_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-family-discriminator-v1"
+DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_FINAL_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-lock-final-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -60658,6 +60659,505 @@ def cmd_v18releasematerials(args: argparse.Namespace) -> None:
     print(f"Wrote v18 release materials to {out_dir.resolve()}")
 
 
+def observed_state_v1814_read_first_csv(path: Path) -> dict:
+    rows = read_csv_rows(path)
+    return rows[0] if rows else {}
+
+
+def observed_state_v1814_bool(value: object) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def observed_state_v1814_release_pass(summary: dict) -> bool:
+    return (
+        round(parse_float(summary.get("allGalaxyLockedMtsMeanRmse")), 2) == 21.90
+        and round(parse_float(summary.get("cleanSetLockedMtsMeanRmse")), 2) == 19.33
+        and abs(parse_float(summary.get("cleanHighGainPct")) - 68.07867961334428) < 0.02
+        and abs(parse_float(summary.get("cleanGainPct")) - 43.737260426360244) < 0.02
+        and int(parse_float(summary.get("cleanHighAbove20Native"), 999.0)) == 0
+        and int(parse_float(summary.get("protectedRegressionCount"), 999.0)) == 0
+        and parse_float(summary.get("maxProtectedRegressionKmS"), 999.0) <= 1e-9
+        and int(parse_float(summary.get("weakSystematicsExcludedCount"), 0.0)) == 15
+        and int(parse_float(summary.get("weakSystematicsLeakage"), 999.0)) == 0
+        and int(parse_float(summary.get("cacheVsPythonMismatchCount"), 999.0)) == 0
+        and int(parse_float(summary.get("nativeVsPythonMismatchCount"), 999.0)) == 0
+        and int(parse_float(summary.get("nativeVsCacheMismatchCount"), 999.0)) == 0
+        and int(parse_float(summary.get("routeMismatchCount"), 999.0)) == 0
+        and observed_state_v1814_bool(summary.get("nativeFormulaCanReplaceCache"))
+    )
+
+
+def observed_state_v1814_guard_rows(summary: dict) -> list[dict]:
+    return [
+        {
+            "guardrail": "all-galaxy locked-MTS mean RMSE",
+            "expected": "21.90",
+            "value": fmt(parse_float(summary.get("allGalaxyLockedMtsMeanRmse"))),
+            "pass": round(parse_float(summary.get("allGalaxyLockedMtsMeanRmse")), 2) == 21.90,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "clean locked-MTS mean RMSE",
+            "expected": "19.33",
+            "value": fmt(parse_float(summary.get("cleanSetLockedMtsMeanRmse"))),
+            "pass": round(parse_float(summary.get("cleanSetLockedMtsMeanRmse")), 2) == 19.33,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "clean high-RMSE gain",
+            "expected": "68.08%",
+            "value": f"{fmt(parse_float(summary.get('cleanHighGainPct')))}%",
+            "pass": abs(parse_float(summary.get("cleanHighGainPct")) - 68.07867961334428) < 0.02,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "clean-set gain",
+            "expected": "43.74%",
+            "value": f"{fmt(parse_float(summary.get('cleanGainPct')))}%",
+            "pass": abs(parse_float(summary.get("cleanGainPct")) - 43.737260426360244) < 0.02,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "clean high-RMSE above 20",
+            "expected": "0",
+            "value": summary.get("cleanHighAbove20Native", ""),
+            "pass": int(parse_float(summary.get("cleanHighAbove20Native"), 999.0)) == 0,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "protected regression",
+            "expected": "0.00 km/s",
+            "value": fmt(parse_float(summary.get("maxProtectedRegressionKmS"))),
+            "pass": int(parse_float(summary.get("protectedRegressionCount"), 999.0)) == 0
+            and parse_float(summary.get("maxProtectedRegressionKmS"), 999.0) <= 1e-9,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "weak/systematics leakage",
+            "expected": "0 leakage; 15 excluded",
+            "value": f"{summary.get('weakSystematicsLeakage')} leakage; {summary.get('weakSystematicsExcludedCount')} excluded",
+            "pass": int(parse_float(summary.get("weakSystematicsLeakage"), 999.0)) == 0
+            and int(parse_float(summary.get("weakSystematicsExcludedCount"), 0.0)) == 15,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "native/cache/Python mismatches",
+            "expected": "0 / 0 / 0",
+            "value": f"{summary.get('nativeVsPythonMismatchCount')} / {summary.get('nativeVsCacheMismatchCount')} / {summary.get('cacheVsPythonMismatchCount')}",
+            "pass": int(parse_float(summary.get("nativeVsPythonMismatchCount"), 999.0)) == 0
+            and int(parse_float(summary.get("nativeVsCacheMismatchCount"), 999.0)) == 0
+            and int(parse_float(summary.get("cacheVsPythonMismatchCount"), 999.0)) == 0,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "route mismatch",
+            "expected": "0",
+            "value": summary.get("routeMismatchCount", ""),
+            "pass": int(parse_float(summary.get("routeMismatchCount"), 999.0)) == 0,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "native formula gate",
+            "expected": "nativeFormulaCanReplaceCache true",
+            "value": summary.get("nativeFormulaCanReplaceCache", ""),
+            "pass": observed_state_v1814_bool(summary.get("nativeFormulaCanReplaceCache")),
+            "source": "mts_v18_redteam_scores.csv",
+        },
+    ]
+
+
+def observed_state_v1814_branch_acceptance_rows(case_rows: list[dict], summary: dict) -> list[dict]:
+    high_rows = [row for row in case_rows if row.get("set") == "clean-high-rmse"]
+    protected_rows = [row for row in case_rows if row.get("set") == "clean-protected"]
+    branch_keys = sorted(
+        {
+            (
+                row.get("responseFamily") or "baseline/continuity fallback",
+                row.get("diagnosticBranch") or "native continuity/fallback",
+            )
+            for row in high_rows
+        }
+    )
+    rows = []
+    for family, branch in branch_keys:
+        active_high = [
+            row
+            for row in high_rows
+            if (row.get("responseFamily") or "baseline/continuity fallback") == family
+            and (row.get("diagnosticBranch") or "native continuity/fallback") == branch
+        ]
+        active_protected = [
+            row
+            for row in protected_rows
+            if (row.get("responseFamily") or "baseline/continuity fallback") == family
+            and (row.get("diagnosticBranch") or "native continuity/fallback") == branch
+        ]
+        protected_reg = max([parse_float(row.get("protectedRegressionKmS"), 0.0) for row in active_protected] or [0.0])
+        rows.append(
+            {
+                "responseFamily": family,
+                "diagnosticBranch": branch,
+                "activeHighCount": len(active_high),
+                "activeHighGalaxies": "; ".join(row.get("galaxy", "") for row in active_high),
+                "activeHighMeanCanonicalRmse": safe_mean(parse_float(row.get("baselineRmse")) for row in active_high),
+                "activeHighMeanV18_10Rmse": safe_mean(parse_float(row.get("nativeRmse")) for row in active_high),
+                "activeHighTotalGainKmS": sum(parse_float(row.get("nativeGainKmS"), 0.0) for row in active_high),
+                "activeHighMeanGainPct": safe_mean(parse_float(row.get("nativeGainPct")) for row in active_high),
+                "activeProtectedCount": len(active_protected),
+                "activeProtectedMaxRegressionKmS": protected_reg,
+                "acceptanceStatus": "release-law accepted" if protected_reg <= 1e-9 else "blocked",
+                "acceptanceReason": (
+                    "part of v18.10 native-gated release candidate; red-team passed; native/cache/Python parity is zero; protected regression is zero"
+                    if protected_reg <= 1e-9
+                    else "protected regression exceeds release lock"
+                ),
+                "source": "mts_v18_redteam_case_ledger.csv",
+            }
+        )
+    return rows
+
+
+def observed_state_v1814_rejected_compression_rows() -> list[dict]:
+    rows: list[dict] = []
+    compression_dir = DEFAULT_OBSERVED_STATE_V18_RELEASE_COMPRESSION_OUT
+    family_native_dir = DEFAULT_OBSERVED_STATE_V18_FAMILY_NATIVE_OUT
+    discriminator_dir = DEFAULT_OBSERVED_STATE_V18_FAMILY_DISCRIMINATOR_OUT
+    if not (compression_dir / "mts_v18_11_compression_scores.csv").exists():
+        write_observed_state_v18_release_compression_artifacts(compression_dir)
+    if not (family_native_dir / "mts_v18_12_family_native_scores.csv").exists():
+        write_observed_state_v18_family_native_artifacts(family_native_dir)
+    if not (discriminator_dir / "mts_v18_13_family_discriminator_scores.csv").exists():
+        write_observed_state_v18_family_discriminator_artifacts(discriminator_dir)
+
+    v18_11 = observed_state_v1814_read_first_csv(compression_dir / "mts_v18_11_compression_scores.csv")
+    rows.append(
+        {
+            "candidate": "v18.11 compressed family release view",
+            "status": "kept as explanation layer",
+            "highGainPct": v18_11.get("compressedHighGainPct", ""),
+            "cleanGainPct": v18_11.get("compressedCleanGainPct", ""),
+            "above20": v18_11.get("highAbove20", ""),
+            "protectedRegressionKmS": v18_11.get("protectedRegressionKmS", ""),
+            "reason": "matches v18.10 scores as a paper/review family view but is not a shorter native browser expression",
+            "transportLawStatus": "not replacing v18.10 native expression",
+            "source": str(compression_dir / "mts_v18_11_compression_scores.csv"),
+        }
+    )
+    v18_12_scores = read_csv_rows(family_native_dir / "mts_v18_12_family_native_scores.csv")
+    best_v18_12 = next((row for row in v18_12_scores if row.get("track") == "safe-drive-threshold"), v18_12_scores[0] if v18_12_scores else {})
+    rows.append(
+        {
+            "candidate": "v18.12 family-native compression",
+            "status": "rejected compression",
+            "highGainPct": best_v18_12.get("highGainPct", ""),
+            "cleanGainPct": best_v18_12.get("cleanGainPct", ""),
+            "above20": best_v18_12.get("highAbove20", ""),
+            "protectedRegressionKmS": best_v18_12.get("maxProtectedRegressionKmS", ""),
+            "reason": "safe drive threshold protects lookalikes but retains only 8.85% of v18.10 high-RMSE gain and leaves 56 high cases above 20",
+            "transportLawStatus": "blocked; cannot replace v18.10",
+            "source": str(family_native_dir / "mts_v18_12_family_native_scores.csv"),
+        }
+    )
+    v18_13_scores = read_csv_rows(discriminator_dir / "mts_v18_13_family_discriminator_scores.csv")
+    promotable_v18_13 = [row for row in v18_13_scores if observed_state_v1814_bool(row.get("promotableTrack"))]
+    best_v18_13 = max(promotable_v18_13, key=lambda row: parse_float(row.get("medianHoldoutHighGainPct"), -1e9)) if promotable_v18_13 else (v18_13_scores[0] if v18_13_scores else {})
+    rows.append(
+        {
+            "candidate": "v18.13 one-feature family-overlap discriminator",
+            "status": "rejected compression",
+            "highGainPct": best_v18_13.get("highGainPct", ""),
+            "cleanGainPct": best_v18_13.get("cleanGainPct", ""),
+            "above20": best_v18_13.get("highAbove20", ""),
+            "protectedRegressionKmS": best_v18_13.get("maxSeedProtectedRegressionKmS", ""),
+            "reason": "one-feature discriminator reaches only 15.50% full high gain, 8.08% median holdout high gain, and protected holdout regressions recur",
+            "transportLawStatus": "blocked; cannot replace v18.10",
+            "source": str(discriminator_dir / "mts_v18_13_family_discriminator_scores.csv"),
+        }
+    )
+    return rows
+
+
+def observed_state_v1814_browser_qa_rows(summary: dict) -> list[dict]:
+    app_text = (ROOT / "app.js").read_text(encoding="utf-8")
+    index_text = (ROOT / "index.html").read_text(encoding="utf-8")
+    return [
+        {
+            "check": "browser label",
+            "expected": "MTS v18.10 release candidate (native gated)",
+            "value": "present" if "MTS v18.10 release candidate (native gated)" in app_text + index_text else "missing",
+            "pass": "MTS v18.10 release candidate (native gated)" in app_text + index_text,
+            "source": "app.js; index.html",
+        },
+        {
+            "check": "runtime source",
+            "expected": "native expression",
+            "value": "native expression" if observed_state_v1814_bool(summary.get("nativeFormulaCanReplaceCache")) else "exact cache locked",
+            "pass": observed_state_v1814_bool(summary.get("nativeFormulaCanReplaceCache")),
+            "source": "data/v18-09-surface-persistence-candidate.js metadata.nativeFormulaV1809",
+        },
+        {
+            "check": "cache mismatch",
+            "expected": "0",
+            "value": summary.get("cacheVsPythonMismatchCount", ""),
+            "pass": int(parse_float(summary.get("cacheVsPythonMismatchCount"), 999.0)) == 0,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "check": "native mismatch",
+            "expected": "0",
+            "value": summary.get("nativeVsPythonMismatchCount", ""),
+            "pass": int(parse_float(summary.get("nativeVsPythonMismatchCount"), 999.0)) == 0,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "check": "native/cache mismatch",
+            "expected": "0",
+            "value": summary.get("nativeVsCacheMismatchCount", ""),
+            "pass": int(parse_float(summary.get("nativeVsCacheMismatchCount"), 999.0)) == 0,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "check": "route mismatch",
+            "expected": "0",
+            "value": summary.get("routeMismatchCount", ""),
+            "pass": int(parse_float(summary.get("routeMismatchCount"), 999.0)) == 0,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "check": "browser does not advertise v18.12/v18.13 as release law",
+            "expected": "no v18.12/v18.13 browser preset",
+            "value": "clean" if "v18.12" not in app_text + index_text and "v18.13" not in app_text + index_text else "mentions v18.12/v18.13",
+            "pass": "v18.12" not in app_text + index_text and "v18.13" not in app_text + index_text,
+            "source": "app.js; index.html",
+        },
+    ]
+
+
+def write_observed_state_v18_release_lock_final_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_release_lock_final"
+    redteam_dir = DEFAULT_OBSERVED_STATE_V18_REDTEAM_OUT
+    materials_dir = DEFAULT_OBSERVED_STATE_V18_RELEASE_MATERIALS_OUT
+    if not (redteam_dir / "mts_v18_redteam_scores.csv").exists():
+        write_observed_state_v18_redteam_artifacts(redteam_dir)
+    if not (materials_dir / "mts_v18_10_release_materials_capsule.json").exists():
+        write_observed_state_v18_release_materials_artifacts(materials_dir)
+
+    redteam_summary = observed_state_v1814_read_first_csv(redteam_dir / "mts_v18_redteam_scores.csv")
+    case_rows = read_csv_rows(redteam_dir / "mts_v18_redteam_case_ledger.csv")
+    high_rows = [row for row in case_rows if row.get("set") == "clean-high-rmse"]
+    protected_rows = [row for row in case_rows if row.get("set") == "clean-protected"]
+    weak_rows = [row for row in case_rows if row.get("set") == "weak-systematics-excluded"]
+    branch_rows = observed_state_v1814_branch_acceptance_rows(case_rows, redteam_summary)
+    rejected_rows = observed_state_v1814_rejected_compression_rows()
+    browser_rows = observed_state_v1814_browser_qa_rows(redteam_summary)
+    guard_rows = observed_state_v1814_guard_rows(redteam_summary)
+    protected_regressions = [
+        row for row in protected_rows if parse_float(row.get("protectedRegressionKmS"), 0.0) > 1e-9
+    ]
+    passes = observed_state_v1814_release_pass(redteam_summary) and all(observed_state_v1814_bool(row["pass"]) for row in browser_rows)
+    verdict = "v18.10 release candidate locked" if passes else "release lock blocked"
+
+    score_row = {
+        "candidateId": "observed-state-response-v18.14-release-lock-final",
+        "lockedCandidate": "observed-state-response-v18.10-native-gated-release",
+        "sourceOfTruth": "v18.10 native expression; exact cache retained as QA fallback",
+        "verdict": verdict,
+        "allGalaxyLockedMtsMeanRmse": redteam_summary.get("allGalaxyLockedMtsMeanRmse", ""),
+        "cleanSetLockedMtsMeanRmse": redteam_summary.get("cleanSetLockedMtsMeanRmse", ""),
+        "cleanHighGainPct": redteam_summary.get("cleanHighGainPct", ""),
+        "cleanGainPct": redteam_summary.get("cleanGainPct", ""),
+        "cleanHighAbove20Native": redteam_summary.get("cleanHighAbove20Native", ""),
+        "protectedRegressionCount": len(protected_regressions),
+        "maxProtectedRegressionKmS": redteam_summary.get("maxProtectedRegressionKmS", ""),
+        "medianHoldoutHighGainPct": redteam_summary.get("medianHoldoutHighGainPct", ""),
+        "medianHoldoutCleanGainPct": redteam_summary.get("medianHoldoutCleanGainPct", ""),
+        "weakSystematicsExcludedCount": redteam_summary.get("weakSystematicsExcludedCount", ""),
+        "weakSystematicsLeakage": redteam_summary.get("weakSystematicsLeakage", ""),
+        "cacheVsPythonMismatchCount": redteam_summary.get("cacheVsPythonMismatchCount", ""),
+        "nativeVsPythonMismatchCount": redteam_summary.get("nativeVsPythonMismatchCount", ""),
+        "nativeVsCacheMismatchCount": redteam_summary.get("nativeVsCacheMismatchCount", ""),
+        "routeMismatchCount": redteam_summary.get("routeMismatchCount", ""),
+        "nativeFormulaCanReplaceCache": redteam_summary.get("nativeFormulaCanReplaceCache", ""),
+        "familySurfaceNullMarginPct": redteam_summary.get("familySurfaceNullMarginPct", ""),
+        "branchShuffleNullMarginPct": redteam_summary.get("branchShuffleNullMarginPct", ""),
+        "edgeNullMarginPct": redteam_summary.get("edgeNullMarginPct", ""),
+        "v18_12Status": "rejected compression; not a release law",
+        "v18_13Status": "rejected compression; not a release law",
+        "browserUpdated": False,
+    }
+
+    high_repair_rows = [
+        {
+            "galaxy": row.get("galaxy", ""),
+            "lockedRoute": row.get("lockedRoute", ""),
+            "canonicalRmse": row.get("baselineRmse", ""),
+            "v18_10Rmse": row.get("nativeRmse", ""),
+            "gainKmS": row.get("nativeGainKmS", ""),
+            "gainPct": row.get("nativeGainPct", ""),
+            "stillAbove20": row.get("nativeStillAbove20", ""),
+            "routeTransition": row.get("routeTransition", ""),
+            "responseFamily": row.get("responseFamily") or "baseline/continuity fallback",
+            "diagnosticBranch": row.get("diagnosticBranch") or "native continuity/fallback",
+            "source": "mts_v18_redteam_case_ledger.csv",
+        }
+        for row in sorted(high_rows, key=lambda item: parse_float(item.get("nativeGainKmS"), 0.0), reverse=True)
+    ]
+    protected_ledger_rows = [
+        {
+            "galaxy": row.get("galaxy", ""),
+            "lockedRoute": row.get("lockedRoute", ""),
+            "canonicalRmse": row.get("baselineRmse", ""),
+            "v18_10Rmse": row.get("nativeRmse", ""),
+            "gainKmS": row.get("nativeGainKmS", ""),
+            "protectedRegressionKmS": row.get("protectedRegressionKmS", ""),
+            "branchHit": bool(row.get("diagnosticBranch")),
+            "responseFamily": row.get("responseFamily", ""),
+            "diagnosticBranch": row.get("diagnosticBranch", ""),
+            "status": "protected; no regression allowed",
+            "source": "mts_v18_redteam_case_ledger.csv",
+        }
+        for row in sorted(protected_rows, key=lambda item: item.get("galaxy", ""))
+    ]
+    weak_ledger_rows = [
+        {
+            "galaxy": row.get("galaxy", ""),
+            "lockedRoute": row.get("lockedRoute", ""),
+            "canonicalRmse": row.get("baselineRmse", ""),
+            "diagnosticV18_10Rmse": row.get("nativeRmse", ""),
+            "reason": "weak/systematics holdout from clean validation chain",
+            "status": "excluded from transport-law fitting",
+            "source": "mts_v18_redteam_case_ledger.csv",
+        }
+        for row in sorted(weak_rows, key=lambda item: item.get("galaxy", ""))
+    ]
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_row])
+    write_csv(out_dir / f"{prefix}_high_rmse_repairs.csv", high_repair_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_ledger_rows)
+    write_csv(out_dir / f"{prefix}_weak_systematics_ledger.csv", weak_ledger_rows)
+    write_csv(out_dir / f"{prefix}_branch_acceptance.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_rejected_compressions.csv", rejected_rows)
+    write_csv(out_dir / f"{prefix}_browser_qa.csv", browser_rows)
+    write_csv(out_dir / f"{prefix}_guardrails.csv", guard_rows)
+
+    formula = {
+        "candidateId": score_row["candidateId"],
+        "lockedCandidate": score_row["lockedCandidate"],
+        "status": "locked" if passes else "blocked",
+        "sourceOfTruth": score_row["sourceOfTruth"],
+        "browserLabel": "MTS v18.10 release candidate (native gated)",
+        "nativeFormulaCanReplaceCache": observed_state_v1814_bool(redteam_summary.get("nativeFormulaCanReplaceCache")),
+        "exactCacheFallback": "retained as QA fallback only",
+        "canonicalConstants": {"q": Q_DEFAULT, "Gamma0": GAMMA0, "ML_disk": ML_DISK, "ML_bulge": ML_BULGE},
+        "forbiddenInputsUsed": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+        "rejectedCompressionCandidates": ["v18.12 family-native compression", "v18.13 one-feature family-overlap discriminator"],
+        "browserUpdated": False,
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    top_repairs = high_repair_rows[:15]
+    report = [
+        "# MTS v18.14 Release Candidate Lock",
+        "",
+        "This mode locks v18.10 as the framework-forward release candidate and stops treating v18.12/v18.13 compression attempts as replacement laws.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Source of truth: `{score_row['sourceOfTruth']}`.",
+        f"- All-galaxy locked-MTS mean RMSE: `{fmt(parse_float(score_row['allGalaxyLockedMtsMeanRmse']))}`.",
+        f"- Clean locked-MTS mean RMSE: `{fmt(parse_float(score_row['cleanSetLockedMtsMeanRmse']))}`.",
+        f"- Clean high-RMSE gain: `{fmt(parse_float(score_row['cleanHighGainPct']))}%`.",
+        f"- Clean-set gain: `{fmt(parse_float(score_row['cleanGainPct']))}%`.",
+        f"- Clean high-RMSE above 20: `{score_row['cleanHighAbove20Native']}`.",
+        f"- Protected regressions: `{score_row['protectedRegressionCount']}`; max `{fmt(parse_float(score_row['maxProtectedRegressionKmS']))}` km/s.",
+        f"- Native/cache/Python mismatches: `{score_row['nativeVsPythonMismatchCount']}` / `{score_row['nativeVsCacheMismatchCount']}` / `{score_row['cacheVsPythonMismatchCount']}`.",
+        f"- Weak/systematics excluded: `{score_row['weakSystematicsExcludedCount']}`.",
+        "",
+        "## Largest Clean High-RMSE Repairs",
+        "",
+        "| Galaxy | Canonical | v18.10 | Gain | Family | Branch |",
+        "| --- | ---: | ---: | ---: | --- | --- |",
+    ]
+    for row in top_repairs:
+        report.append(
+            f"| {row['galaxy']} | {fmt(parse_float(row['canonicalRmse']))} | {fmt(parse_float(row['v18_10Rmse']))} | {fmt(parse_float(row['gainKmS']))} | {row['responseFamily']} | {row['diagnosticBranch']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Rejected Compression Attempts",
+            "",
+            "| Candidate | Status | High gain | Above20 | Reason |",
+            "| --- | --- | ---: | ---: | --- |",
+        ]
+    )
+    for row in rejected_rows:
+        report.append(
+            f"| {row['candidate']} | {row['status']} | {fmt(parse_float(row['highGainPct']))} | {row.get('above20', '')} | {row['reason']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Browser Lock",
+            "",
+            "The browser already presents `MTS v18.10 release candidate (native gated)`. Runtime should report `native expression`; the exact cache remains a QA fallback, not the release source of truth.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-v18-release-lock-final-v1",
+        "candidateId": score_row["candidateId"],
+        "verdict": verdict,
+        "summary": score_row,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_high_rmse_repairs.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_weak_systematics_ledger.csv",
+            f"{prefix}_branch_acceptance.csv",
+            f"{prefix}_rejected_compressions.csv",
+            f"{prefix}_browser_qa.csv",
+            f"{prefix}_guardrails.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18releaselockfinal(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_FINAL_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_release_lock_final_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.14 release candidate lock")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"baseline={fmt(parse_float(summary['allGalaxyLockedMtsMeanRmse']))}",
+                f"clean={fmt(parse_float(summary['cleanSetLockedMtsMeanRmse']))}",
+                f"high_gain={fmt(parse_float(summary['cleanHighGainPct']))}%",
+                f"clean_gain={fmt(parse_float(summary['cleanGainPct']))}%",
+                f"above20={summary['cleanHighAbove20Native']}",
+                f"protected={fmt(parse_float(summary['maxProtectedRegressionKmS']))}",
+                f"native_py_mismatch={summary['nativeVsPythonMismatchCount']}",
+                f"native_cache_mismatch={summary['nativeVsCacheMismatchCount']}",
+                f"weak_excluded={summary['weakSystematicsExcludedCount']}",
+                f"browser_updated={summary['browserUpdated']}",
+            ]
+        )
+    )
+    print(f"Wrote v18.14 release lock to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -73668,6 +74168,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18redteam",
             "v18releasematerials",
             "observedstatev18releasematerials",
+            "v18releaselockfinal",
+            "observedstatev18releaselockfinal",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -73940,6 +74442,8 @@ def main() -> None:
         cmd_v18redteam(args)
     elif args.mode in {"v18releasematerials", "observedstatev18releasematerials"}:
         cmd_v18releasematerials(args)
+    elif args.mode in {"v18releaselockfinal", "observedstatev18releaselockfinal"}:
+        cmd_v18releaselockfinal(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
