@@ -175,6 +175,7 @@ DEFAULT_OBSERVED_STATE_V18_NATIVE_PARITY_OUT = OUTPUT_PACK_ROOT / "mts-observed-
 DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-lock-v1"
 DEFAULT_OBSERVED_STATE_V18_RELEASE_VERIFY_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-verify-v1"
 DEFAULT_OBSERVED_STATE_V18_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-redteam-v1"
+DEFAULT_OBSERVED_STATE_V18_RELEASE_MATERIALS_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-materials-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -60377,6 +60378,283 @@ def cmd_v18redteam(args: argparse.Namespace) -> None:
     print(f"Wrote v18 red-team audit to {out_dir.resolve()}")
 
 
+def write_observed_state_v18_release_materials_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    redteam_dir = DEFAULT_OBSERVED_STATE_V18_REDTEAM_OUT
+    if not (redteam_dir / "mts_v18_redteam_scores.csv").exists():
+        write_observed_state_v18_redteam_artifacts(redteam_dir)
+
+    scores = read_csv_rows(redteam_dir / "mts_v18_redteam_scores.csv")
+    if not scores:
+        raise RuntimeError(f"Missing red-team scores in {redteam_dir}")
+    summary = scores[0]
+    case_rows = read_csv_rows(redteam_dir / "mts_v18_redteam_case_ledger.csv")
+    null_rows = read_csv_rows(redteam_dir / "mts_v18_redteam_null_controls.csv")
+    holdout_rows = read_csv_rows(redteam_dir / "mts_v18_redteam_holdout_replay.csv")
+
+    high_rows = sorted(
+        [row for row in case_rows if row.get("set") == "clean-high-rmse"],
+        key=lambda row: parse_float(row.get("nativeGainKmS"), 0.0),
+        reverse=True,
+    )
+    protected_rows = [row for row in case_rows if row.get("set") == "clean-protected"]
+    weak_rows = [row for row in case_rows if row.get("set") == "weak-systematics-excluded"]
+    protected_regressions = [
+        row
+        for row in protected_rows
+        if parse_float(row.get("protectedRegressionKmS"), 0.0) > 1e-9
+    ]
+
+    repaired_rows = [
+        {
+            "galaxy": row.get("galaxy", ""),
+            "lockedRoute": row.get("lockedRoute", ""),
+            "canonicalRmse": row.get("baselineRmse", ""),
+            "v18_10Rmse": row.get("nativeRmse", ""),
+            "gainKmS": row.get("nativeGainKmS", ""),
+            "gainPct": row.get("nativeGainPct", ""),
+            "stillAbove20": row.get("nativeStillAbove20", ""),
+            "routeTransition": row.get("routeTransition", ""),
+            "responseFamily": row.get("responseFamily", ""),
+            "diagnosticBranch": row.get("diagnosticBranch", ""),
+        }
+        for row in high_rows
+    ]
+
+    guardrail_rows = [
+        {
+            "guardrail": "all-galaxy locked-MTS mean RMSE remains 21.90",
+            "value": fmt(parse_float(summary.get("allGalaxyLockedMtsMeanRmse"))),
+            "pass": round(parse_float(summary.get("allGalaxyLockedMtsMeanRmse")), 2) == 21.90,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "clean locked-MTS mean RMSE remains 19.33",
+            "value": fmt(parse_float(summary.get("cleanSetLockedMtsMeanRmse"))),
+            "pass": round(parse_float(summary.get("cleanSetLockedMtsMeanRmse")), 2) == 19.33,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "clean high-RMSE gain at least 68%",
+            "value": fmt(parse_float(summary.get("cleanHighGainPct"))) + "%",
+            "pass": parse_float(summary.get("cleanHighGainPct")) >= 68.0,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "clean-set gain at least 43%",
+            "value": fmt(parse_float(summary.get("cleanGainPct"))) + "%",
+            "pass": parse_float(summary.get("cleanGainPct")) >= 43.0,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "clean high-RMSE cases above 20 km/s after v18.10 equals 0",
+            "value": summary.get("cleanHighAbove20Native", ""),
+            "pass": int(parse_float(summary.get("cleanHighAbove20Native"), 0.0)) == 0,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "protected regression equals 0.00 km/s",
+            "value": fmt(parse_float(summary.get("maxProtectedRegressionKmS"))),
+            "pass": parse_float(summary.get("maxProtectedRegressionKmS"), 0.0) <= 1e-9,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "native/Python/cache mismatches equal 0",
+            "value": f"{summary.get('nativeVsPythonMismatchCount')} / {summary.get('nativeVsCacheMismatchCount')} / {summary.get('cacheVsPythonMismatchCount')}",
+            "pass": all(int(parse_float(summary.get(key), 0.0)) == 0 for key in ("nativeVsPythonMismatchCount", "nativeVsCacheMismatchCount", "cacheVsPythonMismatchCount")),
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "weak/systematics leakage equals 0 and 15 are excluded",
+            "value": f"{summary.get('weakSystematicsLeakage')} leakage; {summary.get('weakSystematicsExcludedCount')} excluded",
+            "pass": int(parse_float(summary.get("weakSystematicsLeakage"), 0.0)) == 0 and int(parse_float(summary.get("weakSystematicsExcludedCount"), 0.0)) == 15,
+            "source": "mts_v18_redteam_scores.csv",
+        },
+        {
+            "guardrail": "branch/null margins remain above 10 points",
+            "value": f"family {fmt(parse_float(summary.get('familySurfaceNullMarginPct')))}; branch {fmt(parse_float(summary.get('branchShuffleNullMarginPct')))}; edge {fmt(parse_float(summary.get('edgeNullMarginPct')))}",
+            "pass": all(parse_float(summary.get(key), 0.0) >= 10.0 for key in ("familySurfaceNullMarginPct", "branchShuffleNullMarginPct", "edgeNullMarginPct")),
+            "source": "mts_v18_redteam_scores.csv",
+        },
+    ]
+
+    holdout_summary_rows = [
+        {
+            "seed": row.get("seed", ""),
+            "holdoutCount": row.get("holdoutCount", ""),
+            "highHoldoutCount": row.get("highHoldoutCount", ""),
+            "holdoutGainPct": row.get("holdoutGainPct", ""),
+            "highHoldoutGainPct": row.get("highHoldoutGainPct", ""),
+            "highHoldoutAbove20": row.get("highHoldoutAbove20", ""),
+            "maxProtectedRegressionKmS": row.get("maxProtectedRegressionKmS", ""),
+        }
+        for row in holdout_rows
+    ]
+
+    weak_holdout_rows = [
+        {
+            "galaxy": row.get("galaxy", ""),
+            "lockedRoute": row.get("lockedRoute", ""),
+            "canonicalRmse": row.get("baselineRmse", ""),
+            "diagnosticV18_10Rmse": row.get("nativeRmse", ""),
+            "status": "excluded from transport-law fitting",
+            "source": "mts_v18_redteam_case_ledger.csv",
+        }
+        for row in sorted(weak_rows, key=lambda row: row.get("galaxy", ""))
+    ]
+
+    write_csv(out_dir / "mts_v18_10_release_repaired_high_rmse.csv", repaired_rows)
+    write_csv(out_dir / "mts_v18_10_release_guardrails.csv", guardrail_rows)
+    write_csv(out_dir / "mts_v18_10_release_nulls.csv", null_rows)
+    write_csv(out_dir / "mts_v18_10_release_holdout_replay.csv", holdout_summary_rows)
+    write_csv(out_dir / "mts_v18_10_release_weak_holdout.csv", weak_holdout_rows)
+    write_csv(out_dir / "mts_v18_10_release_protected_regressions.csv", protected_regressions)
+
+    top_repairs = repaired_rows[:15]
+    null_table = [
+        f"| {row.get('nullTrack', '')} | {fmt(parse_float(row.get('nullMarginPct')))} | {row.get('pass', '')} |"
+        for row in null_rows
+    ]
+    repair_table = [
+        f"| {row['galaxy']} | {fmt(parse_float(row['canonicalRmse']))} | {fmt(parse_float(row['v18_10Rmse']))} | {fmt(parse_float(row['gainKmS']))} | {row['responseFamily']} | {row['diagnosticBranch']} |"
+        for row in top_repairs
+    ]
+
+    framework_section = [
+        "# MTS v18.10 Release Candidate Section",
+        "",
+        "## Candidate Definition",
+        "",
+        "MTS v18.10 is the native-gated release implementation of the v18.09 surface-persistence observed-state response candidate. The canonical constants remain locked: `q=0.77`, `Gamma0=809.956`, fixed disk M/L, and fixed bulge M/L. The candidate changes only the deterministic observed-state response branch already validated in the clean SPARC chain; it does not use galaxy names, residual lookup, raw RMSE lookup, q retuning, amplitude fitting, or weak/systematics galaxies as formula inputs.",
+        "",
+        "## Main Result",
+        "",
+        f"Against the locked canonical MTS baseline, v18.10 improves the clean high-RMSE SPARC anatomy set by `{fmt(parse_float(summary.get('cleanHighGainPct')))}%` and the full clean set by `{fmt(parse_float(summary.get('cleanGainPct')))}%`. The clean high-RMSE set has `{summary.get('cleanHighAbove20Native')}` galaxies remaining above `20 km/s`. The median route-stratified high-RMSE holdout gain is `{fmt(parse_float(summary.get('medianHoldoutHighGainPct')))}%`.",
+        "",
+        "## Guardrails",
+        "",
+        f"The all-galaxy locked-MTS mean remains `{fmt(parse_float(summary.get('allGalaxyLockedMtsMeanRmse')))}` and the clean locked-MTS mean remains `{fmt(parse_float(summary.get('cleanSetLockedMtsMeanRmse')))}`. Protected regression is `{fmt(parse_float(summary.get('maxProtectedRegressionKmS')))}` km/s. Native/cache/Python mismatch counts are `{summary.get('nativeVsPythonMismatchCount')}` / `{summary.get('nativeVsCacheMismatchCount')}` / `{summary.get('cacheVsPythonMismatchCount')}`. The 15 weak/systematics galaxies remain excluded from transport-law fitting.",
+        "",
+        "## Largest Clean High-RMSE Repairs",
+        "",
+        "| Galaxy | Canonical RMSE | v18.10 RMSE | Gain | Family | Branch |",
+        "| --- | ---: | ---: | ---: | --- | --- |",
+        *repair_table,
+        "",
+        "## Null Controls",
+        "",
+        "| Null/control | Margin, percentage points | Pass |",
+        "| --- | ---: | --- |",
+        *null_table,
+        "",
+        "## Claim Boundary",
+        "",
+        "This is a reviewable framework candidate for the clean SPARC high-RMSE failures. It is stronger than a diagnostic pack because the browser-native formula, exact cache, and Python scorer now agree with zero mismatches. It is still not a broad cosmology claim and it does not use the 15 weak/systematics galaxies for transport-law fitting.",
+    ]
+    (out_dir / "mts_v18_10_release_framework_section.md").write_text("\n".join(framework_section), encoding="utf-8")
+
+    browser_note = [
+        "# Browser Note: MTS v18.10 Release Candidate",
+        "",
+        "Select `MTS v18.10 release candidate (native gated)` in the Test Rig.",
+        "",
+        "The browser uses the native formula only because all release gates are zero: cache mismatch `0`, native mismatch `0`, route mismatch `0`, high-RMSE above-20 count `0`, protected regression `0.00 km/s`, and weak/systematics leakage `0`.",
+        "",
+        "Expected panel values:",
+        "",
+        f"- High Gain: `{fmt(parse_float(summary.get('cleanHighGainPct')))}%`",
+        f"- Holdout Gain: `{fmt(parse_float(summary.get('medianHoldoutHighGainPct')))}%`",
+        f"- Stress Above 20: `{summary.get('cleanHighAbove20Native')}`",
+        f"- Null Margin: `{fmt(parse_float(summary.get('branchShuffleNullMarginPct')))} pts`",
+        f"- Protected Worse: `{summary.get('protectedRegressionCount')}`",
+        f"- Runtime Source: `native expression`",
+        f"- Native Mismatch: `{summary.get('nativeVsPythonMismatchCount')}`",
+    ]
+    (out_dir / "mts_v18_10_release_browser_note.md").write_text("\n".join(browser_note), encoding="utf-8")
+
+    report = [
+        "# MTS v18.10 Release Materials",
+        "",
+        f"Verdict: `{summary.get('verdict')}`.",
+        "",
+        "Files in this folder are release-facing material derived from the frozen v18.10 red-team run. No new law search was performed.",
+        "",
+        "## Outputs",
+        "",
+        "- `mts_v18_10_release_framework_section.md`: paper/release candidate section.",
+        "- `mts_v18_10_release_repaired_high_rmse.csv`: all clean high-RMSE repairs.",
+        "- `mts_v18_10_release_guardrails.csv`: acceptance gates and pass/fail values.",
+        "- `mts_v18_10_release_nulls.csv`: null margins.",
+        "- `mts_v18_10_release_browser_note.md`: browser-facing check text.",
+        "",
+        "## Counts",
+        "",
+        f"- Clean curves: `{summary.get('cleanCurveCount')}`.",
+        f"- Clean high-RMSE repairs listed: `{len(repaired_rows)}`.",
+        f"- Weak/systematics excluded: `{summary.get('weakSystematicsExcludedCount')}`.",
+        f"- Protected regressions: `{len(protected_regressions)}`.",
+    ]
+    (out_dir / "mts_v18_10_release_candidate_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    output_files = [
+        "mts_v18_10_release_framework_section.md",
+        "mts_v18_10_release_repaired_high_rmse.csv",
+        "mts_v18_10_release_guardrails.csv",
+        "mts_v18_10_release_nulls.csv",
+        "mts_v18_10_release_holdout_replay.csv",
+        "mts_v18_10_release_weak_holdout.csv",
+        "mts_v18_10_release_protected_regressions.csv",
+        "mts_v18_10_release_browser_note.md",
+        "mts_v18_10_release_candidate_report.md",
+        "mts_v18_10_release_materials_capsule.json",
+    ]
+    capsule = {
+        "analysisName": "mts-observed-v18-release-materials-v1",
+        "candidateId": "observed-state-response-v18.10-release-materials",
+        "sourceRedteamDir": str(redteam_dir.resolve()),
+        "verdict": "v18.10 release materials ready" if str(summary.get("verdict")) == "v18.10 frozen-law red-team passed" else "v18.10 release materials blocked",
+        "summary": {
+            "redteamVerdict": summary.get("verdict"),
+            "cleanHighGainPct": parse_float(summary.get("cleanHighGainPct")),
+            "cleanGainPct": parse_float(summary.get("cleanGainPct")),
+            "medianHoldoutHighGainPct": parse_float(summary.get("medianHoldoutHighGainPct")),
+            "cleanHighAbove20Native": int(parse_float(summary.get("cleanHighAbove20Native"), 0.0)),
+            "protectedRegressionCount": len(protected_regressions),
+            "weakSystematicsExcludedCount": int(parse_float(summary.get("weakSystematicsExcludedCount"), 0.0)),
+            "branchShuffleNullMarginPct": parse_float(summary.get("branchShuffleNullMarginPct")),
+            "nativeFormulaCanReplaceCache": str(summary.get("nativeFormulaCanReplaceCache")).lower() == "true",
+        },
+        "outputFiles": output_files,
+    }
+    (out_dir / "mts_v18_10_release_materials_capsule.json").write_text(
+        json.dumps(json_clean(capsule), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return capsule
+
+
+def cmd_v18releasematerials(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_RELEASE_MATERIALS_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_release_materials_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.10 release materials")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high_gain={fmt(summary['cleanHighGainPct'])}%",
+                f"clean_gain={fmt(summary['cleanGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"above20={summary['cleanHighAbove20Native']}",
+                f"protected={summary['protectedRegressionCount']}",
+                f"weak_excluded={summary['weakSystematicsExcludedCount']}",
+                f"branch_null={fmt(summary['branchShuffleNullMarginPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 release materials to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_paper_section_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     evidence_dir = DEFAULT_OBSERVED_STATE_V18_EVIDENCE_EXPORT_OUT
@@ -71919,6 +72197,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18releaseverify",
             "v18redteam",
             "observedstatev18redteam",
+            "v18releasematerials",
+            "observedstatev18releasematerials",
             "observedstatev18papersection",
             "observedstatev18docxbundle",
             "observedstatev18integrateddocx",
@@ -72182,6 +72462,8 @@ def main() -> None:
         cmd_v18releaseverify(args)
     elif args.mode in {"v18redteam", "observedstatev18redteam"}:
         cmd_v18redteam(args)
+    elif args.mode in {"v18releasematerials", "observedstatev18releasematerials"}:
+        cmd_v18releasematerials(args)
     elif args.mode == "observedstatev18papersection":
         cmd_observedstatev18papersection(args)
     elif args.mode == "observedstatev18docxbundle":

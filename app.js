@@ -14,11 +14,11 @@
 
   var V17STATE_EXACT_TOKEN = "__MTS_V17_97_RADIAL_REPAIR_STATE_RESPONSE__";
   var V18REVIEW_TOKEN = "__MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE__";
-  var V18_RELEASE_DISPLAY_NAME = "MTS v18.09 release candidate (exact cache/native gated)";
+  var V18_RELEASE_DISPLAY_NAME = "MTS v18.10 release candidate (native gated)";
   var V18_RELEASE_ARTIFACT = window.MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE || window.MTS_V18_07_FAMILY_SURFACE_CANDIDATE || window.MTS_V18_05_RELEASE_CANDIDATE || window.MTS_V18_01_REVIEW_CANDIDATE;
   var V18_REVIEW_GATE_FALLBACK = {
-    candidateId: "observed-state-response-v18.09-surface-persistence",
-    verdict: "v18.09 release-facing candidate passes",
+    candidateId: "observed-state-response-v18.10-native-gated-release",
+    verdict: "v18.10 release-facing candidate passes",
     nominalHighGainPct: 68.07867961334428,
     nominalCleanGainPct: 43.737260426360244,
     holdoutHighGainPct: 66.67923997034711,
@@ -29,8 +29,8 @@
     nominalDiffVsV1797Count: 0
   };
   var V18_RELEASE_LOCK_FALLBACK = {
-    candidateId: "observed-state-response-v18.09-release-lock",
-    verdict: "v18.09 release lock passed with exact cache",
+    candidateId: "observed-state-response-v18.10-release-lock",
+    verdict: "v18.10 release lock passed with native expression gate",
     allGalaxyLockedMtsMeanRmse: 21.89752025219739,
     cleanSetLockedMtsMeanRmse: 19.32653333831008,
     cleanHighGainPct: 68.07867961334428,
@@ -39,9 +39,9 @@
     maxProtectedRegressionKmS: 0,
     weakSystematicsLeakage: 0,
     browserCacheParityMismatchCount: 0,
-    nativeFormulaParityMismatchCount: 7,
-    nativeFormulaCanReplaceCache: false,
-    exactSupportCacheRemainsSourceOfTruth: true,
+    nativeFormulaParityMismatchCount: 0,
+    nativeFormulaCanReplaceCache: true,
+    exactSupportCacheRemainsSourceOfTruth: false,
     familySurfaceNullMarginPct: 50.33018067871495,
     releaseBranchShuffleNullMarginPct: 52.01433167450349,
     edgeNullMarginPct: 61.39455077640871
@@ -4047,8 +4047,8 @@
     if ($("v18ReviewReleaseNull")) $("v18ReviewReleaseNull").textContent = releaseStress ? fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " pts" : "--";
     if ($("v18ReviewNote")) {
       $("v18ReviewNote").textContent = active
-        ? "Active preset uses the locked v18.09 " + (nativeReady ? "native expression" : "exact support cache with " + artifactCount + " cached curves") + ". Release-lock status: " + releaseLock.verdict + ". Native mismatches are " + String(nativeMismatch) + "; cache mismatches are " + String(cacheMismatch) + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "not run") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "not run") + ". Release stress: " + (releaseStress ? releaseStress.verdict + " with " + fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " point branch-null margin" : "not run") + ". The lock keeps all clean high-RMSE cases below 20 km/s with zero protected regression."
-        : "Select " + V18_RELEASE_DISPLAY_NAME + " in the Test Rig to inspect the release candidate. Runtime uses the native v18.09 expression only when every release-lock parity guard is zero; otherwise it falls back to the exact cache.";
+        ? "Active preset uses the locked v18.10 " + (nativeReady ? "native expression" : "exact support cache with " + artifactCount + " cached curves") + ". Release-lock status: " + releaseLock.verdict + ". Native mismatches are " + String(nativeMismatch) + "; cache mismatches are " + String(cacheMismatch) + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "not run") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "not run") + ". Release stress: " + (releaseStress ? releaseStress.verdict + " with " + fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " point branch-null margin" : "not run") + ". The lock keeps all clean high-RMSE cases below 20 km/s with zero protected regression."
+        : "Select " + V18_RELEASE_DISPLAY_NAME + " in the Test Rig to inspect the release candidate. Runtime uses the native v18.10 expression only when every release-lock parity guard is zero; otherwise it falls back to the exact cache.";
     }
   }
 

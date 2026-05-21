@@ -66,9 +66,9 @@ LTG curvature A ~= -2.671 + 2.735/sqrt(u_0.75)
 supercritical late-load flag = u_0.75 > 1
 ```
 
-## v18.09 Release Candidate
+## v18.10 Release Candidate
 
-The browser preset `MTS v18.09 release candidate (exact cache/native gated)` loads the locked observed-state response artifact from:
+The browser preset `MTS v18.10 release candidate (native gated)` loads the locked observed-state response artifact from:
 
 ```text
 data/v18-09-surface-persistence-candidate.js
@@ -90,9 +90,10 @@ protected regression = 0.00 km/s
 weak/systematics leakage = 0
 browser support-cache mismatches = 0
 native formula mismatches = 0
+v18.10 red-team verdict = passed
 ```
 
-Canonical MTS constants remain locked. The v18.09 preset is the current framework candidate for review, not a replacement for the documented canonical baseline. The browser uses the native v18.09 expression only when the artifact reports zero cache mismatches, zero native mismatches, zero native route mismatches, zero high-RMSE cases above 20 km/s, zero protected regression, and zero weak/systematics leakage; otherwise it falls back to the exact tested support cache.
+Canonical MTS constants remain locked. The v18.10 preset is the current framework candidate for review, not a replacement for the documented canonical baseline. The browser uses the native v18.10 expression only when the artifact reports zero cache mismatches, zero native mismatches, zero native route mismatches, zero high-RMSE cases above 20 km/s, zero protected regression, and zero weak/systematics leakage; otherwise it falls back to the exact tested support cache.
 
 The active curve also reports the inner S-law completion diagnostic:
 
