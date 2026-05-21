@@ -32,6 +32,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 import zlib
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
@@ -192,6 +193,7 @@ DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-v1
 DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BROWSER_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial-phase-browser-lock-v1"
 DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial-phase-benchmark-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_TAIL_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-tail-candidate-v1"
+DEFAULT_OBSERVED_STATE_V18_NFW_PHASE_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-phase-candidate-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -66871,6 +66873,648 @@ def cmd_v18nfwtailcandidate(args: argparse.Namespace) -> None:
     print(f"Wrote v18 NFW-tail candidate to {out_dir.resolve()}")
 
 
+V18_NFW_PHASE_STRENGTH_GRID = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
+V18_NFW_PHASE_SEEDS = [20260511, 20260512, 20260513, 20260514, 20260515, 314159, 271828, 42, 12345]
+
+
+def v18_nfw_phase_zone(point: dict) -> str:
+    x_value = point.get("x", 0.0)
+    if x_value < 0.33:
+        return "inner"
+    if x_value < 0.67:
+        return "mid"
+    return "outer"
+
+
+def v18_nfw_phase_shape_class(inner_diff: float, mid_diff: float, outer_diff: float) -> str:
+    if outer_diff > 5.0 and mid_diff > 2.0:
+        return "mid+outer oversupport"
+    if outer_diff > 5.0:
+        return "outer oversupport/tail"
+    if mid_diff > 5.0:
+        return "mid oversupport/shelf"
+    if inner_diff > 5.0 and mid_diff > 2.0:
+        return "inner+mid oversupport"
+    if inner_diff < -4.0 and outer_diff > 2.0:
+        return "inner deficit outer excess"
+    if mid_diff < -4.0 and outer_diff > 0.0:
+        return "mid deficit outer excess"
+    if max(inner_diff, mid_diff, outer_diff) < 2.0 and min(inner_diff, mid_diff, outer_diff) > -2.0:
+        return "mostly amplitude tie"
+    return "mixed phase"
+
+
+def v18_nfw_phase_shape_rows(base: dict, priority_rows_by_name: dict[str, dict]) -> list[dict]:
+    rows: list[dict] = []
+    for curve in base["curves"]:
+        name = curve["name"]
+        prior = priority_rows_by_name.get(name)
+        if not prior or parse_float(prior.get("v1821MinusNfwPriorKmS"), 0.0) <= 0.5:
+            continue
+        v18_supports = [base["v18Lookup"][(name, index)] for index in range(len(curve["points"]))]
+        if name in base["weakNames"]:
+            continue
+        v1821_supports, acts, _profile, _mass, _legacy, _legacy_family, _official_family = v18_radial_phase_supports(
+            curve,
+            v18_supports,
+            base["baseStrengths"],
+            base["table1ByName"],
+        )
+        v200, concentration, _score, _params = v18_competitor_fit_nfw(curve, concentration_prior=True)
+        nfw_supports = v18_competitor_nfw_supports(curve, v200, concentration)
+        by_zone: dict[str, list[dict]] = {"inner": [], "mid": [], "outer": []}
+        for point, v1821_support, nfw_support in zip(curve["points"], v1821_supports, nfw_supports):
+            v1821_model = math.sqrt(max(0.0, point["bar2"] + max(0.0, v1821_support)))
+            nfw_model = math.sqrt(max(0.0, point["bar2"] + max(0.0, nfw_support)))
+            by_zone[v18_nfw_phase_zone(point)].append(
+                {
+                    "v1821Residual": v1821_model - point["vObs"],
+                    "nfwResidual": nfw_model - point["vObs"],
+                    "modelDiff": v1821_model - nfw_model,
+                    "supportDiff": v1821_support - nfw_support,
+                }
+            )
+
+        def zone_mean(zone: str, key: str) -> float:
+            return safe_mean(row[key] for row in by_zone[zone])
+
+        inner_diff = zone_mean("inner", "modelDiff")
+        mid_diff = zone_mean("mid", "modelDiff")
+        outer_diff = zone_mean("outer", "modelDiff")
+        rows.append(
+            {
+                "galaxy": name,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "v1821Rmse": prior.get("v18_21Rmse", ""),
+                "nfwPriorRmse": prior.get("nfwPriorRmse", ""),
+                "v1821MinusNfwPriorKmS": prior.get("v1821MinusNfwPriorKmS", ""),
+                "shapeClass": v18_nfw_phase_shape_class(inner_diff, mid_diff, outer_diff),
+                "innerMeanV1821MinusNfwKmS": inner_diff,
+                "midMeanV1821MinusNfwKmS": mid_diff,
+                "outerMeanV1821MinusNfwKmS": outer_diff,
+                "innerMeanV1821ResidualKmS": zone_mean("inner", "v1821Residual"),
+                "midMeanV1821ResidualKmS": zone_mean("mid", "v1821Residual"),
+                "outerMeanV1821ResidualKmS": zone_mean("outer", "v1821Residual"),
+                "branchHitsV1821": "; ".join(
+                    family for family in V18_RADIAL_PHASE_STRENGTHS if parse_float(acts.get(family), 0.0) >= 0.20
+                ),
+            }
+        )
+    rows.sort(key=lambda row: (-parse_float(row["v1821MinusNfwPriorKmS"], 0.0), row["galaxy"]))
+    return rows
+
+
+def v18_nfw_phase_activations(curve: dict, table1_by_name: dict[str, dict], v1821_acts: dict) -> tuple[dict[str, float], dict, dict, str, str]:
+    values = observed_state_values(curve)
+    mass = v18_official_mass_scale_features(curve, table1_by_name)
+    route = curve.get("lockedModelRoute", "")
+    legacy_family = ""
+    official_family = ""
+    low_completion_inward = 0.0
+    buffered_dwarf_inward = 0.0
+    if route == "low-load":
+        base_completion_hit = parse_float(v1821_acts.get("completion"), 0.0) >= 0.20
+        legacy_family = str(v1821_acts.get("legacyCompletionFamily", ""))
+        official_family = str(v1821_acts.get("officialMassScaleFamily", ""))
+        if base_completion_hit:
+            low_completion_inward = (
+                v18_nfw_gap_candidate_smooth(values["outerGasShare"], 0.43, 0.56)
+                * v18_nfw_gap_candidate_smooth(0.93 - curve["lockedModelUMax"], 0.0, 0.15)
+                * v18_nfw_gap_candidate_smooth(curve["lockedModelUOut"], 0.34, 0.43)
+                * v18_nfw_gap_candidate_smooth(values["hOverRout"], 0.14, 0.24)
+                * v18_nfw_gap_candidate_smooth(2.40 - curve["memoryLoad"], 0.0, 0.90)
+            )
+    if route == "buffered single-crossing":
+        buffered_dwarf_inward = (
+            v18_nfw_gap_candidate_smooth(1.20 - mass["mBar_1e9Msun"], 0.0, 0.90)
+            * v18_nfw_gap_candidate_smooth(values["pointDensity"], 1.90, 2.80)
+            * v18_nfw_gap_candidate_smooth(0.10 - values["hOverRout"], 0.0, 0.06)
+            * v18_nfw_gap_candidate_smooth(values["outerGasShare"], 0.38, 0.52)
+            * v18_nfw_gap_candidate_smooth(1.18 - curve["lockedModelUMax"], 0.0, 0.14)
+        )
+    acts = {
+        "lowCompletionInwardPhase": clamp(low_completion_inward, 0.0, 1.0),
+        "bufferedDwarfInwardPhase": clamp(buffered_dwarf_inward, 0.0, 1.0),
+    }
+    acts["anyActivation"] = max(acts.values())
+    return acts, values, mass, legacy_family, official_family
+
+
+def v18_nfw_phase_supports(
+    curve: dict,
+    v1821_supports: list[float],
+    strengths: dict[str, float],
+    table1_by_name: dict[str, dict],
+    v1821_acts: dict,
+    forced_activations: dict[str, float] | None = None,
+) -> tuple[list[float], dict[str, float], dict, dict, str, str]:
+    if forced_activations is None:
+        acts, values, mass, legacy_family, official_family = v18_nfw_phase_activations(curve, table1_by_name, v1821_acts)
+    else:
+        acts = {
+            "lowCompletionInwardPhase": parse_float(forced_activations.get("lowCompletionInwardPhase"), 0.0),
+            "bufferedDwarfInwardPhase": parse_float(forced_activations.get("bufferedDwarfInwardPhase"), 0.0),
+        }
+        acts["anyActivation"] = max(acts.values())
+        values = observed_state_values(curve)
+        mass = v18_official_mass_scale_features(curve, table1_by_name)
+        legacy_family = ""
+        official_family = ""
+    output: list[float] = []
+    for point, support in zip(curve["points"], v1821_supports):
+        x_value = point.get("x", point["r"] / max(curve["rOut"], 1e-9))
+        inward_shape = 0.85 - 1.25 * v18_nfw_gap_candidate_smooth(x_value, 0.20, 0.90)
+        factor = 1.0
+        factor += strengths["lowCompletionInward"] * acts["lowCompletionInwardPhase"] * inward_shape
+        factor += strengths["bufferedDwarfInward"] * acts["bufferedDwarfInwardPhase"] * inward_shape
+        output.append(max(0.0, support * clamp(factor, 0.25, 2.00)))
+    return output, acts, values, mass, legacy_family, official_family
+
+
+def v18_nfw_phase_score_rows(
+    base: dict,
+    strengths: dict[str, float],
+    priority_names: set[str],
+    split_names: tuple[set[str], set[str]] | None = None,
+    forced_by_name: dict[str, dict[str, float]] | None = None,
+) -> list[dict]:
+    train_names, holdout_names = split_names if split_names is not None else (set(), set())
+    rows: list[dict] = []
+    for curve in base["curves"]:
+        name = curve["name"]
+        v18_supports = [base["v18Lookup"][(name, index)] for index in range(len(curve["points"]))]
+        if name in base["weakNames"]:
+            v1821_supports = v18_supports[:]
+            candidate_supports = v1821_supports[:]
+            acts = {"lowCompletionInwardPhase": 0.0, "bufferedDwarfInwardPhase": 0.0, "anyActivation": 0.0}
+            values = observed_state_values(curve)
+            mass = v18_official_mass_scale_features(curve, base["table1ByName"])
+            legacy_family = ""
+            official_family = ""
+            radial_hits = ""
+        else:
+            v1821_supports, v1821_acts, _profile, _mass, _legacy, legacy_family, official_family = v18_radial_phase_supports(
+                curve,
+                v18_supports,
+                base["baseStrengths"],
+                base["table1ByName"],
+            )
+            v1821_acts["legacyCompletionFamily"] = legacy_family
+            v1821_acts["officialMassScaleFamily"] = official_family
+            candidate_supports, acts, values, mass, legacy_family, official_family = v18_nfw_phase_supports(
+                curve,
+                v1821_supports,
+                strengths,
+                base["table1ByName"],
+                v1821_acts,
+                forced_by_name.get(name) if forced_by_name else None,
+            )
+            radial_hits = "; ".join(
+                family for family in V18_RADIAL_PHASE_STRENGTHS if parse_float(v1821_acts.get(family), 0.0) >= 0.20
+            )
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        v1821_score = v18_competitor_support_score(curve, v1821_supports)
+        candidate = v18_competitor_support_score(curve, candidate_supports)
+        set_label = v18_competitor_set_label(name, base["weakNames"], base["highNames"])
+        split = "weak-excluded" if name in base["weakNames"] else ("holdout" if name in holdout_names else "train" if name in train_names else "")
+        branch_hits = [
+            key for key in ["lowCompletionInwardPhase", "bufferedDwarfInwardPhase"] if parse_float(acts.get(key), 0.0) >= 0.05
+        ]
+        rows.append(
+            {
+                "galaxy": name,
+                "set": set_label,
+                "split": split,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "priorityNfwGapCase": name in priority_names,
+                "canonicalRmse": canonical["rmse"],
+                "v18_21Rmse": v1821_score["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "candidateGainVsV1821KmS": v1821_score["rmse"] - candidate["rmse"],
+                "candidateGainVsV1821Pct": pct_improvement(v1821_score["rmse"], candidate["rmse"]),
+                "candidateRegressionVsV1821KmS": max(0.0, candidate["rmse"] - v1821_score["rmse"]),
+                "candidateGainVsCanonicalPct": pct_improvement(canonical["rmse"], candidate["rmse"]),
+                "lowCompletionInwardPhaseActivation": acts["lowCompletionInwardPhase"],
+                "bufferedDwarfInwardPhaseActivation": acts["bufferedDwarfInwardPhase"],
+                "anyActivation": acts["anyActivation"],
+                "branchHits": "; ".join(branch_hits),
+                "v1821RadialPhaseFamilies": radial_hits,
+                "legacyCompletionFamily": legacy_family,
+                "officialMassScaleFamily": official_family,
+                "memoryLoad": curve["memoryLoad"],
+                "uOut": curve["lockedModelUOut"],
+                "uMax": curve["lockedModelUMax"],
+                "hOverRout": values["hOverRout"],
+                "outerGasShare": values["outerGasShare"],
+                "outerDiskShare": values["outerDiskShare"],
+                "barCurv": values["barCurv"],
+                "pointDensity": values["pointDensity"],
+                "mBar_1e9Msun": mass["mBar_1e9Msun"],
+                "tableGasFraction": mass["tableGasFraction"],
+                "above20Candidate": candidate["rmse"] >= 20.0,
+                "protectedRegressionKmS": max(0.0, candidate["rmse"] - v1821_score["rmse"]) if set_label == "clean-protected" else "",
+            }
+        )
+    return rows
+
+
+def v18_nfw_phase_metric(rows: list[dict], split_filter: str | None = None) -> dict:
+    selected = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+    if split_filter:
+        selected = [row for row in selected if row.get("split") == split_filter]
+    high = [row for row in selected if row["set"] == "clean-high-rmse"]
+    protected = [row for row in selected if row["set"] == "clean-protected"]
+    priority = [row for row in high if parse_bool(row.get("priorityNfwGapCase"))]
+    v1821_high_mean = safe_mean(parse_float(row["v18_21Rmse"]) for row in high)
+    cand_high_mean = safe_mean(parse_float(row["candidateRmse"]) for row in high)
+    v1821_priority_mean = safe_mean(parse_float(row["v18_21Rmse"]) for row in priority)
+    cand_priority_mean = safe_mean(parse_float(row["candidateRmse"]) for row in priority)
+    protected_regs = [parse_float(row.get("protectedRegressionKmS"), 0.0) for row in protected]
+    return {
+        "split": split_filter or "all-clean",
+        "cleanHighCount": len(high),
+        "priorityGapCount": len(priority),
+        "v1821HighMeanRmse": v1821_high_mean,
+        "candidateHighMeanRmse": cand_high_mean,
+        "highGainVsV1821Pct": pct_improvement(v1821_high_mean, cand_high_mean),
+        "v1821PriorityMeanRmse": v1821_priority_mean,
+        "candidatePriorityMeanRmse": cand_priority_mean,
+        "priorityGainVsV1821Pct": pct_improvement(v1821_priority_mean, cand_priority_mean),
+        "highAbove20Candidate": sum(1 for row in high if parse_bool(row["above20Candidate"])),
+        "protectedMaxRegressionKmS": max(protected_regs or [0.0]),
+        "weakSystematicsLeakage": sum(1 for row in rows if row["set"] == "weak-systematics-excluded" and parse_float(row["anyActivation"], 0.0) >= 0.05),
+        "activeHighCount": sum(1 for row in high if parse_float(row["anyActivation"], 0.0) >= 0.05),
+        "activeProtectedCount": sum(1 for row in protected if parse_float(row["anyActivation"], 0.0) >= 0.05),
+    }
+
+
+def v18_nfw_phase_select_strengths(
+    base: dict,
+    priority_names: set[str],
+    train_names: set[str],
+    holdout_names: set[str],
+) -> tuple[dict[str, float], list[dict]]:
+    best_strengths = {"lowCompletionInward": 0.0, "bufferedDwarfInward": 0.0}
+    best_utility = -math.inf
+    trial_rows: list[dict] = []
+    for low_strength in V18_NFW_PHASE_STRENGTH_GRID:
+        for buffered_strength in V18_NFW_PHASE_STRENGTH_GRID:
+            strengths = {"lowCompletionInward": low_strength, "bufferedDwarfInward": buffered_strength}
+            rows = v18_nfw_phase_score_rows(base, strengths, priority_names, (train_names, holdout_names))
+            train_metric = v18_nfw_phase_metric(rows, "train")
+            holdout_metric = v18_nfw_phase_metric(rows, "holdout")
+            utility = (
+                train_metric["priorityGainVsV1821Pct"]
+                + 0.70 * train_metric["highGainVsV1821Pct"]
+                - max(0.0, train_metric["protectedMaxRegressionKmS"] - 1.0) * 10.0
+                - train_metric["highAbove20Candidate"] * 20.0
+            )
+            trial_rows.append(
+                {
+                    "lowCompletionInwardStrength": low_strength,
+                    "bufferedDwarfInwardStrength": buffered_strength,
+                    "trainHighGainVsV1821Pct": train_metric["highGainVsV1821Pct"],
+                    "trainPriorityGainVsV1821Pct": train_metric["priorityGainVsV1821Pct"],
+                    "trainProtectedMaxRegressionKmS": train_metric["protectedMaxRegressionKmS"],
+                    "trainHighAbove20Candidate": train_metric["highAbove20Candidate"],
+                    "holdoutHighGainVsV1821Pct": holdout_metric["highGainVsV1821Pct"],
+                    "holdoutPriorityGainVsV1821Pct": holdout_metric["priorityGainVsV1821Pct"],
+                    "holdoutProtectedMaxRegressionKmS": holdout_metric["protectedMaxRegressionKmS"],
+                    "utility": utility,
+                }
+            )
+            if (
+                utility > best_utility
+                and train_metric["protectedMaxRegressionKmS"] <= 1.0
+                and train_metric["highAbove20Candidate"] == 0
+            ):
+                best_utility = utility
+                best_strengths = strengths
+    trial_rows.sort(key=lambda row: (-parse_float(row["utility"]), row["lowCompletionInwardStrength"], row["bufferedDwarfInwardStrength"]))
+    return best_strengths, trial_rows
+
+
+def v18_nfw_phase_null_rows(base: dict, strengths: dict[str, float], priority_names: set[str], reference_rows: list[dict]) -> list[dict]:
+    columns = {
+        "lowCompletionInwardPhase": "lowCompletionInwardPhaseActivation",
+        "bufferedDwarfInwardPhase": "bufferedDwarfInwardPhaseActivation",
+    }
+    by_route = {
+        route: [curve["name"] for curve in base["cleanCurves"] if curve["lockedModelRoute"] == route]
+        for route in sorted({curve["lockedModelRoute"] for curve in base["cleanCurves"]})
+    }
+    route_for_branch = {
+        "lowCompletionInwardPhase": "low-load",
+        "bufferedDwarfInwardPhase": "buffered single-crossing",
+    }
+    actual = {
+        row["galaxy"]: {branch: parse_float(row.get(column), 0.0) for branch, column in columns.items()}
+        for row in reference_rows
+        if row["set"] != "weak-systematics-excluded"
+    }
+    active_values = {
+        branch: [parse_float(row.get(column), 0.0) for row in reference_rows if row["set"] != "weak-systematics-excluded" and parse_float(row.get(column), 0.0) >= 0.05]
+        for branch, column in columns.items()
+    }
+    out: list[dict] = []
+    for seed in V18_NFW_PHASE_SEEDS:
+        rng = random.Random(seed)
+        names = sorted(actual)
+        shuffled_values = list(actual.values())
+        rng.shuffle(shuffled_values)
+        shuffled = dict(zip(names, shuffled_values))
+        rows = v18_nfw_phase_score_rows(base, strengths, priority_names, None, shuffled)
+        metric = v18_nfw_phase_metric(rows)
+        out.append(
+            {
+                "nullType": "activation-label-shuffle",
+                "seed": seed,
+                "highGainVsV1821Pct": metric["highGainVsV1821Pct"],
+                "priorityGainVsV1821Pct": metric["priorityGainVsV1821Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "activeForcedCount": sum(1 for acts in shuffled.values() for value in acts.values() if value >= 0.05),
+            }
+        )
+
+        forced: dict[str, dict[str, float]] = {}
+        for branch, values in active_values.items():
+            pool = by_route.get(route_for_branch[branch], [])[:]
+            rng.shuffle(pool)
+            for name, value in zip(pool, values):
+                forced.setdefault(name, {"lowCompletionInwardPhase": 0.0, "bufferedDwarfInwardPhase": 0.0})[branch] = value
+        rows = v18_nfw_phase_score_rows(base, strengths, priority_names, None, forced)
+        metric = v18_nfw_phase_metric(rows)
+        out.append(
+            {
+                "nullType": "same-route-active-value-random",
+                "seed": seed,
+                "highGainVsV1821Pct": metric["highGainVsV1821Pct"],
+                "priorityGainVsV1821Pct": metric["priorityGainVsV1821Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "activeForcedCount": sum(1 for acts in forced.values() for value in acts.values() if value >= 0.05),
+            }
+        )
+
+        forced = {}
+        for branch, values in active_values.items():
+            pool = [
+                row["galaxy"]
+                for row in reference_rows
+                if row["set"] == "clean-protected" and row["lockedRoute"] == route_for_branch[branch]
+            ]
+            rng.shuffle(pool)
+            for name, value in zip(pool, values):
+                forced.setdefault(name, {"lowCompletionInwardPhase": 0.0, "bufferedDwarfInwardPhase": 0.0})[branch] = value
+        rows = v18_nfw_phase_score_rows(base, strengths, priority_names, None, forced)
+        metric = v18_nfw_phase_metric(rows)
+        out.append(
+            {
+                "nullType": "protected-lookalike-phase-stress",
+                "seed": seed,
+                "highGainVsV1821Pct": metric["highGainVsV1821Pct"],
+                "priorityGainVsV1821Pct": metric["priorityGainVsV1821Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "activeForcedCount": sum(1 for acts in forced.values() for value in acts.values() if value >= 0.05),
+            }
+        )
+    return out
+
+
+def write_v18_nfw_phase_candidate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_nfw_phase_candidate"
+    benchmark_capsule = write_v18_radial_phase_benchmark_artifacts(DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BENCHMARK_OUT)
+    base = v18_radial_phase_base_context()
+    priority_names, priority_rows_by_name = v18_nfw_tail_priority_names()
+    shape_rows = v18_nfw_phase_shape_rows(base, priority_rows_by_name)
+    train_names, holdout_names = observed_state_split(base["cleanCurves"], SPLIT_SEED, HOLDOUT_FRACTION)
+    selected_strengths, trial_rows = v18_nfw_phase_select_strengths(base, priority_names, train_names, holdout_names)
+    rows = v18_nfw_phase_score_rows(base, selected_strengths, priority_names, (train_names, holdout_names))
+    all_metric = v18_nfw_phase_metric(rows)
+    train_metric = v18_nfw_phase_metric(rows, "train")
+    holdout_metric = v18_nfw_phase_metric(rows, "holdout")
+    null_rows = v18_nfw_phase_null_rows(base, selected_strengths, priority_names, rows)
+    best_null = max([parse_float(row["priorityGainVsV1821Pct"]) for row in null_rows] or [math.nan])
+    null_margin = all_metric["priorityGainVsV1821Pct"] - best_null if math.isfinite(best_null) else math.nan
+
+    high_rows = [row for row in rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [
+        row for row in rows
+        if row["set"] == "clean-protected"
+        and (parse_float(row["protectedRegressionKmS"], 0.0) > 0.0 or parse_float(row["anyActivation"], 0.0) >= 0.05)
+    ]
+    gap_rows: list[dict] = []
+    for row in high_rows:
+        prior = priority_rows_by_name.get(row["galaxy"], {})
+        nfw_prior_rmse = parse_float(prior.get("nfwPriorRmse"))
+        shape = next((shape_row for shape_row in shape_rows if shape_row["galaxy"] == row["galaxy"]), {})
+        gap_rows.append(
+            {
+                "galaxy": row["galaxy"],
+                "lockedRoute": row["lockedRoute"],
+                "shapeClass": shape.get("shapeClass", ""),
+                "priorityNfwGapCase": row["priorityNfwGapCase"],
+                "v18_21Rmse": row["v18_21Rmse"],
+                "candidateRmse": row["candidateRmse"],
+                "nfwPriorRmse": nfw_prior_rmse,
+                "v1821MinusNfwPriorKmS": parse_float(row["v18_21Rmse"]) - nfw_prior_rmse,
+                "candidateMinusNfwPriorKmS": parse_float(row["candidateRmse"]) - nfw_prior_rmse,
+                "gapClosedVsV1821KmS": parse_float(row["v18_21Rmse"]) - parse_float(row["candidateRmse"]),
+                "branchHits": row["branchHits"],
+            }
+        )
+    gap_rows.sort(key=lambda row: (-parse_float(row["v1821MinusNfwPriorKmS"], 0.0), row["galaxy"]))
+    branch_rows: list[dict] = []
+    for branch, column in [
+        ("lowCompletionInwardPhase", "lowCompletionInwardPhaseActivation"),
+        ("bufferedDwarfInwardPhase", "bufferedDwarfInwardPhaseActivation"),
+    ]:
+        active = [row for row in rows if parse_float(row.get(column), 0.0) >= 0.05]
+        active_high = [row for row in active if row["set"] == "clean-high-rmse"]
+        active_priority = [row for row in active_high if parse_bool(row.get("priorityNfwGapCase"))]
+        active_protected = [row for row in active if row["set"] == "clean-protected"]
+        branch_rows.append(
+            {
+                "branch": branch,
+                "activeCleanHighCount": len(active_high),
+                "activePriorityCount": len(active_priority),
+                "activeProtectedCount": len(active_protected),
+                "priorityGainVsV1821Pct": pct_improvement(
+                    safe_mean(parse_float(row["v18_21Rmse"]) for row in active_priority),
+                    safe_mean(parse_float(row["candidateRmse"]) for row in active_priority),
+                ),
+                "protectedMaxRegressionKmS": max([parse_float(row.get("protectedRegressionKmS"), 0.0) for row in active_protected] or [0.0]),
+            }
+        )
+    holdout_rows: list[dict] = []
+    for seed in V18_NFW_PHASE_SEEDS:
+        seed_train, seed_holdout = observed_state_split(base["cleanCurves"], seed, HOLDOUT_FRACTION)
+        seed_rows = v18_nfw_phase_score_rows(base, selected_strengths, priority_names, (seed_train, seed_holdout))
+        metric = v18_nfw_phase_metric(seed_rows, "holdout")
+        metric["seed"] = seed
+        holdout_rows.append(metric)
+
+    passes = {
+        "priorityGainVsV1821AtLeast5Pct": all_metric["priorityGainVsV1821Pct"] >= 5.0,
+        "holdoutPriorityGainAtLeast3Pct": holdout_metric["priorityGainVsV1821Pct"] >= 3.0,
+        "highGainVsV1821Positive": all_metric["highGainVsV1821Pct"] > 0.0,
+        "highAbove20Zero": all_metric["highAbove20Candidate"] == 0,
+        "protectedRegressionBelow1": all_metric["protectedMaxRegressionKmS"] < 1.0,
+        "weakLeakageZero": all_metric["weakSystematicsLeakage"] == 0,
+        "nullMarginAtLeast5Pct": math.isfinite(null_margin) and null_margin >= 5.0,
+    }
+    verdict = "v18.23 phase candidate for review" if all(passes.values()) else "v18.23 phase candidate not promoted"
+    score_rows = [
+        {"metric": key, "value": value}
+        for key, value in {
+            "v1821AllMeanRmse": benchmark_capsule["summary"]["v1821AllMeanRmse"],
+            "v1821HighMeanRmse": benchmark_capsule["summary"]["v1821HighMeanRmse"],
+            "candidateHighGainVsV1821Pct": all_metric["highGainVsV1821Pct"],
+            "candidatePriorityGainVsV1821Pct": all_metric["priorityGainVsV1821Pct"],
+            "trainPriorityGainVsV1821Pct": train_metric["priorityGainVsV1821Pct"],
+            "holdoutPriorityGainVsV1821Pct": holdout_metric["priorityGainVsV1821Pct"],
+            "candidateProtectedMaxRegressionKmS": all_metric["protectedMaxRegressionKmS"],
+            "candidateHighAbove20": all_metric["highAbove20Candidate"],
+            "weakSystematicsLeakage": all_metric["weakSystematicsLeakage"],
+            "bestNullPriorityGainVsV1821Pct": best_null,
+            "nullMarginPriorityPct": null_margin,
+        }.items()
+    ]
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", rows)
+    write_csv(out_dir / f"{prefix}_shape_audit.csv", shape_rows)
+    write_csv(out_dir / f"{prefix}_competitor_gap.csv", gap_rows)
+    write_csv(out_dir / f"{prefix}_branch_ledger.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_holdout_replay.csv", holdout_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_strength_trials.csv", trial_rows[:40])
+    formula = {
+        "candidateId": "observed-state-response-v18.23-nfw-inward-phase-candidate",
+        "status": verdict,
+        "baseLaw": "locked v18.21 radial-phase release candidate",
+        "selectedStrengths": selected_strengths,
+        "mechanism": "narrow inward phase transfer for state/profile cases with inner deficit and outer excess shape after v18.21",
+        "allowedInputs": ["locked route", "memoryLoad", "u_out", "u_max", "h/rOut", "outerGasShare", "pointDensity", "official baryonic mass", "existing v18.21 completion branch state"],
+        "forbiddenInputs": ["galaxy names", "NFW parameters", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    changed = [row for row in high_rows if abs(parse_float(row["candidateGainVsV1821KmS"], 0.0)) > 0.05]
+    changed.sort(key=lambda row: -parse_float(row["candidateGainVsV1821KmS"], 0.0))
+    shape_counts = Counter(row["shapeClass"] for row in shape_rows)
+    report = [
+        "# MTS v18.23 NFW Phase Candidate",
+        "",
+        "This mode tests whether the remaining v18.21/NFW-prior gap is a radial phase problem rather than a tail-amplitude problem. NFW is used for gap anatomy and scoring only, not as a formula input.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Selected strengths: low completion inward `{fmt(selected_strengths['lowCompletionInward'])}`, buffered dwarf inward `{fmt(selected_strengths['bufferedDwarfInward'])}`.",
+        f"- Priority NFW-gap gain over v18.21: `{fmt(all_metric['priorityGainVsV1821Pct'])}%`.",
+        f"- Holdout priority NFW-gap gain over v18.21: `{fmt(holdout_metric['priorityGainVsV1821Pct'])}%`.",
+        f"- Clean high-RMSE gain over v18.21: `{fmt(all_metric['highGainVsV1821Pct'])}%`.",
+        f"- Protected max regression: `{fmt(all_metric['protectedMaxRegressionKmS'])}` km/s.",
+        f"- High above 20 km/s: `{all_metric['highAbove20Candidate']}`.",
+        f"- Best null priority gain: `{fmt(best_null)}`%.",
+        f"- Null margin: `{fmt(null_margin)}` points.",
+        "",
+        "## Shape Classes",
+        "",
+        "| Shape class | Count |",
+        "| --- | ---: |",
+    ]
+    for shape_class, count in sorted(shape_counts.items()):
+        report.append(f"| {shape_class} | {count} |")
+    report.extend(
+        [
+            "",
+            "## Changed High-RMSE Cases",
+            "",
+            "| Galaxy | Route | v18.21 RMSE | candidate RMSE | gain | NFW-prior RMSE | branch |",
+            "| --- | --- | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    gap_by_name = {row["galaxy"]: row for row in gap_rows}
+    for row in changed[:24]:
+        gap_row = gap_by_name.get(row["galaxy"], {})
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | {fmt(row['v18_21Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['candidateGainVsV1821KmS'])} | {fmt(gap_row.get('nfwPriorRmse', math.nan))} | {row['branchHits']} |"
+        )
+    report.extend(["", "## Acceptance Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.extend(
+        [
+            "",
+            "## Guardrails",
+            "",
+            "- v18.21 remains locked unless this candidate is separately browser-hardened.",
+            "- No q, Gamma0, disk M/L, bulge M/L, galaxy-name, NFW-parameter, residual, or raw-RMSE lookup is introduced.",
+            "- Weak/systematics galaxies remain excluded from fitting and activation.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-nfw-phase-candidate-v1",
+        "verdict": verdict,
+        "selectedStrengths": selected_strengths,
+        "summary": {
+            "candidateHighGainVsV1821Pct": all_metric["highGainVsV1821Pct"],
+            "candidatePriorityGainVsV1821Pct": all_metric["priorityGainVsV1821Pct"],
+            "trainPriorityGainVsV1821Pct": train_metric["priorityGainVsV1821Pct"],
+            "holdoutPriorityGainVsV1821Pct": holdout_metric["priorityGainVsV1821Pct"],
+            "protectedMaxRegressionKmS": all_metric["protectedMaxRegressionKmS"],
+            "highAbove20Candidate": all_metric["highAbove20Candidate"],
+            "weakSystematicsLeakage": all_metric["weakSystematicsLeakage"],
+            "bestNullPriorityGainVsV1821Pct": best_null,
+            "nullMarginPriorityPct": null_margin,
+            "shapeClassCounts": dict(shape_counts),
+            "passes": passes,
+        },
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_shape_audit.csv",
+            f"{prefix}_competitor_gap.csv",
+            f"{prefix}_branch_ledger.csv",
+            f"{prefix}_holdout_replay.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_strength_trials.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18nfwphasecandidate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NFW_PHASE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_nfw_phase_candidate_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.23 NFW-phase candidate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high_gain_vs_v1821={fmt(summary['candidateHighGainVsV1821Pct'])}%",
+                f"priority_gain_vs_v1821={fmt(summary['candidatePriorityGainVsV1821Pct'])}%",
+                f"holdout_priority={fmt(summary['holdoutPriorityGainVsV1821Pct'])}%",
+                f"protected={fmt(summary['protectedMaxRegressionKmS'])}",
+                f"above20={summary['highAbove20Candidate']}",
+                f"null_margin={fmt(summary['nullMarginPriorityPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 NFW-phase candidate to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -79907,6 +80551,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18radialphasebenchmark",
             "v18nfwtailcandidate",
             "observedstatev18nfwtailcandidate",
+            "v18nfwphasecandidate",
+            "observedstatev18nfwphasecandidate",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -80205,6 +80851,8 @@ def main() -> None:
         cmd_v18radialphasebenchmark(args)
     elif args.mode in {"v18nfwtailcandidate", "observedstatev18nfwtailcandidate"}:
         cmd_v18nfwtailcandidate(args)
+    elif args.mode in {"v18nfwphasecandidate", "observedstatev18nfwphasecandidate"}:
+        cmd_v18nfwphasecandidate(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
