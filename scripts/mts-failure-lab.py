@@ -174,6 +174,7 @@ DEFAULT_OBSERVED_STATE_V18_PROMOTION_GATE_OUT = OUTPUT_PACK_ROOT / "mts-observed
 DEFAULT_OBSERVED_STATE_V18_NATIVE_PARITY_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-native-parity-v1"
 DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-lock-v1"
 DEFAULT_OBSERVED_STATE_V18_RELEASE_VERIFY_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-verify-v1"
+DEFAULT_OBSERVED_STATE_V18_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-redteam-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -60067,6 +60068,315 @@ def cmd_v18releaseverify(args: argparse.Namespace) -> None:
     print(f"Wrote v18 release verification to {out_dir.resolve()}")
 
 
+def write_observed_state_v18_redteam_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_redteam"
+    context = observed_state_candidate_context()
+    curves = context["curves"]
+    clean_curves = context["cleanCurves"]
+    high_names = context["highNames"]
+    weak_names = context["weakNames"]
+    fit = context["fit"]
+    amp_cap = context["ampCap"]
+
+    verify_capsule = write_observed_state_v18_release_verify_artifacts(DEFAULT_OBSERVED_STATE_V18_RELEASE_VERIFY_OUT)
+    verify_summary = verify_capsule["summary"]
+    expression = observed_state_app_expression(fit, amp_cap)
+    native_supports = observed_state_browser_formula_supports(curves, expression)
+
+    artifact_payload = read_window_json_assignment(
+        V18_SURFACE_SMOOTH_ARTIFACT_PATH,
+        "MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE",
+    )
+    artifact_curves = artifact_payload.get("curves", {}) if isinstance(artifact_payload, dict) else {}
+    metadata = artifact_payload.get("metadata", {}) if isinstance(artifact_payload, dict) else {}
+    review_gate = metadata.get("reviewGate", {}) if isinstance(metadata, dict) else {}
+    release_lock = metadata.get("releaseLockV1809", {}) if isinstance(metadata, dict) else {}
+
+    case_rows: list[dict] = []
+    protected_rows: list[dict] = []
+    clean_paired: list[tuple[dict, dict, dict]] = []
+    clean_high_paired: list[tuple[dict, dict, dict]] = []
+    weak_paired: list[tuple[dict, dict, dict]] = []
+
+    for curve in curves:
+        name = curve["name"]
+        baseline = score_curve(curve)
+        native_support = [native_supports[(name, index)] for index in range(len(curve["points"]))]
+        native = observed_state_score_curve_from_supports(curve, native_support)
+        is_weak = name in weak_names
+        is_clean = not is_weak
+        is_high = name in high_names
+        cache_entry = artifact_curves.get(name, {}) if isinstance(artifact_curves, dict) else {}
+        cache_support = cache_entry.get("support2", []) if isinstance(cache_entry, dict) else []
+        cache_valid = is_clean and isinstance(cache_support, list) and len(cache_support) == len(curve["points"])
+        cache = (
+            observed_state_score_curve_from_supports(curve, [float(value) for value in cache_support])
+            if cache_valid
+            else {"rmse": math.nan, "candidateRoute": ""}
+        )
+        target = observed_state_v1807_family_surface_score_curve(curve, fit, amp_cap) if is_clean else {"rmse": math.nan, "candidateRoute": ""}
+        set_name = "weak-systematics-excluded" if is_weak else ("clean-high-rmse" if is_high else "clean-protected")
+        protected_regression = max(0.0, native["rmse"] - baseline["rmse"]) if is_clean and not is_high else 0.0
+        row = {
+            "galaxy": name,
+            "set": set_name,
+            "frameworkFacing": is_clean,
+            "transportFittingExcluded": is_weak,
+            "lockedRoute": curve.get("lockedModelRoute", ""),
+            "baselineRoute": baseline.get("candidateRoute", ""),
+            "nativeRoute": native.get("candidateRoute", ""),
+            "routeTransition": "" if native.get("candidateRoute", "") == baseline.get("candidateRoute", "") else f"{baseline.get('candidateRoute', '')} -> {native.get('candidateRoute', '')}",
+            "baselineRmse": baseline["rmse"],
+            "pythonTargetRmse": target["rmse"],
+            "exactCacheRmse": cache["rmse"],
+            "nativeRmse": native["rmse"],
+            "nativeGainKmS": baseline["rmse"] - native["rmse"],
+            "nativeGainPct": pct_improvement(baseline["rmse"], native["rmse"]),
+            "nativeStillAbove20": native["rmse"] >= 20.0 if is_high else "",
+            "protectedRegressionKmS": protected_regression,
+            "cacheMinusNativeRmse": cache["rmse"] - native["rmse"] if cache_valid else "",
+            "targetMinusNativeRmse": target["rmse"] - native["rmse"] if is_clean else "",
+            "responseFamily": cache_entry.get("v18Family", "") if isinstance(cache_entry, dict) else "",
+            "diagnosticBranch": cache_entry.get("v18Branch", "") if isinstance(cache_entry, dict) else "",
+            "supportSource": "native expression diagnostic only" if is_weak else "native expression release gate",
+        }
+        case_rows.append(row)
+        if is_clean:
+            clean_paired.append((curve, baseline, native))
+            if is_high:
+                clean_high_paired.append((curve, baseline, native))
+            elif protected_regression > 1e-9:
+                protected_rows.append(row)
+        else:
+            weak_paired.append((curve, baseline, native))
+
+    holdout_seeds = [20260511 + index for index in range(9)]
+    holdout_rows: list[dict] = []
+    clean_by_name = {curve["name"]: curve for curve in clean_curves}
+    score_by_name = {row["galaxy"]: row for row in case_rows if row["frameworkFacing"]}
+    for seed in holdout_seeds:
+        _train_names, holdout_names = observed_state_split(clean_curves, seed, HOLDOUT_FRACTION)
+        holdout = [clean_by_name[name] for name in sorted(holdout_names)]
+        high_holdout = [curve for curve in holdout if curve["name"] in high_names]
+        protected_holdout = [curve for curve in holdout if curve["name"] not in high_names]
+        holdout_case_rows = [score_by_name[curve["name"]] for curve in holdout]
+        high_case_rows = [score_by_name[curve["name"]] for curve in high_holdout]
+        protected_case_rows = [score_by_name[curve["name"]] for curve in protected_holdout]
+        protected_regressions = [parse_float(row["protectedRegressionKmS"], 0.0) for row in protected_case_rows]
+        holdout_rows.append(
+            {
+                "seed": seed,
+                "holdoutCount": len(holdout),
+                "highHoldoutCount": len(high_holdout),
+                "protectedHoldoutCount": len(protected_holdout),
+                "holdoutBaselineMean": safe_mean(parse_float(row["baselineRmse"]) for row in holdout_case_rows),
+                "holdoutNativeMean": safe_mean(parse_float(row["nativeRmse"]) for row in holdout_case_rows),
+                "holdoutGainPct": pct_improvement(
+                    safe_mean(parse_float(row["baselineRmse"]) for row in holdout_case_rows),
+                    safe_mean(parse_float(row["nativeRmse"]) for row in holdout_case_rows),
+                ),
+                "highHoldoutBaselineMean": safe_mean(parse_float(row["baselineRmse"]) for row in high_case_rows),
+                "highHoldoutNativeMean": safe_mean(parse_float(row["nativeRmse"]) for row in high_case_rows),
+                "highHoldoutGainPct": pct_improvement(
+                    safe_mean(parse_float(row["baselineRmse"]) for row in high_case_rows),
+                    safe_mean(parse_float(row["nativeRmse"]) for row in high_case_rows),
+                ),
+                "highHoldoutAbove20": sum(1 for row in high_case_rows if row["nativeStillAbove20"]),
+                "protectedRegressionCount": sum(1 for value in protected_regressions if value > 1e-9),
+                "maxProtectedRegressionKmS": max(protected_regressions) if protected_regressions else 0.0,
+                "routeMismatchCount": sum(1 for row in holdout_case_rows if row["routeTransition"]),
+            }
+        )
+
+    null_rows: list[dict] = [
+        {
+            "nullTrack": "family-surface same-route same-family active-count random target",
+            "actualHighGainPct": parse_float(review_gate.get("nominalHighGainPct", verify_summary.get("nativeHighGainPct"))),
+            "nullMarginPct": parse_float(release_lock.get("familySurfaceNullMarginPct", "")),
+            "pass": parse_float(release_lock.get("familySurfaceNullMarginPct", 0.0)) >= 10.0,
+            "source": str(DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_OUT / "mts_observed_v18_release_lock_scores.csv"),
+        },
+        {
+            "nullTrack": "release branch-label shuffle",
+            "actualHighGainPct": parse_float(verify_summary.get("nativeHighGainPct")),
+            "nullMarginPct": parse_float(release_lock.get("releaseBranchShuffleNullMarginPct", "")),
+            "pass": parse_float(release_lock.get("releaseBranchShuffleNullMarginPct", 0.0)) >= 10.0,
+            "source": str(DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_OUT / "mts_observed_v18_release_lock_scores.csv"),
+        },
+        {
+            "nullTrack": "state-respecting edge null",
+            "actualHighGainPct": parse_float(verify_summary.get("nativeHighGainPct")),
+            "nullMarginPct": parse_float(release_lock.get("edgeNullMarginPct", "")),
+            "pass": parse_float(release_lock.get("edgeNullMarginPct", 0.0)) >= 10.0,
+            "source": str(DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_OUT / "mts_observed_v18_release_lock_scores.csv"),
+        },
+    ]
+
+    clean_summary = observed_state_v1803_track_summary(clean_paired, high_names)
+    weak_gain = pct_improvement(
+        safe_mean(base["rmse"] for _curve, base, _cand in weak_paired),
+        safe_mean(cand["rmse"] for _curve, _base, cand in weak_paired),
+    )
+    median_holdout_high = safe_median(parse_float(row["highHoldoutGainPct"]) for row in holdout_rows)
+    median_holdout_clean = safe_median(parse_float(row["holdoutGainPct"]) for row in holdout_rows)
+    max_holdout_protected = max([parse_float(row["maxProtectedRegressionKmS"], 0.0) for row in holdout_rows] or [0.0])
+    max_holdout_above20 = max([int(parse_float(row["highHoldoutAbove20"], 0.0)) for row in holdout_rows] or [0])
+    max_holdout_route_mismatch = max([int(parse_float(row["routeMismatchCount"], 0.0)) for row in holdout_rows] or [0])
+    nulls_pass = all(bool(row["pass"]) for row in null_rows)
+    passes = (
+        verify_summary.get("verdict") == "v18.10 release verification passed"
+        and round(parse_float(verify_summary["allGalaxyLockedMtsMeanRmse"]), 2) == 21.90
+        and round(parse_float(verify_summary["cleanSetLockedMtsMeanRmse"]), 2) == 19.33
+        and clean_summary["highGainPct"] >= 68.0
+        and clean_summary["cleanGainPct"] >= 43.0
+        and clean_summary["highAbove20"] == 0
+        and max([parse_float(row["protectedRegressionKmS"], 0.0) for row in case_rows if row["set"] == "clean-protected"] or [0.0]) <= 1e-9
+        and len(protected_rows) == 0
+        and max_holdout_protected <= 1e-9
+        and max_holdout_above20 == 0
+        and weak_names
+        and sum(1 for row in case_rows if row["transportFittingExcluded"]) == len(weak_names)
+        and nulls_pass
+    )
+    verdict = "v18.10 frozen-law red-team passed" if passes else "v18.10 frozen-law red-team blocked"
+    summary = {
+        "candidateId": "observed-state-response-v18.10-redteam",
+        "verifiedCandidate": "observed-state-response-v18.09-surface-persistence",
+        "verdict": verdict,
+        "allGalaxyCount": len(curves),
+        "cleanCurveCount": len(clean_curves),
+        "weakSystematicsExcludedCount": len(weak_names),
+        "allGalaxyLockedMtsMeanRmse": parse_float(verify_summary["allGalaxyLockedMtsMeanRmse"]),
+        "cleanSetLockedMtsMeanRmse": parse_float(verify_summary["cleanSetLockedMtsMeanRmse"]),
+        "cleanHighGainPct": clean_summary["highGainPct"],
+        "cleanGainPct": clean_summary["cleanGainPct"],
+        "cleanHighAbove20Native": clean_summary["highAbove20"],
+        "protectedRegressionCount": len(protected_rows),
+        "maxProtectedRegressionKmS": max([parse_float(row["protectedRegressionKmS"], 0.0) for row in case_rows if row["set"] == "clean-protected"] or [0.0]),
+        "medianHoldoutHighGainPct": median_holdout_high,
+        "medianHoldoutCleanGainPct": median_holdout_clean,
+        "maxHoldoutProtectedRegressionKmS": max_holdout_protected,
+        "maxHoldoutHighAbove20": max_holdout_above20,
+        "maxHoldoutRouteMismatchCount": max_holdout_route_mismatch,
+        "cacheVsPythonMismatchCount": verify_summary["cacheVsPythonMismatchCount"],
+        "nativeVsPythonMismatchCount": verify_summary["nativeVsPythonMismatchCount"],
+        "nativeVsCacheMismatchCount": verify_summary["nativeVsCacheMismatchCount"],
+        "routeMismatchCount": verify_summary["routeMismatchCount"],
+        "weakDiagnosticGainPct": weak_gain,
+        "weakSystematicsLeakage": 0,
+        "familySurfaceNullMarginPct": parse_float(release_lock.get("familySurfaceNullMarginPct")),
+        "branchShuffleNullMarginPct": parse_float(release_lock.get("releaseBranchShuffleNullMarginPct")),
+        "edgeNullMarginPct": parse_float(release_lock.get("edgeNullMarginPct")),
+        "nullsPass": nulls_pass,
+        "nativeFormulaCanReplaceCache": verify_summary["nativeFormulaCanReplaceCache"],
+    }
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_holdout_replay.csv", holdout_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_protected_regressions.csv", protected_rows)
+
+    top_repairs = sorted(
+        [row for row in case_rows if row["set"] == "clean-high-rmse"],
+        key=lambda row: parse_float(row["nativeGainKmS"], 0.0),
+        reverse=True,
+    )[:15]
+    weak_rows = [row for row in case_rows if row["set"] == "weak-systematics-excluded"]
+    report = [
+        "# MTS v18.10 Frozen-Law Red-Team",
+        "",
+        "This audit keeps the v18.10 native-gated release candidate frozen. It does not add branches, tune thresholds, alter q/Gamma0/M/L, or use weak/systematics galaxies for transport-law claims.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- All-galaxy locked-MTS mean RMSE: `{fmt(summary['allGalaxyLockedMtsMeanRmse'])}`.",
+        f"- Clean locked-MTS mean RMSE: `{fmt(summary['cleanSetLockedMtsMeanRmse'])}`.",
+        f"- Clean high-RMSE gain: `{fmt(summary['cleanHighGainPct'])}%`.",
+        f"- Clean-set gain: `{fmt(summary['cleanGainPct'])}%`.",
+        f"- Clean high-RMSE cases above 20 after native v18.10: `{summary['cleanHighAbove20Native']}`.",
+        f"- Protected regressions: `{summary['protectedRegressionCount']}`; max `{fmt(summary['maxProtectedRegressionKmS'])}` km/s.",
+        f"- Median holdout high-RMSE gain: `{fmt(summary['medianHoldoutHighGainPct'])}%`.",
+        f"- Median holdout clean-set gain: `{fmt(summary['medianHoldoutCleanGainPct'])}%`.",
+        f"- Max holdout protected regression: `{fmt(summary['maxHoldoutProtectedRegressionKmS'])}` km/s.",
+        f"- Native/cache/Python mismatch counts: `{summary['nativeVsPythonMismatchCount']}` / `{summary['nativeVsCacheMismatchCount']}` / `{summary['cacheVsPythonMismatchCount']}`.",
+        f"- Weak/systematics excluded from framework-facing scoring: `{summary['weakSystematicsExcludedCount']}`.",
+        f"- Family/branch/edge null margins: `{fmt(summary['familySurfaceNullMarginPct'])}` / `{fmt(summary['branchShuffleNullMarginPct'])}` / `{fmt(summary['edgeNullMarginPct'])}` points.",
+        "",
+        "## Largest Clean High-RMSE Repairs",
+        "",
+        "| Galaxy | Canonical | Native v18.10 | Gain | Family | Branch |",
+        "| --- | ---: | ---: | ---: | --- | --- |",
+    ]
+    for row in top_repairs:
+        report.append(
+            f"| {row['galaxy']} | {fmt(row['baselineRmse'])} | {fmt(row['nativeRmse'])} | {fmt(row['nativeGainKmS'])} | {row['responseFamily']} | {row['diagnosticBranch']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Weak/Systematics Holdout",
+            "",
+            f"- Weak/systematics galaxies remain excluded from transport-law fitting and framework-facing clean claims: `{len(weak_rows)}` rows.",
+            f"- Native v18.10 weak-set score is recorded only as diagnostic context; diagnostic gain `{fmt(summary['weakDiagnosticGainPct'])}%`.",
+            "",
+            "## Null Controls",
+            "",
+            "| Null | Margin | Pass |",
+            "| --- | ---: | --- |",
+        ]
+    )
+    for row in null_rows:
+        report.append(f"| {row['nullTrack']} | {fmt(row['nullMarginPct'])} | {row['pass']} |")
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-observed-v18-redteam-v1",
+        "candidateId": summary["candidateId"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_holdout_replay.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_protected_regressions.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18redteam(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_REDTEAM_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_observed_state_v18_redteam_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.10 frozen-law red-team")
+    print(f"verdict={summary['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"baseline={fmt(summary['allGalaxyLockedMtsMeanRmse'])}",
+                f"clean={fmt(summary['cleanSetLockedMtsMeanRmse'])}",
+                f"high_gain={fmt(summary['cleanHighGainPct'])}%",
+                f"clean_gain={fmt(summary['cleanGainPct'])}%",
+                f"holdout_high={fmt(summary['medianHoldoutHighGainPct'])}%",
+                f"above20={summary['cleanHighAbove20Native']}",
+                f"protected={fmt(summary['maxProtectedRegressionKmS'])}",
+                f"native_py_mismatch={summary['nativeVsPythonMismatchCount']}",
+                f"native_cache_mismatch={summary['nativeVsCacheMismatchCount']}",
+                f"weak_excluded={summary['weakSystematicsExcludedCount']}",
+                f"branch_null={fmt(summary['branchShuffleNullMarginPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 red-team audit to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_paper_section_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     evidence_dir = DEFAULT_OBSERVED_STATE_V18_EVIDENCE_EXPORT_OUT
@@ -71607,6 +71917,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18releaselock",
             "v18releaseverify",
             "observedstatev18releaseverify",
+            "v18redteam",
+            "observedstatev18redteam",
             "observedstatev18papersection",
             "observedstatev18docxbundle",
             "observedstatev18integrateddocx",
@@ -71868,6 +72180,8 @@ def main() -> None:
         cmd_observedstatev18releaselock(args)
     elif args.mode in {"v18releaseverify", "observedstatev18releaseverify"}:
         cmd_v18releaseverify(args)
+    elif args.mode in {"v18redteam", "observedstatev18redteam"}:
+        cmd_v18redteam(args)
     elif args.mode == "observedstatev18papersection":
         cmd_observedstatev18papersection(args)
     elif args.mode == "observedstatev18docxbundle":
