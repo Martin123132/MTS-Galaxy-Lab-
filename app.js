@@ -14,7 +14,7 @@
 
   var V17STATE_EXACT_TOKEN = "__MTS_V17_97_RADIAL_REPAIR_STATE_RESPONSE__";
   var V18REVIEW_TOKEN = "__MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE__";
-  var V18_RELEASE_DISPLAY_NAME = "MTS v18.09 release candidate (exact cache)";
+  var V18_RELEASE_DISPLAY_NAME = "MTS v18.09 release candidate (exact cache/native gated)";
   var V18_RELEASE_ARTIFACT = window.MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE || window.MTS_V18_07_FAMILY_SURFACE_CANDIDATE || window.MTS_V18_05_RELEASE_CANDIDATE || window.MTS_V18_01_REVIEW_CANDIDATE;
   var V18_REVIEW_GATE_FALLBACK = {
     candidateId: "observed-state-response-v18.09-surface-persistence",
@@ -1860,6 +1860,29 @@
     var source = String(expression || "").trim();
     if (!source) throw new Error("Framework formula is empty.");
     if (source === V18REVIEW_TOKEN) {
+      var artifact = V18_RELEASE_ARTIFACT || null;
+      var metadata = artifact && artifact.metadata ? artifact.metadata : {};
+      var nativeMeta = metadata.nativeFormulaV1809 || {};
+      var releaseLock = metadata.releaseLockV1809 || V18_RELEASE_LOCK_FALLBACK || {};
+      var nativeExpression = String(nativeMeta.expression || "").trim();
+      var canUseNative = nativeMeta.canReplaceCache === true &&
+        nativeExpression &&
+        Number(nativeMeta.browserCacheParityMismatchCount == null ? releaseLock.browserCacheParityMismatchCount : nativeMeta.browserCacheParityMismatchCount) === 0 &&
+        Number(nativeMeta.nativeFormulaParityMismatchCount == null ? releaseLock.nativeFormulaParityMismatchCount : nativeMeta.nativeFormulaParityMismatchCount) === 0 &&
+        Number(nativeMeta.nativeFormulaRouteMismatchCount || 0) === 0 &&
+        Number(nativeMeta.cleanHighAbove20AfterCandidate == null ? releaseLock.cleanHighAbove20AfterCandidate : nativeMeta.cleanHighAbove20AfterCandidate) === 0 &&
+        Number(nativeMeta.protectedRegressionCount == null ? releaseLock.protectedRegressionCount : nativeMeta.protectedRegressionCount) === 0 &&
+        Number(nativeMeta.maxProtectedRegressionKmS == null ? releaseLock.maxProtectedRegressionKmS : nativeMeta.maxProtectedRegressionKmS) === 0 &&
+        Number(nativeMeta.weakSystematicsLeakage == null ? releaseLock.weakSystematicsLeakage : nativeMeta.weakSystematicsLeakage) === 0;
+      if (canUseNative) {
+        var nativeCompiled = compileFrameworkExpression(nativeExpression);
+        nativeCompiled.source = source;
+        nativeCompiled.kind = "v18-native-expression";
+        nativeCompiled.reviewGate = true;
+        nativeCompiled.releaseLock = true;
+        nativeCompiled.nativeExpression = true;
+        return nativeCompiled;
+      }
       return {
         source: source,
         kind: "v17state-exact-cache",
@@ -3991,9 +4014,13 @@
     var edgeHarden = artifact && artifact.metadata && artifact.metadata.edgeHardenV1804;
     var releaseStress = artifact && artifact.metadata && artifact.metadata.releaseStressV1805;
     var artifactCount = artifact && artifact.metadata ? artifact.metadata.curveCount : 0;
+    var nativeMeta = artifact && artifact.metadata && artifact.metadata.nativeFormulaV1809 ? artifact.metadata.nativeFormulaV1809 : {};
     var cacheMismatch = releaseLock.browserCacheParityMismatchCount == null ? 0 : releaseLock.browserCacheParityMismatchCount;
-    var nativeMismatch = releaseLock.nativeFormulaParityMismatchCount == null ? 7 : releaseLock.nativeFormulaParityMismatchCount;
-    var runtimeSource = releaseLock.exactSupportCacheRemainsSourceOfTruth === false ? "native expression" : "exact cache locked";
+    var nativeMismatch = nativeMeta.nativeFormulaParityMismatchCount == null
+      ? (releaseLock.nativeFormulaParityMismatchCount == null ? 7 : releaseLock.nativeFormulaParityMismatchCount)
+      : nativeMeta.nativeFormulaParityMismatchCount;
+    var nativeReady = nativeMeta.canReplaceCache === true && Number(cacheMismatch) === 0 && Number(nativeMismatch) === 0 && Number(nativeMeta.nativeFormulaRouteMismatchCount || 0) === 0;
+    var runtimeSource = nativeReady ? "native expression" : "exact cache locked";
     $("v18ReviewStatus").textContent = active ? "active" : "ready";
     $("v18ReviewHighGain").textContent = fmt(gate.nominalHighGainPct, 2) + "%";
     $("v18ReviewHoldout").textContent = fmt(gate.holdoutHighGainPct, 2) + "%";
@@ -4020,8 +4047,8 @@
     if ($("v18ReviewReleaseNull")) $("v18ReviewReleaseNull").textContent = releaseStress ? fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " pts" : "--";
     if ($("v18ReviewNote")) {
       $("v18ReviewNote").textContent = active
-        ? "Active preset uses the locked v18.09 exact support cache with " + artifactCount + " cached curves. Release-lock status: " + releaseLock.verdict + ". Native formula replacement is blocked while native mismatches remain " + String(nativeMismatch) + "; cache mismatches are " + String(cacheMismatch) + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "not run") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "not run") + ". Release stress: " + (releaseStress ? releaseStress.verdict + " with " + fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " point branch-null margin" : "not run") + ". The lock keeps all clean high-RMSE cases below 20 km/s with zero protected regression."
-        : "Select " + V18_RELEASE_DISPLAY_NAME + " in the Test Rig to inspect the release candidate. Runtime uses the exact tested support cache; native formula replacement stays off until parity reaches zero.";
+        ? "Active preset uses the locked v18.09 " + (nativeReady ? "native expression" : "exact support cache with " + artifactCount + " cached curves") + ". Release-lock status: " + releaseLock.verdict + ". Native mismatches are " + String(nativeMismatch) + "; cache mismatches are " + String(cacheMismatch) + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "not run") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "not run") + ". Release stress: " + (releaseStress ? releaseStress.verdict + " with " + fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " point branch-null margin" : "not run") + ". The lock keeps all clean high-RMSE cases below 20 km/s with zero protected regression."
+        : "Select " + V18_RELEASE_DISPLAY_NAME + " in the Test Rig to inspect the release candidate. Runtime uses the native v18.09 expression only when every release-lock parity guard is zero; otherwise it falls back to the exact cache.";
     }
   }
 
