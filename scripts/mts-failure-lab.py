@@ -182,6 +182,7 @@ DEFAULT_OBSERVED_STATE_V18_FAMILY_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-ob
 DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_FINAL_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-lock-final-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-benchmark-v1"
 DEFAULT_OBSERVED_STATE_V18_LAW_SPEC_OUT = OUTPUT_PACK_ROOT / "mts-v18-law-spec-v1"
+DEFAULT_OBSERVED_STATE_V18_COMPETITOR_FIGURES_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-figures-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -61694,7 +61695,7 @@ def cmd_v18competitorbenchmark(args: argparse.Namespace) -> None:
     capsule = write_v18_competitor_benchmark_artifacts(out_dir)
     summary = capsule["summary"]
     print("MTS v18.15 competitor benchmark")
-    print(f"verdict={summary['verdict']}")
+    print(f"verdict={capsule['verdict']}")
     print(
         "\t".join(
             [
@@ -61863,6 +61864,573 @@ def cmd_v18lawspec(args: argparse.Namespace) -> None:
     print(f"verdict={capsule['verdict']}")
     print(f"native_expression_sha256={capsule['nativeExpressionSha256']}")
     print(f"Wrote v18 law spec to {out_dir.resolve()}")
+
+
+def v18_competitor_float(row: dict, key: str, default: float = math.nan) -> float:
+    return parse_float(row.get(key), default)
+
+
+def v18_competitor_mean(values: Iterable[float]) -> float:
+    clean = [value for value in values if math.isfinite(value)]
+    return statistics.mean(clean) if clean else math.nan
+
+
+def v18_competitor_advantage(delta: float, negative_label: str, positive_label: str, tolerance: float = 0.25) -> str:
+    if not math.isfinite(delta) or abs(delta) <= tolerance:
+        return "tie"
+    return negative_label if delta < 0.0 else positive_label
+
+
+def v18_competitor_ensure_benchmark() -> tuple[Path, dict, list[dict], list[dict]]:
+    benchmark_dir = DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_OUT
+    scores_path = benchmark_dir / "mts_v18_competitor_scores.csv"
+    cases_path = benchmark_dir / "mts_v18_competitor_case_ledger.csv"
+    capsule_path = benchmark_dir / "mts_v18_competitor_capsule.json"
+    if not scores_path.exists() or not cases_path.exists() or not capsule_path.exists():
+        write_v18_competitor_benchmark_artifacts(benchmark_dir)
+    with capsule_path.open(encoding="utf-8") as handle:
+        capsule = json.load(handle)
+    return benchmark_dir, capsule, read_csv_rows(scores_path), read_csv_rows(cases_path)
+
+
+def v18_competitor_score_lookup(scores: list[dict]) -> dict[tuple[str, str], dict]:
+    return {(row.get("modelId", ""), row.get("set", "")): row for row in scores}
+
+
+def v18_competitor_svg_bar_chart(
+    path: Path,
+    title: str,
+    rows: list[dict],
+    label_key: str,
+    value_keys: list[str],
+    colors: list[str],
+    y_label: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    width = 920
+    height = 520
+    margin_left = 86
+    margin_right = 32
+    margin_top = 54
+    margin_bottom = 104
+    plot_w = width - margin_left - margin_right
+    plot_h = height - margin_top - margin_bottom
+    values = [parse_float(row.get(key), math.nan) for row in rows for key in value_keys]
+    max_value = max([value for value in values if math.isfinite(value)] or [1.0])
+    max_value = max_value * 1.12 if max_value > 0 else 1.0
+    group_w = plot_w / max(len(rows), 1)
+    bar_w = min(42.0, (group_w * 0.72) / max(len(value_keys), 1))
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        f'<text x="{margin_left}" y="28" font-family="Arial" font-size="20" font-weight="700">{html.escape(title)}</text>',
+        f'<text x="20" y="{margin_top + plot_h / 2:.1f}" transform="rotate(-90 20 {margin_top + plot_h / 2:.1f})" font-family="Arial" font-size="12">{html.escape(y_label)}</text>',
+        f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_h}" stroke="#222" stroke-width="1"/>',
+        f'<line x1="{margin_left}" y1="{margin_top + plot_h}" x2="{margin_left + plot_w}" y2="{margin_top + plot_h}" stroke="#222" stroke-width="1"/>',
+    ]
+    for tick in range(6):
+        value = max_value * tick / 5.0
+        y = margin_top + plot_h - (value / max_value) * plot_h
+        parts.append(f'<line x1="{margin_left - 5}" y1="{y:.1f}" x2="{margin_left + plot_w}" y2="{y:.1f}" stroke="#e5e5e5" stroke-width="1"/>')
+        parts.append(f'<text x="{margin_left - 10}" y="{y + 4:.1f}" text-anchor="end" font-family="Arial" font-size="11">{fmt(value)}</text>')
+    for index, row in enumerate(rows):
+        center = margin_left + group_w * (index + 0.5)
+        total_bar_w = bar_w * len(value_keys)
+        for key_index, key in enumerate(value_keys):
+            value = parse_float(row.get(key), 0.0)
+            bar_h = 0.0 if max_value <= 0 else (max(value, 0.0) / max_value) * plot_h
+            x = center - total_bar_w / 2 + key_index * bar_w
+            y = margin_top + plot_h - bar_h
+            parts.append(
+                f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w - 2:.1f}" height="{bar_h:.1f}" fill="{colors[key_index % len(colors)]}"/>'
+            )
+        label = html.escape(str(row.get(label_key, "")))
+        parts.append(
+            f'<text x="{center:.1f}" y="{margin_top + plot_h + 18}" transform="rotate(35 {center:.1f} {margin_top + plot_h + 18})" font-family="Arial" font-size="11">{label}</text>'
+        )
+    legend_x = margin_left
+    legend_y = height - 28
+    for key_index, key in enumerate(value_keys):
+        x = legend_x + key_index * 190
+        parts.append(f'<rect x="{x}" y="{legend_y - 11}" width="13" height="13" fill="{colors[key_index % len(colors)]}"/>')
+        parts.append(f'<text x="{x + 18}" y="{legend_y}" font-family="Arial" font-size="12">{html.escape(key)}</text>')
+    parts.append("</svg>")
+    path.write_text("\n".join(parts), encoding="utf-8")
+
+
+def v18_competitor_svg_scatter(
+    path: Path,
+    title: str,
+    rows: list[dict],
+    x_key: str,
+    y_key: str,
+    group_key: str,
+    colors: dict[str, str],
+    x_label: str,
+    y_label: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    width = 760
+    height = 620
+    margin_left = 78
+    margin_right = 34
+    margin_top = 54
+    margin_bottom = 76
+    plot_w = width - margin_left - margin_right
+    plot_h = height - margin_top - margin_bottom
+    pairs = [
+        (parse_float(row.get(x_key), math.nan), parse_float(row.get(y_key), math.nan))
+        for row in rows
+        if math.isfinite(parse_float(row.get(x_key), math.nan)) and math.isfinite(parse_float(row.get(y_key), math.nan))
+    ]
+    max_value = max([max(x, y) for x, y in pairs] or [1.0]) * 1.10
+    max_value = max(max_value, 1.0)
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        f'<text x="{margin_left}" y="28" font-family="Arial" font-size="20" font-weight="700">{html.escape(title)}</text>',
+        f'<text x="{margin_left + plot_w / 2:.1f}" y="{height - 24}" text-anchor="middle" font-family="Arial" font-size="13">{html.escape(x_label)}</text>',
+        f'<text x="20" y="{margin_top + plot_h / 2:.1f}" transform="rotate(-90 20 {margin_top + plot_h / 2:.1f})" font-family="Arial" font-size="13">{html.escape(y_label)}</text>',
+        f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_h}" stroke="#222" stroke-width="1"/>',
+        f'<line x1="{margin_left}" y1="{margin_top + plot_h}" x2="{margin_left + plot_w}" y2="{margin_top + plot_h}" stroke="#222" stroke-width="1"/>',
+    ]
+    for tick in range(6):
+        value = max_value * tick / 5.0
+        x = margin_left + (value / max_value) * plot_w
+        y = margin_top + plot_h - (value / max_value) * plot_h
+        parts.append(f'<line x1="{x:.1f}" y1="{margin_top}" x2="{x:.1f}" y2="{margin_top + plot_h + 5}" stroke="#eeeeee" stroke-width="1"/>')
+        parts.append(f'<line x1="{margin_left - 5}" y1="{y:.1f}" x2="{margin_left + plot_w}" y2="{y:.1f}" stroke="#eeeeee" stroke-width="1"/>')
+        parts.append(f'<text x="{x:.1f}" y="{margin_top + plot_h + 20}" text-anchor="middle" font-family="Arial" font-size="11">{fmt(value)}</text>')
+        parts.append(f'<text x="{margin_left - 10}" y="{y + 4:.1f}" text-anchor="end" font-family="Arial" font-size="11">{fmt(value)}</text>')
+    parts.append(
+        f'<line x1="{margin_left}" y1="{margin_top + plot_h}" x2="{margin_left + plot_w}" y2="{margin_top}" stroke="#555" stroke-width="1.5" stroke-dasharray="6 5"/>'
+    )
+    for row in rows:
+        x_value = parse_float(row.get(x_key), math.nan)
+        y_value = parse_float(row.get(y_key), math.nan)
+        if not math.isfinite(x_value) or not math.isfinite(y_value):
+            continue
+        x = margin_left + (x_value / max_value) * plot_w
+        y = margin_top + plot_h - (y_value / max_value) * plot_h
+        group = str(row.get(group_key, "other"))
+        color = colors.get(group, colors.get("other", "#555555"))
+        label = html.escape(str(row.get("galaxy", "")))
+        parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.2" fill="{color}" opacity="0.82"><title>{label}</title></circle>')
+    legend_items = sorted({str(row.get(group_key, "other")) for row in rows})
+    for index, item in enumerate(legend_items[:8]):
+        x = margin_left + index * 90
+        y = height - 48
+        color = colors.get(item, colors.get("other", "#555555"))
+        parts.append(f'<circle cx="{x}" cy="{y}" r="5" fill="{color}"/>')
+        parts.append(f'<text x="{x + 9}" y="{y + 4}" font-family="Arial" font-size="11">{html.escape(item[:14])}</text>')
+    parts.append("</svg>")
+    path.write_text("\n".join(parts), encoding="utf-8")
+
+
+def write_v18_competitor_figure_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir = out_dir / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_competitor_figure"
+    benchmark_dir, benchmark_capsule, scores, cases = v18_competitor_ensure_benchmark()
+    score_lookup = v18_competitor_score_lookup(scores)
+    high_rows = sorted([row for row in cases if row.get("set") == "clean-high-rmse"], key=lambda row: row.get("galaxy", ""))
+    protected_rows = sorted([row for row in cases if row.get("set") == "clean-protected"], key=lambda row: row.get("galaxy", ""))
+    weak_leakage = parse_float(benchmark_capsule.get("summary", {}).get("weakSystematicsLeakage"), math.nan)
+
+    model_order = [
+        "baryon_fixed_ml",
+        "canonical_mts",
+        "v18_10_release",
+        "mond_fixed_a0",
+        "mond_global_a0",
+        "mond_per_galaxy_a0_oracle",
+        "nfw_concentration_prior",
+        "nfw_free",
+    ]
+    model_mean_rows: list[dict] = []
+    for model_id in model_order:
+        all_row = score_lookup.get((model_id, "all"), {})
+        high_row = score_lookup.get((model_id, "clean-high-rmse"), {})
+        protected_row = score_lookup.get((model_id, "clean-protected"), {})
+        model_mean_rows.append(
+            {
+                "modelId": model_id,
+                "modelClass": all_row.get("modelClass", high_row.get("modelClass", "")),
+                "allMeanRmse": v18_competitor_float(all_row, "meanRmse"),
+                "highMeanRmse": v18_competitor_float(high_row, "meanRmse"),
+                "protectedMeanRmse": v18_competitor_float(protected_row, "meanRmse"),
+                "highGainVsCanonicalPct": v18_competitor_float(high_row, "highGainVsCanonicalPct"),
+                "benchmarkFittedTotalParamsOnHighSet": high_row.get("benchmarkFittedTotalParamsOnSet", ""),
+            }
+        )
+
+    high_winner_counts: dict[str, int] = {}
+    all_winner_counts: dict[str, int] = {}
+    for row in high_rows:
+        winner = row.get("winnerRawRmse", "unknown") or "unknown"
+        high_winner_counts[winner] = high_winner_counts.get(winner, 0) + 1
+    for row in cases:
+        winner = row.get("winnerRawRmse", "unknown") or "unknown"
+        all_winner_counts[winner] = all_winner_counts.get(winner, 0) + 1
+    high_winner_rows = [
+        {
+            "group": "clean-high-rmse",
+            "winnerRawRmse": winner,
+            "caseCount": count,
+        }
+        for winner, count in sorted(high_winner_counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    high_winner_rows.extend(
+        {
+            "group": "all",
+            "winnerRawRmse": winner,
+            "caseCount": count,
+        }
+        for winner, count in sorted(all_winner_counts.items(), key=lambda item: (-item[1], item[0]))
+    )
+
+    v18_vs_mond_rows: list[dict] = []
+    for row in high_rows:
+        delta_global = v18_competitor_float(row, "v18MinusMondGlobalKmS")
+        delta_fixed = v18_competitor_float(row, "v18MinusMondFixedKmS")
+        v18_vs_mond_rows.append(
+            {
+                "galaxy": row.get("galaxy", ""),
+                "set": row.get("set", ""),
+                "split": row.get("split", ""),
+                "lockedRoute": row.get("lockedRoute", ""),
+                "canonicalRmse": v18_competitor_float(row, "canonical_mtsRmse"),
+                "v18Rmse": v18_competitor_float(row, "v18_10_releaseRmse"),
+                "mondFixedRmse": v18_competitor_float(row, "mond_fixed_a0Rmse"),
+                "mondGlobalRmse": v18_competitor_float(row, "mond_global_a0Rmse"),
+                "v18MinusMondFixedKmS": delta_fixed,
+                "v18MinusMondGlobalKmS": delta_global,
+                "advantageVsMondGlobal": v18_competitor_advantage(delta_global, "v18_10_release", "mond_global_a0"),
+                "v18GainVsCanonicalPct": v18_competitor_float(row, "v18GainVsCanonicalPct"),
+            }
+        )
+    v18_vs_mond_rows.sort(key=lambda row: (parse_float(row["v18MinusMondGlobalKmS"], 0.0), row["galaxy"]))
+
+    nfw_gap_rows: list[dict] = []
+    for row in high_rows:
+        prior_gap = v18_competitor_float(row, "v18MinusNfwPriorKmS")
+        free_gap = v18_competitor_float(row, "v18MinusNfwFreeKmS")
+        nfw_gap_rows.append(
+            {
+                "galaxy": row.get("galaxy", ""),
+                "set": row.get("set", ""),
+                "split": row.get("split", ""),
+                "lockedRoute": row.get("lockedRoute", ""),
+                "winnerRawRmse": row.get("winnerRawRmse", ""),
+                "canonicalRmse": v18_competitor_float(row, "canonical_mtsRmse"),
+                "v18Rmse": v18_competitor_float(row, "v18_10_releaseRmse"),
+                "nfwPriorRmse": v18_competitor_float(row, "nfw_concentration_priorRmse"),
+                "nfwFreeRmse": v18_competitor_float(row, "nfw_freeRmse"),
+                "v18MinusNfwPriorKmS": prior_gap,
+                "v18MinusNfwFreeKmS": free_gap,
+                "advantageVsNfwPrior": v18_competitor_advantage(prior_gap, "v18_10_release", "nfw_concentration_prior"),
+                "v18GainVsCanonicalPct": v18_competitor_float(row, "v18GainVsCanonicalPct"),
+            }
+        )
+    nfw_gap_rows.sort(key=lambda row: (-parse_float(row["v18MinusNfwPriorKmS"], 0.0), row["galaxy"]))
+
+    route_gap_rows: list[dict] = []
+    for route in sorted({row.get("lockedRoute", "unknown") or "unknown" for row in high_rows}):
+        rows = [row for row in high_rows if (row.get("lockedRoute", "unknown") or "unknown") == route]
+        route_gap_rows.append(
+            {
+                "lockedRoute": route,
+                "caseCount": len(rows),
+                "canonicalMeanRmse": v18_competitor_mean(v18_competitor_float(row, "canonical_mtsRmse") for row in rows),
+                "v18MeanRmse": v18_competitor_mean(v18_competitor_float(row, "v18_10_releaseRmse") for row in rows),
+                "mondGlobalMeanRmse": v18_competitor_mean(v18_competitor_float(row, "mond_global_a0Rmse") for row in rows),
+                "nfwPriorMeanRmse": v18_competitor_mean(v18_competitor_float(row, "nfw_concentration_priorRmse") for row in rows),
+                "meanV18MinusMondGlobalKmS": v18_competitor_mean(v18_competitor_float(row, "v18MinusMondGlobalKmS") for row in rows),
+                "meanV18MinusNfwPriorKmS": v18_competitor_mean(v18_competitor_float(row, "v18MinusNfwPriorKmS") for row in rows),
+                "v18WinnerCount": sum(1 for row in rows if row.get("winnerRawRmse") == "v18_10_release"),
+                "nfwPriorWinnerCount": sum(1 for row in rows if row.get("winnerRawRmse") == "nfw_concentration_prior"),
+                "nfwFreeWinnerCount": sum(1 for row in rows if row.get("winnerRawRmse") == "nfw_free"),
+            }
+        )
+
+    protected_summary_rows = []
+    canonical_protected = score_lookup.get(("canonical_mts", "clean-protected"), {})
+    canonical_mean = v18_competitor_float(canonical_protected, "meanRmse")
+    for model_id in model_order:
+        protected_score = score_lookup.get((model_id, "clean-protected"), {})
+        mean_rmse = v18_competitor_float(protected_score, "meanRmse")
+        protected_summary_rows.append(
+            {
+                "modelId": model_id,
+                "protectedCaseCount": protected_score.get("galaxyCount", len(protected_rows)),
+                "protectedMeanRmse": mean_rmse,
+                "protectedMinusCanonicalMeanKmS": mean_rmse - canonical_mean if math.isfinite(mean_rmse) and math.isfinite(canonical_mean) else math.nan,
+                "v18MaxProtectedRegressionKmS": max(
+                    [v18_competitor_float(row, "protectedV18RegressionKmS", 0.0) for row in protected_rows] or [0.0]
+                )
+                if model_id == "v18_10_release"
+                else "",
+                "note": "v18 regression guardrail" if model_id == "v18_10_release" else "",
+            }
+        )
+
+    figure_manifest_rows = [
+        {
+            "figure": "figures/model_mean_rmse.svg",
+            "purpose": "Mean RMSE for all, high-RMSE, and protected sets across locked/fitted competitors.",
+        },
+        {
+            "figure": "figures/high_winner_counts.svg",
+            "purpose": "Raw-RMSE winner counts on clean high-RMSE cases.",
+        },
+        {
+            "figure": "figures/v18_vs_mond_global_scatter.svg",
+            "purpose": "Per-galaxy clean high-RMSE comparison: MOND global a0 versus locked v18.10.",
+        },
+        {
+            "figure": "figures/v18_vs_nfw_prior_scatter.svg",
+            "purpose": "Per-galaxy clean high-RMSE comparison: NFW concentration-prior fit versus locked v18.10.",
+        },
+        {
+            "figure": "figures/route_gap.svg",
+            "purpose": "High-RMSE route-class mean gap between v18.10, MOND global, and NFW-prior fit.",
+        },
+    ]
+
+    write_csv(out_dir / f"{prefix}_model_means.csv", model_mean_rows)
+    write_csv(out_dir / f"{prefix}_high_winners.csv", high_winner_rows)
+    write_csv(out_dir / f"{prefix}_v18_vs_mond.csv", v18_vs_mond_rows)
+    write_csv(out_dir / f"{prefix}_nfw_gap.csv", nfw_gap_rows)
+    write_csv(out_dir / f"{prefix}_route_gaps.csv", route_gap_rows)
+    write_csv(out_dir / f"{prefix}_protected_summary.csv", protected_summary_rows)
+    write_csv(out_dir / f"{prefix}_manifest.csv", figure_manifest_rows)
+
+    plot_model_rows = [
+        row
+        for row in model_mean_rows
+        if row["modelId"] in {"canonical_mts", "v18_10_release", "mond_global_a0", "nfw_concentration_prior", "nfw_free"}
+    ]
+    v18_competitor_svg_bar_chart(
+        figures_dir / "model_mean_rmse.svg",
+        "v18.10 vs MOND/NFW: mean RMSE",
+        plot_model_rows,
+        "modelId",
+        ["allMeanRmse", "highMeanRmse"],
+        ["#4c78a8", "#f58518"],
+        "RMSE km/s",
+    )
+    winner_plot_rows = [
+        {"winnerRawRmse": row["winnerRawRmse"], "caseCount": row["caseCount"]}
+        for row in high_winner_rows
+        if row["group"] == "clean-high-rmse"
+    ]
+    v18_competitor_svg_bar_chart(
+        figures_dir / "high_winner_counts.svg",
+        "Clean high-RMSE raw winner counts",
+        winner_plot_rows,
+        "winnerRawRmse",
+        ["caseCount"],
+        ["#54a24b"],
+        "case count",
+    )
+    route_colors = {
+        "low-load": "#4c78a8",
+        "buffered single-crossing": "#f58518",
+        "outer-infeasible": "#e45756",
+        "buffered upward-crossing": "#72b7b2",
+        "other": "#777777",
+    }
+    v18_competitor_svg_scatter(
+        figures_dir / "v18_vs_mond_global_scatter.svg",
+        "Clean high-RMSE: MOND global a0 vs v18.10",
+        v18_vs_mond_rows,
+        "mondGlobalRmse",
+        "v18Rmse",
+        "lockedRoute",
+        route_colors,
+        "MOND global a0 RMSE km/s",
+        "v18.10 RMSE km/s",
+    )
+    v18_competitor_svg_scatter(
+        figures_dir / "v18_vs_nfw_prior_scatter.svg",
+        "Clean high-RMSE: NFW-prior fit vs v18.10",
+        nfw_gap_rows,
+        "nfwPriorRmse",
+        "v18Rmse",
+        "lockedRoute",
+        route_colors,
+        "NFW concentration-prior RMSE km/s",
+        "v18.10 RMSE km/s",
+    )
+    v18_competitor_svg_bar_chart(
+        figures_dir / "route_gap.svg",
+        "High-RMSE route-class mean RMSE",
+        route_gap_rows,
+        "lockedRoute",
+        ["v18MeanRmse", "mondGlobalMeanRmse", "nfwPriorMeanRmse"],
+        ["#4c78a8", "#f58518", "#54a24b"],
+        "RMSE km/s",
+    )
+
+    v18_all = score_lookup.get(("v18_10_release", "all"), {})
+    v18_high = score_lookup.get(("v18_10_release", "clean-high-rmse"), {})
+    mond_global_all = score_lookup.get(("mond_global_a0", "all"), {})
+    mond_global_high = score_lookup.get(("mond_global_a0", "clean-high-rmse"), {})
+    nfw_prior_all = score_lookup.get(("nfw_concentration_prior", "all"), {})
+    nfw_prior_high = score_lookup.get(("nfw_concentration_prior", "clean-high-rmse"), {})
+    strongest_v18_mond_wins = v18_vs_mond_rows[:12]
+    biggest_nfw_gaps = nfw_gap_rows[:12]
+    v18_high_win_count = high_winner_counts.get("v18_10_release", 0)
+    nfw_prior_high_win_count = high_winner_counts.get("nfw_concentration_prior", 0)
+    nfw_free_high_win_count = high_winner_counts.get("nfw_free", 0)
+    protected_v18_max = max([v18_competitor_float(row, "protectedV18RegressionKmS", 0.0) for row in protected_rows] or [0.0])
+    verdict = (
+        "v18 competitor figure pack ready"
+        if cases and math.isfinite(weak_leakage) and int(weak_leakage) == 0
+        else "v18 competitor figure pack blocked"
+    )
+    summary = {
+        "analysisName": "mts-v18-competitor-figures-v1",
+        "verdict": verdict,
+        "sourceBenchmarkDir": str(benchmark_dir),
+        "highCaseCount": len(high_rows),
+        "protectedCaseCount": len(protected_rows),
+        "weakSystematicsLeakage": weak_leakage,
+        "v18AllMeanRmse": v18_competitor_float(v18_all, "meanRmse"),
+        "mondGlobalAllMeanRmse": v18_competitor_float(mond_global_all, "meanRmse"),
+        "nfwPriorAllMeanRmse": v18_competitor_float(nfw_prior_all, "meanRmse"),
+        "v18HighMeanRmse": v18_competitor_float(v18_high, "meanRmse"),
+        "mondGlobalHighMeanRmse": v18_competitor_float(mond_global_high, "meanRmse"),
+        "nfwPriorHighMeanRmse": v18_competitor_float(nfw_prior_high, "meanRmse"),
+        "v18HighGainPct": v18_competitor_float(v18_high, "highGainVsCanonicalPct"),
+        "v18HighWinnerCount": v18_high_win_count,
+        "nfwPriorHighWinnerCount": nfw_prior_high_win_count,
+        "nfwFreeHighWinnerCount": nfw_free_high_win_count,
+        "v18MaxProtectedRegressionKmS": protected_v18_max,
+    }
+
+    report = [
+        "# MTS v18.16 Competitor Figure Pack",
+        "",
+        "This pack makes the locked v18.10 benchmark fight readable. It does not change the law, tune a branch, or promote a fitted halo/oracle comparison.",
+        "",
+        "## Headline",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- v18.10 all-galaxy mean RMSE: `{fmt(summary['v18AllMeanRmse'])}` km/s.",
+        f"- MOND global-a0 all-galaxy mean RMSE: `{fmt(summary['mondGlobalAllMeanRmse'])}` km/s.",
+        f"- NFW concentration-prior all-galaxy mean RMSE: `{fmt(summary['nfwPriorAllMeanRmse'])}` km/s.",
+        f"- v18.10 clean high-RMSE mean RMSE: `{fmt(summary['v18HighMeanRmse'])}` km/s.",
+        f"- MOND global-a0 clean high-RMSE mean RMSE: `{fmt(summary['mondGlobalHighMeanRmse'])}` km/s.",
+        f"- NFW concentration-prior clean high-RMSE mean RMSE: `{fmt(summary['nfwPriorHighMeanRmse'])}` km/s.",
+        f"- v18.10 high-RMSE gain vs canonical MTS: `{fmt(summary['v18HighGainPct'])}%`.",
+        f"- v18.10 protected max regression: `{fmt(summary['v18MaxProtectedRegressionKmS'])}` km/s.",
+        "",
+        "## What The Benchmark Says",
+        "",
+        "- Locked v18.10 is now clearly ahead of fixed/global-a0 MOND on the clean high-RMSE set.",
+        "- NFW free and NFW concentration-prior fits still win many galaxies because they fit halo parameters per galaxy; they are the next physics-gap ceiling, not a new MTS tuning target.",
+        "- The useful next science question is where v18.10 still leaves a halo-like residual shape relative to NFW-prior fits.",
+        "",
+        "## High-RMSE Winner Counts",
+        "",
+        "| Winner | Count |",
+        "| --- | ---: |",
+    ]
+    for row in winner_plot_rows:
+        report.append(f"| `{row['winnerRawRmse']}` | {row['caseCount']} |")
+    report.extend(
+        [
+            "",
+            "## Strongest v18.10 Wins Over MOND Global",
+            "",
+            "| Galaxy | Route | v18 RMSE | MOND global RMSE | v18-MOND |",
+            "| --- | --- | ---: | ---: | ---: |",
+        ]
+    )
+    for row in strongest_v18_mond_wins:
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | {fmt(row['v18Rmse'])} | {fmt(row['mondGlobalRmse'])} | {fmt(row['v18MinusMondGlobalKmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Biggest NFW-Prior Gaps Still Left",
+            "",
+            "| Galaxy | Route | v18 RMSE | NFW-prior RMSE | v18-NFW prior | Raw winner |",
+            "| --- | --- | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for row in biggest_nfw_gaps:
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | {fmt(row['v18Rmse'])} | {fmt(row['nfwPriorRmse'])} | {fmt(row['v18MinusNfwPriorKmS'])} | `{row['winnerRawRmse']}` |"
+        )
+    report.extend(
+        [
+            "",
+            "## Figures",
+            "",
+        ]
+    )
+    for row in figure_manifest_rows:
+        report.append(f"- [{row['figure']}]({row['figure']}): {row['purpose']}")
+    report.extend(
+        [
+            "",
+            "## Guardrails",
+            "",
+            f"- Weak/systematics leakage: `{int(weak_leakage) if math.isfinite(weak_leakage) else 'unknown'}`.",
+            "- v18.10 remains the locked native-gated release candidate.",
+            "- MOND per-galaxy a0 and NFW models are labelled fitted/oracle/ceiling comparisons where appropriate.",
+            "- No canonical MTS or v18.10 formula term changed in this mode.",
+        ]
+    )
+    (out_dir / f"{prefix}s_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": summary["analysisName"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_model_means.csv",
+            f"{prefix}_high_winners.csv",
+            f"{prefix}_v18_vs_mond.csv",
+            f"{prefix}_nfw_gap.csv",
+            f"{prefix}_route_gaps.csv",
+            f"{prefix}_protected_summary.csv",
+            f"{prefix}_manifest.csv",
+            f"{prefix}s_report.md",
+            "figures/model_mean_rmse.svg",
+            "figures/high_winner_counts.svg",
+            "figures/v18_vs_mond_global_scatter.svg",
+            "figures/v18_vs_nfw_prior_scatter.svg",
+            "figures/route_gap.svg",
+            f"{prefix}s_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}s_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18competitorfigures(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_COMPETITOR_FIGURES_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_competitor_figure_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.16 competitor figure pack")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high_cases={summary['highCaseCount']}",
+                f"v18_high={fmt(summary['v18HighMeanRmse'])}",
+                f"mond_global_high={fmt(summary['mondGlobalHighMeanRmse'])}",
+                f"nfw_prior_high={fmt(summary['nfwPriorHighMeanRmse'])}",
+                f"protected_regression={fmt(summary['v18MaxProtectedRegressionKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 competitor figures to {out_dir.resolve()}")
 
 
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
@@ -74881,6 +75449,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18competitorbenchmark",
             "v18lawspec",
             "observedstatev18lawspec",
+            "v18competitorfigures",
+            "observedstatev18competitorfigures",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -75159,6 +75729,8 @@ def main() -> None:
         cmd_v18competitorbenchmark(args)
     elif args.mode in {"v18lawspec", "observedstatev18lawspec"}:
         cmd_v18lawspec(args)
+    elif args.mode in {"v18competitorfigures", "observedstatev18competitorfigures"}:
+        cmd_v18competitorfigures(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
