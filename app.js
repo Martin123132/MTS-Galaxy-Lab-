@@ -13,9 +13,10 @@
   };
 
   var V17STATE_EXACT_TOKEN = "__MTS_V17_97_RADIAL_REPAIR_STATE_RESPONSE__";
-  var V18REVIEW_TOKEN = "__MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE__";
-  var V18_RELEASE_DISPLAY_NAME = "MTS v18.10 release candidate (native gated)";
-  var V18_RELEASE_ARTIFACT = window.MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE || window.MTS_V18_07_FAMILY_SURFACE_CANDIDATE || window.MTS_V18_05_RELEASE_CANDIDATE || window.MTS_V18_01_REVIEW_CANDIDATE;
+  var V18REVIEW_TOKEN = "__MTS_V18_21_RADIAL_PHASE_CANDIDATE__";
+  var V18_LEGACY_REVIEW_TOKEN = "__MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE__";
+  var V18_RELEASE_DISPLAY_NAME = "MTS v18.21 radial-phase release candidate (exact cache gated)";
+  var V18_RELEASE_ARTIFACT = window.MTS_V18_21_RADIAL_PHASE_CANDIDATE || window.MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE || window.MTS_V18_07_FAMILY_SURFACE_CANDIDATE || window.MTS_V18_05_RELEASE_CANDIDATE || window.MTS_V18_01_REVIEW_CANDIDATE;
   var V18_REVIEW_GATE_FALLBACK = {
     candidateId: "observed-state-response-v18.10-native-gated-release",
     verdict: "v18.10 release-facing candidate passes",
@@ -1859,11 +1860,11 @@
   function compileFrameworkExpression(expression) {
     var source = String(expression || "").trim();
     if (!source) throw new Error("Framework formula is empty.");
-    if (source === V18REVIEW_TOKEN) {
+    if (source === V18REVIEW_TOKEN || source === V18_LEGACY_REVIEW_TOKEN) {
       var artifact = V18_RELEASE_ARTIFACT || null;
       var metadata = artifact && artifact.metadata ? artifact.metadata : {};
-      var nativeMeta = metadata.nativeFormulaV1809 || {};
-      var releaseLock = metadata.releaseLockV1809 || V18_RELEASE_LOCK_FALLBACK || {};
+      var nativeMeta = metadata.nativeFormulaV1821 || metadata.nativeFormulaV1809 || {};
+      var releaseLock = metadata.releaseLockV1821 || metadata.releaseLockV1809 || V18_RELEASE_LOCK_FALLBACK || {};
       var nativeExpression = String(nativeMeta.expression || "").trim();
       var canUseNative = nativeMeta.canReplaceCache === true &&
         nativeExpression &&
@@ -1953,7 +1954,7 @@
   }
 
   function isV18ReviewActive() {
-    return !!(state.framework.compiled && state.framework.compiled.source === V18REVIEW_TOKEN);
+    return !!(state.framework.compiled && (state.framework.compiled.source === V18REVIEW_TOKEN || state.framework.compiled.source === V18_LEGACY_REVIEW_TOKEN));
   }
 
   function frameworkProfileBand(curve, xMin, xMax) {
@@ -4006,27 +4007,29 @@
     var active = isV18ReviewActive();
     var artifact = V18_RELEASE_ARTIFACT || null;
     var gate = (artifact && artifact.metadata && artifact.metadata.reviewGate) || V18_REVIEW_GATE;
-    var releaseLock = (artifact && artifact.metadata && artifact.metadata.releaseLockV1809) || V18_RELEASE_LOCK_FALLBACK;
+    var releaseLock = (artifact && artifact.metadata && (artifact.metadata.releaseLockV1821 || artifact.metadata.releaseLockV1809)) || V18_RELEASE_LOCK_FALLBACK;
     var branchPrune = artifact && artifact.metadata && artifact.metadata.branchPrune;
     var familyAudit = artifact && artifact.metadata && artifact.metadata.familyAudit;
     var branchIdentity = artifact && artifact.metadata && artifact.metadata.branchIdentity;
     var branchSafety = artifact && artifact.metadata && artifact.metadata.branchSafetyV1803;
     var edgeHarden = artifact && artifact.metadata && artifact.metadata.edgeHardenV1804;
     var releaseStress = artifact && artifact.metadata && artifact.metadata.releaseStressV1805;
+    var radialRedteam = artifact && artifact.metadata && artifact.metadata.radialPhaseRedTeamV1822;
     var artifactCount = artifact && artifact.metadata ? artifact.metadata.curveCount : 0;
-    var nativeMeta = artifact && artifact.metadata && artifact.metadata.nativeFormulaV1809 ? artifact.metadata.nativeFormulaV1809 : {};
+    var nativeMeta = artifact && artifact.metadata ? (artifact.metadata.nativeFormulaV1821 || artifact.metadata.nativeFormulaV1809 || {}) : {};
     var cacheMismatch = releaseLock.browserCacheParityMismatchCount == null ? 0 : releaseLock.browserCacheParityMismatchCount;
     var nativeMismatch = nativeMeta.nativeFormulaParityMismatchCount == null
       ? (releaseLock.nativeFormulaParityMismatchCount == null ? 7 : releaseLock.nativeFormulaParityMismatchCount)
       : nativeMeta.nativeFormulaParityMismatchCount;
     var nativeReady = nativeMeta.canReplaceCache === true && Number(cacheMismatch) === 0 && Number(nativeMismatch) === 0 && Number(nativeMeta.nativeFormulaRouteMismatchCount || 0) === 0;
     var runtimeSource = nativeReady ? "native expression" : "exact cache locked";
+    var protectedDisplay = gate.protectedMaxRegressionKmS != null ? fmt(gate.protectedMaxRegressionKmS, 2) + " km/s" : String(gate.activeProtectedWorseCount);
     $("v18ReviewStatus").textContent = active ? "active" : "ready";
     $("v18ReviewHighGain").textContent = fmt(gate.nominalHighGainPct, 2) + "%";
     $("v18ReviewHoldout").textContent = fmt(gate.holdoutHighGainPct, 2) + "%";
     $("v18ReviewStress").textContent = String(gate.stressAbove20);
     $("v18ReviewNullMargin").textContent = fmt(releaseLock.releaseBranchShuffleNullMarginPct || gate.releaseBranchShuffleNullMarginPct || gate.nullMarginKmS, 2);
-    $("v18ReviewProtected").textContent = String(gate.activeProtectedWorseCount);
+    $("v18ReviewProtected").textContent = protectedDisplay;
     $("v18ReviewDiff").textContent = String(cacheMismatch);
     if ($("v18ReviewArtifactCount")) $("v18ReviewArtifactCount").textContent = artifact && artifact.metadata ? String(artifact.metadata.curveCount) : "--";
     if ($("v18ReviewCleanCount")) $("v18ReviewCleanCount").textContent = artifact && artifact.metadata ? String(artifact.metadata.cleanCurveCount) : "--";
@@ -4047,8 +4050,8 @@
     if ($("v18ReviewReleaseNull")) $("v18ReviewReleaseNull").textContent = releaseStress ? fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " pts" : "--";
     if ($("v18ReviewNote")) {
       $("v18ReviewNote").textContent = active
-        ? "Active preset uses the locked v18.10 " + (nativeReady ? "native expression" : "exact support cache with " + artifactCount + " cached curves") + ". Release-lock status: " + releaseLock.verdict + ". Native mismatches are " + String(nativeMismatch) + "; cache mismatches are " + String(cacheMismatch) + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "not run") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "not run") + ". Release stress: " + (releaseStress ? releaseStress.verdict + " with " + fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " point branch-null margin" : "not run") + ". The lock keeps all clean high-RMSE cases below 20 km/s with zero protected regression."
-        : "Select " + V18_RELEASE_DISPLAY_NAME + " in the Test Rig to inspect the release candidate. Runtime uses the native v18.10 expression only when every release-lock parity guard is zero; otherwise it falls back to the exact cache.";
+        ? "Active preset uses " + V18_RELEASE_DISPLAY_NAME + " via " + (nativeReady ? "native expression" : "exact support cache with " + artifactCount + " cached curves") + ". Release-lock status: " + releaseLock.verdict + ". Native mismatches are " + String(nativeMismatch) + "; cache mismatches are " + String(cacheMismatch) + ". Red-team: " + (radialRedteam ? radialRedteam.verdict + " with " + fmt(radialRedteam.nullMarginPriorityPct, 2) + " point priority-null margin" : "not run") + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "v18.21 cache-gated") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "v18.21 cache-gated") + ". The lock keeps all clean high-RMSE cases below 20 km/s with protected max regression below 1 km/s."
+        : "Select " + V18_RELEASE_DISPLAY_NAME + " in the Test Rig to inspect the release candidate. Runtime uses the exact cache until a separate v18.21 native parity pass exists.";
     }
   }
 

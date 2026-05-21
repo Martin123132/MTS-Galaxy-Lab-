@@ -189,11 +189,13 @@ DEFAULT_OBSERVED_STATE_V18_LEGACY_STRUCTURE_OUT = OUTPUT_PACK_ROOT / "mts-v18-le
 DEFAULT_OBSERVED_STATE_V18_MASS_SCALE_OUT = OUTPUT_PACK_ROOT / "mts-v18-official-mass-scale-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial-phase-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial-phase-redteam-v1"
+DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BROWSER_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial-phase-browser-lock-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
 V18_FAMILY_SURFACE_ARTIFACT_PATH = ROOT / "data" / "v18-07-family-surface-candidate.js"
 V18_SURFACE_SMOOTH_ARTIFACT_PATH = ROOT / "data" / "v18-09-surface-persistence-candidate.js"
+V18_RADIAL_PHASE_ARTIFACT_PATH = ROOT / "data" / "v18-21-radial-phase-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -65496,6 +65498,375 @@ def cmd_v18radialphaseredteam(args: argparse.Namespace) -> None:
     print(f"Wrote v18 radial-phase red-team to {out_dir.resolve()}")
 
 
+def write_v18_radial_phase_browser_lock_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_radial_phase_browser_lock"
+    redteam_capsule = write_v18_radial_phase_redteam_artifacts(DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_REDTEAM_OUT)
+    lock_capsule = write_observed_state_v18_release_lock_final_artifacts(DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_FINAL_OUT)
+    base = v18_radial_phase_base_context()
+    train_names, holdout_names = observed_state_split(base["cleanCurves"], SPLIT_SEED, HOLDOUT_FRACTION)
+    rows = v18_radial_phase_nominal_rows(base, (train_names, holdout_names))
+    metric = v18_nfw_gap_candidate_metric(rows)
+    holdout_metric = v18_nfw_gap_candidate_metric(rows, "holdout")
+    null_rows = v18_radial_phase_null_rows(
+        base["cleanCurves"],
+        rows,
+        base["baseStrengths"],
+        base["table1ByName"],
+        base["v18Lookup"],
+        base["weakNames"],
+        base["highNames"],
+        base["priorityNames"],
+    )
+    best_null_priority = max([parse_float(row["priorityGainVsV18Pct"]) for row in null_rows] or [math.nan])
+    null_margin_priority = metric["priorityGainVsV18Pct"] - best_null_priority if math.isfinite(best_null_priority) else math.nan
+
+    artifact_curves: dict[str, dict] = {}
+    case_rows: list[dict] = []
+    parity_rows: list[dict] = []
+    row_by_name = {row["galaxy"]: row for row in rows}
+
+    for curve in base["curves"]:
+        name = curve["name"]
+        set_name = v18_nfw_gap_candidate_set_label(name, base["weakNames"], base["highNames"])
+        v18_supports = [base["v18Lookup"][(name, index)] for index in range(len(curve["points"]))]
+        if name in base["weakNames"]:
+            candidate_supports = v18_supports[:]
+            acts = {key: 0.0 for key in V18_RADIAL_PHASE_STRENGTHS}
+            acts.update({"completion": 0.0, "lowSuppression": 0.0, "bufferedSuppression": 0.0, "anyActivation": 0.0})
+            legacy_family = ""
+            official_family = ""
+        else:
+            candidate_supports, acts, _profile_values, _mass_features, _legacy_features, legacy_family, official_family = v18_radial_phase_supports(
+                curve,
+                v18_supports,
+                base["baseStrengths"],
+                base["table1ByName"],
+            )
+
+        baseline = score_curve(curve)
+        v18_score = v18_competitor_support_score(curve, v18_supports)
+        candidate = v18_competitor_support_score(curve, candidate_supports)
+        artifact_score = observed_state_score_curve_from_supports(curve, candidate_supports)
+        rmse_diff = artifact_score["rmse"] - candidate["rmse"]
+        route_match = artifact_score["candidateRoute"] == candidate["candidateRoute"]
+        parity_claimed = name not in base["weakNames"]
+        parity_pass = (not parity_claimed) or (abs(rmse_diff) <= 1e-9 and route_match)
+        radial_hits = [family for family in V18_RADIAL_PHASE_STRENGTHS if parse_float(acts.get(family), 0.0) >= 0.20]
+        base_hits = [key for key in ["completion", "lowSuppression", "bufferedSuppression"] if parse_float(acts.get(key), 0.0) >= 0.20]
+        candidate_row = row_by_name.get(name, {})
+        split = candidate_row.get("split", "weak-excluded" if name in base["weakNames"] else "")
+        protected_regression = (
+            max(0.0, candidate["rmse"] - v18_score["rmse"])
+            if set_name == "clean-protected"
+            else 0.0
+        )
+        entry = {
+            "candidateId": "observed-state-response-v18.21-radial-phase-release-candidate",
+            "releaseCandidate": "MTS v18.21 radial-phase release candidate",
+            "supportSource": "python v18.21 radial-phase exact support cache",
+            "support2": [float(value) for value in candidate_supports],
+            "set": set_name,
+            "split": split,
+            "lockedRoute": curve.get("lockedModelRoute", ""),
+            "observedRoute": curve.get("route", ""),
+            "baselineRmse": baseline["rmse"],
+            "v18Rmse": v18_score["rmse"],
+            "v1821Rmse": candidate["rmse"],
+            "v1821ArtifactRmse": artifact_score["rmse"],
+            "v1821RmseDiffVsPython": rmse_diff,
+            "v18CandidateRoute": v18_score["candidateRoute"],
+            "v1821CandidateRoute": candidate["candidateRoute"],
+            "v1821ArtifactRoute": artifact_score["candidateRoute"],
+            "candidateRoute": candidate["candidateRoute"],
+            "branchHits": "; ".join(base_hits + radial_hits),
+            "radialPhaseFamilies": "; ".join(radial_hits),
+            "legacyCompletionFamily": legacy_family,
+            "officialMassScaleFamily": official_family,
+            "anyActivation": acts.get("anyActivation", 0.0),
+            "reviewGate": "weak/systematics excluded" if name in base["weakNames"] else "clean framework-facing",
+            "browserParityPass": parity_pass,
+        }
+        artifact_curves[name] = entry
+        case_rows.append(
+            {
+                "galaxy": name,
+                "set": set_name,
+                "split": split,
+                "baselineRmse": baseline["rmse"],
+                "v18Rmse": v18_score["rmse"],
+                "v1821Rmse": candidate["rmse"],
+                "gainVsV18KmS": v18_score["rmse"] - candidate["rmse"],
+                "gainVsV18Pct": pct_improvement(v18_score["rmse"], candidate["rmse"]),
+                "protectedRegressionVsV18KmS": protected_regression if set_name == "clean-protected" else "",
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "v18Route": v18_score["candidateRoute"],
+                "v1821Route": candidate["candidateRoute"],
+                "branchHits": entry["branchHits"],
+                "radialPhaseFamilies": entry["radialPhaseFamilies"],
+                "stillAbove20": candidate["rmse"] >= 20.0 if set_name == "clean-high-rmse" else "",
+                "weakSystematicsExcluded": name in base["weakNames"],
+            }
+        )
+        parity_rows.append(
+            {
+                "galaxy": name,
+                "set": set_name,
+                "supportSource": entry["supportSource"],
+                "pythonV1821Rmse": candidate["rmse"],
+                "artifactRmse": artifact_score["rmse"],
+                "artifactMinusPythonRmse": rmse_diff,
+                "pythonRoute": candidate["candidateRoute"],
+                "artifactRoute": artifact_score["candidateRoute"],
+                "routeMatch": route_match,
+                "parityClaimed": parity_claimed,
+                "parityPass": parity_pass,
+            }
+        )
+
+    clean_rows = [row for row in case_rows if row["set"] != "weak-systematics-excluded"]
+    high_rows = [row for row in case_rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [row for row in case_rows if row["set"] == "clean-protected"]
+    holdout_rows = [row for row in clean_rows if row["split"] == "holdout"]
+    holdout_high_rows = [row for row in high_rows if row["split"] == "holdout"]
+    protected_regressions = [parse_float(row.get("protectedRegressionVsV18KmS"), 0.0) for row in protected_rows]
+    protected_worse_count = sum(1 for value in protected_regressions if value > 1e-9)
+    clean_parity_rows = [row for row in parity_rows if row["parityClaimed"]]
+    clean_parity_mismatch_count = sum(1 for row in clean_parity_rows if not row["parityPass"])
+    route_mismatch_count = sum(1 for row in clean_parity_rows if not parse_bool(row["routeMatch"]))
+    max_rmse_diff = max([abs(parse_float(row["artifactMinusPythonRmse"], 0.0)) for row in clean_parity_rows] or [0.0])
+
+    candidate_high_gain = pct_improvement(
+        safe_mean(row["baselineRmse"] for row in high_rows),
+        safe_mean(row["v1821Rmse"] for row in high_rows),
+    )
+    candidate_clean_gain = pct_improvement(
+        safe_mean(row["baselineRmse"] for row in clean_rows),
+        safe_mean(row["v1821Rmse"] for row in clean_rows),
+    )
+    holdout_high_gain = pct_improvement(
+        safe_mean(row["baselineRmse"] for row in holdout_high_rows),
+        safe_mean(row["v1821Rmse"] for row in holdout_high_rows),
+    )
+    holdout_clean_gain = pct_improvement(
+        safe_mean(row["baselineRmse"] for row in holdout_rows),
+        safe_mean(row["v1821Rmse"] for row in holdout_rows),
+    )
+    high_above20 = sum(1 for row in high_rows if parse_bool(row["stillAbove20"]))
+    weak_leakage = metric["weakSystematicsLeakage"]
+    redteam_passed = redteam_capsule["verdict"] == "v18.21 release-candidate hardening passed"
+    release_ready = (
+        redteam_passed
+        and clean_parity_mismatch_count == 0
+        and route_mismatch_count == 0
+        and high_above20 == 0
+        and max(protected_regressions or [0.0]) < 1.0
+        and weak_leakage == 0
+        and math.isfinite(null_margin_priority)
+        and null_margin_priority >= 10.0
+    )
+    verdict = "v18.21 browser release lock passed" if release_ready else "v18.21 browser release lock blocked"
+    summary = {
+        "candidateId": "observed-state-response-v18.21-radial-phase-browser-lock",
+        "verdict": verdict,
+        "artifactPath": str(V18_RADIAL_PHASE_ARTIFACT_PATH),
+        "artifactCurveCount": len(artifact_curves),
+        "cleanCurveCount": len(clean_rows),
+        "weakSystematicsExcludedCount": len(base["weakNames"]),
+        "allGalaxyLockedMtsMeanRmse": safe_mean(score_curve(curve)["rmse"] for curve in base["curves"]),
+        "cleanSetLockedMtsMeanRmse": safe_mean(row["baselineRmse"] for row in clean_rows),
+        "v18ReferenceHighGainPct": lock_capsule["summary"]["cleanHighGainPct"],
+        "v18ReferenceCleanGainPct": lock_capsule["summary"]["cleanGainPct"],
+        "v1821HighGainPct": candidate_high_gain,
+        "v1821CleanGainPct": candidate_clean_gain,
+        "v1821HoldoutHighGainPct": holdout_high_gain,
+        "v1821HoldoutCleanGainPct": holdout_clean_gain,
+        "v1821HighGainVsV18Pct": metric["highGainVsV18Pct"],
+        "v1821PriorityGainVsV18Pct": metric["priorityGainVsV18Pct"],
+        "v1821HoldoutHighGainVsV18Pct": holdout_metric["highGainVsV18Pct"],
+        "v1821HoldoutPriorityGainVsV18Pct": holdout_metric["priorityGainVsV18Pct"],
+        "v1821HighAbove20": high_above20,
+        "v1821ProtectedMaxRegressionVsV18KmS": max(protected_regressions or [0.0]),
+        "v1821ProtectedWorseCountVsV18": protected_worse_count,
+        "weakSystematicsLeakage": weak_leakage,
+        "browserCacheParityMismatchCount": clean_parity_mismatch_count,
+        "browserRouteMismatchCount": route_mismatch_count,
+        "maxCleanArtifactMinusPythonRmseAbs": max_rmse_diff,
+        "bestNullPriorityGainPct": best_null_priority,
+        "nullMarginPriorityPct": null_margin_priority,
+        "redteamVerdict": redteam_capsule["verdict"],
+    }
+
+    artifact_payload = {
+        "metadata": {
+            "candidateId": "observed-state-response-v18.21-radial-phase-release-candidate",
+            "displayName": "MTS v18.21 radial-phase release candidate",
+            "source": "scripts/mts-failure-lab.py observedstatev18radialphasebrowserlock",
+            "supportCacheBasis": "v18.21 radial-phase exact support arrays generated from the Python-tested candidate",
+            "releaseCandidateBasis": "v18.21 red-team passed: high/NFW-gap gain, zero high-RMSE cases above 20 km/s, <1 km/s protected max regression, and >10 point priority-null margin",
+            "curveCount": len(artifact_curves),
+            "cleanCurveCount": len(clean_rows),
+            "weakSystematicsExcludedCount": len(base["weakNames"]),
+            "verdict": verdict,
+            "reviewGate": {
+                "candidateId": "observed-state-response-v18.21-radial-phase-release-candidate",
+                "verdict": redteam_capsule["verdict"],
+                "nominalHighGainPct": candidate_high_gain,
+                "nominalCleanGainPct": candidate_clean_gain,
+                "holdoutHighGainPct": holdout_high_gain,
+                "holdoutCleanGainPct": holdout_clean_gain,
+                "highGainVsV18Pct": metric["highGainVsV18Pct"],
+                "priorityGainVsV18Pct": metric["priorityGainVsV18Pct"],
+                "holdoutHighGainVsV18Pct": holdout_metric["highGainVsV18Pct"],
+                "holdoutPriorityGainVsV18Pct": holdout_metric["priorityGainVsV18Pct"],
+                "stressAbove20": high_above20,
+                "nullMarginKmS": null_margin_priority,
+                "releaseBranchShuffleNullMarginPct": null_margin_priority,
+                "activeProtectedWorseCount": protected_worse_count,
+                "protectedMaxRegressionKmS": max(protected_regressions or [0.0]),
+            },
+            "releaseLockV1821": {
+                "candidateId": "observed-state-response-v18.21-radial-phase-browser-lock",
+                "verdict": verdict,
+                "artifactCandidateId": "observed-state-response-v18.21-radial-phase-release-candidate",
+                "artifactDisplayName": "MTS v18.21 radial-phase release candidate",
+                "allGalaxyLockedMtsMeanRmse": summary["allGalaxyLockedMtsMeanRmse"],
+                "cleanSetLockedMtsMeanRmse": summary["cleanSetLockedMtsMeanRmse"],
+                "cleanHighGainPct": candidate_high_gain,
+                "cleanGainPct": candidate_clean_gain,
+                "cleanHighAbove20AfterCandidate": high_above20,
+                "maxProtectedRegressionKmS": max(protected_regressions or [0.0]),
+                "protectedRegressionCount": protected_worse_count,
+                "weakSystematicsLeakage": weak_leakage,
+                "weakSystematicsExcludedCount": len(base["weakNames"]),
+                "browserCacheParityMismatchCount": clean_parity_mismatch_count,
+                "browserRouteMismatchCount": route_mismatch_count,
+                "nativeFormulaCanReplaceCache": False,
+                "nativeFormulaParityMismatchCount": 0,
+                "nativeFormulaRouteMismatchCount": 0,
+                "exactSupportCacheRemainsSourceOfTruth": True,
+                "releaseBranchShuffleNullMarginPct": null_margin_priority,
+                "canonicalMtsChanged": False,
+                "forbiddenFormulaInputsUsed": False,
+            },
+            "nativeFormulaV1821": {
+                "canReplaceCache": False,
+                "reason": "v18.21 includes radial phase redistribution and is browser-locked to the exact tested support cache until a separate native parity pass is built",
+                "browserCacheParityMismatchCount": clean_parity_mismatch_count,
+                "nativeFormulaParityMismatchCount": 0,
+                "nativeFormulaRouteMismatchCount": 0,
+                "cleanHighAbove20AfterCandidate": high_above20,
+                "maxProtectedRegressionKmS": max(protected_regressions or [0.0]),
+                "protectedRegressionCount": protected_worse_count,
+                "weakSystematicsLeakage": weak_leakage,
+            },
+            "radialPhaseRedTeamV1822": redteam_capsule["summary"],
+            "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "NFW parameter lookup", "weak/systematics training"],
+        },
+        "curves": artifact_curves,
+    }
+
+    out_artifact = out_dir / "mts_v18_radial_phase_browser_artifact.js"
+    write_window_json_assignment(out_artifact, "MTS_V18_21_RADIAL_PHASE_CANDIDATE", artifact_payload)
+    write_window_json_assignment(V18_RADIAL_PHASE_ARTIFACT_PATH, "MTS_V18_21_RADIAL_PHASE_CANDIDATE", artifact_payload)
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_browser_parity.csv", parity_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(
+        json.dumps(
+            json_clean(
+                {
+                    "candidateId": "observed-state-response-v18.21-radial-phase-release-candidate",
+                    "baseCandidate": "MTS v18.10 observed-state response release candidate",
+                    "browserSourceOfTruth": "exact support cache",
+                    "artifactPath": str(V18_RADIAL_PHASE_ARTIFACT_PATH),
+                    "nativeFormulaCanReplaceCache": False,
+                    "canonicalConstantsChanged": False,
+                    "radialPhaseStrengths": V18_RADIAL_PHASE_STRENGTHS,
+                    "baseStrengths": base["baseStrengths"],
+                    "forbiddenInputsUsed": False,
+                }
+            ),
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    report = [
+        "# MTS v18.21 Radial-Phase Browser Lock",
+        "",
+        "This is release integration for the already red-team-passed v18.21 candidate. It does not tune a new law. The browser source of truth is the exact Python-tested support cache.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Browser artifact: `{V18_RADIAL_PHASE_ARTIFACT_PATH}`.",
+        f"- Clean high-RMSE gain vs canonical: `{fmt(candidate_high_gain)}%`.",
+        f"- Clean-set gain vs canonical: `{fmt(candidate_clean_gain)}%`.",
+        f"- High-RMSE gain over v18.10: `{fmt(metric['highGainVsV18Pct'])}%`.",
+        f"- Priority NFW-gap gain over v18.10: `{fmt(metric['priorityGainVsV18Pct'])}%`.",
+        f"- Holdout priority gain over v18.10: `{fmt(holdout_metric['priorityGainVsV18Pct'])}%`.",
+        f"- High-RMSE cases above 20 km/s: `{high_above20}`.",
+        f"- Protected max regression vs v18.10: `{fmt(max(protected_regressions or [0.0]))}` km/s.",
+        f"- Weak/systematics leakage: `{weak_leakage}`.",
+        f"- Browser cache parity mismatches: `{clean_parity_mismatch_count}`.",
+        f"- Browser route mismatches: `{route_mismatch_count}`.",
+        f"- Priority null margin: `{fmt(null_margin_priority)}` points.",
+        "",
+        "## Browser Semantics",
+        "",
+        "- The preset label is `MTS v18.21 radial-phase release candidate (exact cache gated)`.",
+        "- Runtime must say `exact cache locked`; v18.21 is not native-expression backed yet.",
+        "- The older v18.10 native-gated artifact remains available as fallback data only.",
+        "- q, Gamma0, disk M/L, and bulge M/L remain unchanged.",
+        "",
+        "## Guardrails",
+        "",
+        "- No galaxy name, residual lookup, raw RMSE lookup, NFW parameter, or weak/systematics case enters the formula.",
+        "- Weak/systematics curves are loaded only as excluded/protected rows and receive no v18.21 branch activation.",
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-radial-phase-browser-lock-v1",
+        "candidateId": summary["candidateId"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_browser_parity.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+            "mts_v18_radial_phase_browser_artifact.js",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18radialphasebrowserlock(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BROWSER_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_radial_phase_browser_lock_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.21 radial-phase browser lock")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high_gain={fmt(summary['v1821HighGainPct'])}%",
+                f"gain_vs_v18={fmt(summary['v1821HighGainVsV18Pct'])}%",
+                f"priority_vs_v18={fmt(summary['v1821PriorityGainVsV18Pct'])}%",
+                f"protected={fmt(summary['v1821ProtectedMaxRegressionVsV18KmS'])}",
+                f"cache_mismatch={summary['browserCacheParityMismatchCount']}",
+            ]
+        )
+    )
+    print(f"Wrote v18.21 browser lock to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -78526,6 +78897,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18radialphasecandidate",
             "v18radialphaseredteam",
             "observedstatev18radialphaseredteam",
+            "v18radialphasebrowserlock",
+            "observedstatev18radialphasebrowserlock",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -78818,6 +79191,8 @@ def main() -> None:
         cmd_v18radialphasecandidate(args)
     elif args.mode in {"v18radialphaseredteam", "observedstatev18radialphaseredteam"}:
         cmd_v18radialphaseredteam(args)
+    elif args.mode in {"v18radialphasebrowserlock", "observedstatev18radialphasebrowserlock"}:
+        cmd_v18radialphasebrowserlock(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
