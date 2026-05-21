@@ -183,6 +183,7 @@ DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_FINAL_OUT = OUTPUT_PACK_ROOT / "mts-obse
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-benchmark-v1"
 DEFAULT_OBSERVED_STATE_V18_LAW_SPEC_OUT = OUTPUT_PACK_ROOT / "mts-v18-law-spec-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_FIGURES_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-figures-v1"
+DEFAULT_OBSERVED_STATE_V18_NFW_GAP_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-gap-audit-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -62433,6 +62434,405 @@ def cmd_v18competitorfigures(args: argparse.Namespace) -> None:
     print(f"Wrote v18 competitor figures to {out_dir.resolve()}")
 
 
+def v18_nfw_gap_zone(x_value: float) -> str:
+    if x_value < 0.33:
+        return "inner"
+    if x_value < 0.66:
+        return "mid"
+    return "outer"
+
+
+def v18_nfw_gap_band_stats(point_rows: list[dict], zone: str) -> dict:
+    selected = [row for row in point_rows if row["zone"] == zone]
+    if not selected:
+        return {
+            f"{zone}Count": 0,
+            f"{zone}V18Rmse": math.nan,
+            f"{zone}NfwPriorRmse": math.nan,
+            f"{zone}V18Bias": math.nan,
+            f"{zone}NfwPriorBias": math.nan,
+            f"{zone}V18MinusNfwModelKmS": math.nan,
+            f"{zone}V18MinusNfwSupport": math.nan,
+        }
+    return {
+        f"{zone}Count": len(selected),
+        f"{zone}V18Rmse": math.sqrt(statistics.mean(row["v18Residual"] ** 2 for row in selected)),
+        f"{zone}NfwPriorRmse": math.sqrt(statistics.mean(row["nfwPriorResidual"] ** 2 for row in selected)),
+        f"{zone}V18Bias": statistics.mean(row["v18Residual"] for row in selected),
+        f"{zone}NfwPriorBias": statistics.mean(row["nfwPriorResidual"] for row in selected),
+        f"{zone}V18MinusNfwModelKmS": statistics.mean(row["v18MinusNfwPriorModelKmS"] for row in selected),
+        f"{zone}V18MinusNfwSupport": statistics.mean(row["v18MinusNfwPriorSupport"] for row in selected),
+    }
+
+
+def v18_nfw_gap_classification(stats: dict) -> str:
+    v18_biases = [stats.get(f"{zone}V18Bias", math.nan) for zone in ["inner", "mid", "outer"]]
+    model_deltas = [stats.get(f"{zone}V18MinusNfwModelKmS", math.nan) for zone in ["inner", "mid", "outer"]]
+    clean_biases = [value for value in v18_biases if math.isfinite(value)]
+    clean_deltas = [value for value in model_deltas if math.isfinite(value)]
+    if len(clean_biases) < 2 or len(clean_deltas) < 2:
+        return "insufficient radial coverage"
+    negative_bias_count = sum(1 for value in clean_biases if value < -4.0)
+    positive_bias_count = sum(1 for value in clean_biases if value > 4.0)
+    negative_delta_count = sum(1 for value in clean_deltas if value < -4.0)
+    positive_delta_count = sum(1 for value in clean_deltas if value > 4.0)
+    sign_changes = any(value < -4.0 for value in clean_deltas) and any(value > 4.0 for value in clean_deltas)
+    if negative_bias_count >= 2 and negative_delta_count >= 2:
+        return "missing halo-like support"
+    if positive_bias_count >= 2 and positive_delta_count >= 2:
+        return "over-support versus halo-prior shape"
+    if sign_changes:
+        return "radial redistribution gap"
+    return "mixed/local halo-fit gap"
+
+
+def v18_nfw_gap_next_target(row: dict) -> str:
+    gap_class = row.get("gapClass", "")
+    route = row.get("lockedRoute", "")
+    family = row.get("responseFamily", "")
+    if gap_class == "missing halo-like support" and route == "low-load":
+        return "low-load outer/mid support completion"
+    if gap_class == "missing halo-like support":
+        return "buffered support completion"
+    if gap_class == "over-support versus halo-prior shape" and route == "low-load":
+        return "low-load support safety/suppression"
+    if gap_class == "over-support versus halo-prior shape":
+        return "buffered support safety/suppression"
+    if gap_class == "radial redistribution gap":
+        return "radial transfer/shape law"
+    if family:
+        return f"inspect existing family: {family}"
+    return "manual profile review"
+
+
+def v18_nfw_gap_svg(path: Path, title: str, point_rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    width = 880
+    height = 560
+    left = 66
+    top = 42
+    right = 28
+    bottom = 72
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    x_max = max([row["r"] for row in point_rows] or [1.0])
+    y_max = max(
+        [
+            row[key]
+            for row in point_rows
+            for key in ["vObs", "vBaryon", "vCanonical", "v18", "vNfwPrior"]
+            if math.isfinite(row.get(key, math.nan))
+        ]
+        or [1.0]
+    ) * 1.10
+
+    def sx(value: float) -> float:
+        return left + plot_w * value / max(x_max, 1e-9)
+
+    def sy(value: float) -> float:
+        return top + plot_h * (1.0 - value / max(y_max, 1e-9))
+
+    def polyline(key: str, color: str, width_px: float, dash: str = "") -> str:
+        points = " ".join(
+            f"{sx(row['r']):.2f},{sy(row[key]):.2f}" for row in point_rows if math.isfinite(row.get(key, math.nan))
+        )
+        dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
+        return f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="{width_px}"{dash_attr}/>'
+
+    grid = []
+    for index in range(6):
+        x = left + plot_w * index / 5
+        y = top + plot_h * index / 5
+        grid.append(f'<line x1="{x:.1f}" y1="{top}" x2="{x:.1f}" y2="{top + plot_h}" stroke="#eeeeee"/>')
+        grid.append(f'<line x1="{left}" y1="{y:.1f}" x2="{left + plot_w}" y2="{y:.1f}" stroke="#eeeeee"/>')
+    obs = []
+    for row in point_rows:
+        obs.append(f'<circle cx="{sx(row["r"]):.2f}" cy="{sy(row["vObs"]):.2f}" r="3.2" fill="#111111"/>')
+    legend_y = height - 34
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="18" y="25" font-family="Arial" font-size="18" font-weight="700">{html.escape(title)}</text>
+<rect x="{left}" y="{top}" width="{plot_w}" height="{plot_h}" fill="#fff" stroke="#555"/>
+{''.join(grid)}
+{polyline("vBaryon", "#b45309", 2, "7 5")}
+{polyline("vCanonical", "#8b8b8b", 2, "5 5")}
+{polyline("v18", "#2563eb", 3)}
+{polyline("vNfwPrior", "#16a34a", 3)}
+{''.join(obs)}
+<text x="{left + plot_w / 2:.1f}" y="{height - 10}" text-anchor="middle" font-family="Arial" font-size="12">radius kpc</text>
+<text x="16" y="{top + plot_h / 2:.1f}" transform="rotate(-90 16 {top + plot_h / 2:.1f})" text-anchor="middle" font-family="Arial" font-size="12">velocity km/s</text>
+<circle cx="70" cy="{legend_y}" r="4" fill="#111"/><text x="82" y="{legend_y + 4}" font-family="Arial" font-size="12">observed</text>
+<line x1="158" y1="{legend_y}" x2="208" y2="{legend_y}" stroke="#b45309" stroke-width="2" stroke-dasharray="7 5"/><text x="214" y="{legend_y + 4}" font-family="Arial" font-size="12">baryon</text>
+<line x1="300" y1="{legend_y}" x2="350" y2="{legend_y}" stroke="#8b8b8b" stroke-width="2" stroke-dasharray="5 5"/><text x="356" y="{legend_y + 4}" font-family="Arial" font-size="12">canonical</text>
+<line x1="470" y1="{legend_y}" x2="520" y2="{legend_y}" stroke="#2563eb" stroke-width="3"/><text x="526" y="{legend_y + 4}" font-family="Arial" font-size="12">v18.10</text>
+<line x1="630" y1="{legend_y}" x2="680" y2="{legend_y}" stroke="#16a34a" stroke-width="3"/><text x="686" y="{legend_y + 4}" font-family="Arial" font-size="12">NFW-prior fit</text>
+</svg>'''
+    path.write_text(svg, encoding="utf-8")
+
+
+def write_v18_nfw_gap_audit_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir = out_dir / "profiles"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_nfw_gap"
+    benchmark_dir, benchmark_capsule, _scores, cases = v18_competitor_ensure_benchmark()
+    lock_dir = DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_FINAL_OUT
+    if not (lock_dir / "mts_v18_release_lock_final_high_rmse_repairs.csv").exists():
+        write_observed_state_v18_release_lock_final_artifacts(lock_dir)
+    release_rows = {
+        row.get("galaxy", ""): row
+        for row in read_csv_rows(lock_dir / "mts_v18_release_lock_final_high_rmse_repairs.csv")
+    }
+    nfw_params = {
+        row.get("galaxy", ""): row
+        for row in read_csv_rows(benchmark_dir / "mts_v18_competitor_nfw_params.csv")
+        if row.get("track") == "nfw-concentration-prior"
+    }
+    context = observed_state_candidate_context()
+    curves_by_name = {curve["name"]: curve for curve in context["curves"]}
+    expression = observed_state_app_expression(context["fit"], context["ampCap"])
+    v18_lookup = observed_state_browser_formula_supports(context["curves"], expression)
+    case_rows = [row for row in cases if row.get("set") == "clean-high-rmse"]
+    case_rows.sort(key=lambda row: (-parse_float(row.get("v18MinusNfwPriorKmS"), -math.inf), row.get("galaxy", "")))
+
+    point_ledger: list[dict] = []
+    gap_rows: list[dict] = []
+    for rank, row in enumerate(case_rows, start=1):
+        name = row["galaxy"]
+        curve = curves_by_name[name]
+        param_row = nfw_params.get(name)
+        if param_row:
+            v200 = parse_float(param_row.get("v200KmS"))
+            concentration = parse_float(param_row.get("concentration"))
+        else:
+            v200, concentration, _score, _params = v18_competitor_fit_nfw(curve, concentration_prior=True)
+        canonical_supports = v18_competitor_canonical_supports(curve)
+        v18_supports = [v18_lookup[(name, index)] for index in range(len(curve["points"]))]
+        nfw_supports = v18_competitor_nfw_supports(curve, v200, concentration)
+        galaxy_points: list[dict] = []
+        for index, (point, canonical_support, v18_support, nfw_support) in enumerate(
+            zip(curve["points"], canonical_supports, v18_supports, nfw_supports),
+            start=1,
+        ):
+            v_baryon = math.sqrt(max(0.0, point["bar2"]))
+            v_canonical = math.sqrt(max(0.0, point["bar2"] + max(0.0, canonical_support)))
+            v18_model = math.sqrt(max(0.0, point["bar2"] + max(0.0, v18_support)))
+            nfw_model = math.sqrt(max(0.0, point["bar2"] + max(0.0, nfw_support)))
+            point_row = {
+                "galaxy": name,
+                "pointIndex": index,
+                "zone": v18_nfw_gap_zone(point["x"]),
+                "r": point["r"],
+                "x": point["x"],
+                "vObs": point["vObs"],
+                "err": point.get("err", math.nan),
+                "vBaryon": v_baryon,
+                "vCanonical": v_canonical,
+                "v18": v18_model,
+                "vNfwPrior": nfw_model,
+                "canonicalSupport": canonical_support,
+                "v18Support": v18_support,
+                "nfwPriorSupport": nfw_support,
+                "v18Residual": v18_model - point["vObs"],
+                "nfwPriorResidual": nfw_model - point["vObs"],
+                "v18MinusNfwPriorModelKmS": v18_model - nfw_model,
+                "v18MinusNfwPriorSupport": v18_support - nfw_support,
+            }
+            point_ledger.append(point_row)
+            galaxy_points.append(point_row)
+        stats = {}
+        for zone in ["inner", "mid", "outer"]:
+            stats.update(v18_nfw_gap_band_stats(galaxy_points, zone))
+        release_row = release_rows.get(name, {})
+        gap_row = {
+            "rankByNfwPriorGap": rank,
+            "galaxy": name,
+            "split": row.get("split", ""),
+            "lockedRoute": row.get("lockedRoute", ""),
+            "responseFamily": release_row.get("responseFamily", ""),
+            "diagnosticBranch": release_row.get("diagnosticBranch", ""),
+            "routeTransition": release_row.get("routeTransition", ""),
+            "canonicalRmse": parse_float(row.get("canonical_mtsRmse")),
+            "v18Rmse": parse_float(row.get("v18_10_releaseRmse")),
+            "nfwPriorRmse": parse_float(row.get("nfw_concentration_priorRmse")),
+            "nfwFreeRmse": parse_float(row.get("nfw_freeRmse")),
+            "v18GainVsCanonicalPct": parse_float(row.get("v18GainVsCanonicalPct")),
+            "v18MinusNfwPriorKmS": parse_float(row.get("v18MinusNfwPriorKmS")),
+            "v18MinusNfwFreeKmS": parse_float(row.get("v18MinusNfwFreeKmS")),
+            "nfwPriorV200KmS": v200,
+            "nfwPriorConcentration": concentration,
+            "pointCount": len(galaxy_points),
+        }
+        gap_row.update(stats)
+        gap_row["gapClass"] = v18_nfw_gap_classification(gap_row)
+        gap_row["nextLawTarget"] = v18_nfw_gap_next_target(gap_row)
+        gap_rows.append(gap_row)
+        if rank <= 24:
+            filename = f"{rank:02d}_{re.sub(r'[^A-Za-z0-9_.-]+', '_', name)}.svg"
+            gap_row["profileFigure"] = f"profiles/{filename}"
+            v18_nfw_gap_svg(
+                profile_dir / filename,
+                f"{name}: v18.10 vs NFW-prior gap ({gap_row['gapClass']})",
+                galaxy_points,
+            )
+        else:
+            gap_row["profileFigure"] = ""
+
+    class_rows: list[dict] = []
+    for gap_class in sorted({row["gapClass"] for row in gap_rows}):
+        rows = [row for row in gap_rows if row["gapClass"] == gap_class]
+        class_rows.append(
+            {
+                "gapClass": gap_class,
+                "caseCount": len(rows),
+                "meanV18Rmse": v18_competitor_mean(row["v18Rmse"] for row in rows),
+                "meanNfwPriorRmse": v18_competitor_mean(row["nfwPriorRmse"] for row in rows),
+                "meanV18MinusNfwPriorKmS": v18_competitor_mean(row["v18MinusNfwPriorKmS"] for row in rows),
+                "topGalaxies": "; ".join(row["galaxy"] for row in rows[:8]),
+            }
+        )
+    family_rows: list[dict] = []
+    for target in sorted({row["nextLawTarget"] for row in gap_rows}):
+        rows = [row for row in gap_rows if row["nextLawTarget"] == target]
+        family_rows.append(
+            {
+                "nextLawTarget": target,
+                "caseCount": len(rows),
+                "meanV18MinusNfwPriorKmS": v18_competitor_mean(row["v18MinusNfwPriorKmS"] for row in rows),
+                "topGalaxies": "; ".join(row["galaxy"] for row in rows[:8]),
+                "candidateAction": "derive state gate and test on holdout/protected set" if len(rows) >= 3 else "do not branch yet; inspect as isolated case",
+            }
+        )
+
+    target_rows = [
+        {
+            "priority": index,
+            "galaxy": row["galaxy"],
+            "lockedRoute": row["lockedRoute"],
+            "gapClass": row["gapClass"],
+            "nextLawTarget": row["nextLawTarget"],
+            "v18Rmse": row["v18Rmse"],
+            "nfwPriorRmse": row["nfwPriorRmse"],
+            "v18MinusNfwPriorKmS": row["v18MinusNfwPriorKmS"],
+            "responseFamily": row["responseFamily"],
+            "diagnosticBranch": row["diagnosticBranch"],
+            "profileFigure": row.get("profileFigure", ""),
+        }
+        for index, row in enumerate([row for row in gap_rows if row["v18MinusNfwPriorKmS"] >= 3.0], start=1)
+    ]
+
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", gap_rows)
+    write_csv(out_dir / f"{prefix}_point_ledger.csv", point_ledger)
+    write_csv(out_dir / f"{prefix}_class_summary.csv", class_rows)
+    write_csv(out_dir / f"{prefix}_law_targets.csv", family_rows)
+    write_csv(out_dir / f"{prefix}_priority_targets.csv", target_rows)
+
+    top_gap_rows = gap_rows[:14]
+    report = [
+        "# MTS v18.17 NFW-Gap Audit",
+        "",
+        "This mode attacks the remaining competitor gap: clean high-RMSE galaxies where locked v18.10 is good but the NFW concentration-prior halo fit is still better. It does not change the v18.10 law.",
+        "",
+        "## Result",
+        "",
+        f"- Source benchmark: `{benchmark_dir}`.",
+        f"- Clean high-RMSE cases audited: `{len(gap_rows)}`.",
+        f"- Priority cases with v18-NFW-prior gap >= 3 km/s: `{len(target_rows)}`.",
+        "",
+        "## Gap Classes",
+        "",
+        "| Class | Cases | Mean v18 RMSE | Mean NFW-prior RMSE | Mean gap | Top galaxies |",
+        "| --- | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for row in class_rows:
+        report.append(
+            f"| {row['gapClass']} | {row['caseCount']} | {fmt(row['meanV18Rmse'])} | {fmt(row['meanNfwPriorRmse'])} | {fmt(row['meanV18MinusNfwPriorKmS'])} | {row['topGalaxies']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Top Remaining NFW-Prior Gaps",
+            "",
+            "| Galaxy | Route | Gap class | v18 RMSE | NFW-prior RMSE | Gap | Next law target |",
+            "| --- | --- | --- | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for row in top_gap_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | {row['gapClass']} | {fmt(row['v18Rmse'])} | {fmt(row['nfwPriorRmse'])} | {fmt(row['v18MinusNfwPriorKmS'])} | {row['nextLawTarget']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## What This Means For The Next Law Pass",
+            "",
+            "- The residual gap is two-sided: some cases need more halo-like support, while others need support suppression or radial redistribution.",
+            "- A scalar boost cannot be the next serious law because it would help `missing halo-like support` cases and hurt `over-support` cases.",
+            "- The next candidate should be state-gated by gap class and route family, then judged against protected regressions and branch/null controls.",
+            "",
+            "## Profile Figures",
+            "",
+        ]
+    )
+    for row in top_gap_rows:
+        if row.get("profileFigure"):
+            report.append(f"- [{row['galaxy']}]({row['profileFigure']}): `{row['gapClass']}`")
+    report.extend(
+        [
+            "",
+            "## Guardrails",
+            "",
+            "- v18.10 law unchanged.",
+            "- NFW remains a fitted halo ceiling, not a promotable MTS formula input.",
+            "- No galaxy name, residual lookup, or raw RMSE is used in a candidate law here; this is gap anatomy for the next constrained law test.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report), encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-v18-nfw-gap-audit-v1",
+        "verdict": "v18 NFW gap anatomy ready",
+        "summary": {
+            "cleanHighCaseCount": len(gap_rows),
+            "priorityGapCaseCount": len(target_rows),
+            "gapClasses": {row["gapClass"]: row["caseCount"] for row in class_rows},
+            "lawTargets": {row["nextLawTarget"]: row["caseCount"] for row in family_rows},
+            "largestGapGalaxy": gap_rows[0]["galaxy"] if gap_rows else "",
+            "largestGapKmS": gap_rows[0]["v18MinusNfwPriorKmS"] if gap_rows else math.nan,
+        },
+        "outputFiles": [
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_point_ledger.csv",
+            f"{prefix}_class_summary.csv",
+            f"{prefix}_law_targets.csv",
+            f"{prefix}_priority_targets.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+            "profiles/*.svg",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18nfwgapaudit(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NFW_GAP_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_nfw_gap_audit_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.17 NFW-gap audit")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high_cases={summary['cleanHighCaseCount']}",
+                f"priority_gaps={summary['priorityGapCaseCount']}",
+                f"largest_gap={summary['largestGapGalaxy']}:{fmt(summary['largestGapKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 NFW-gap audit to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -75451,6 +75851,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18lawspec",
             "v18competitorfigures",
             "observedstatev18competitorfigures",
+            "v18nfwgapaudit",
+            "observedstatev18nfwgapaudit",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -75731,6 +76133,8 @@ def main() -> None:
         cmd_v18lawspec(args)
     elif args.mode in {"v18competitorfigures", "observedstatev18competitorfigures"}:
         cmd_v18competitorfigures(args)
+    elif args.mode in {"v18nfwgapaudit", "observedstatev18nfwgapaudit"}:
+        cmd_v18nfwgapaudit(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
