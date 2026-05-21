@@ -185,6 +185,7 @@ DEFAULT_OBSERVED_STATE_V18_LAW_SPEC_OUT = OUTPUT_PACK_ROOT / "mts-v18-law-spec-v
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_FIGURES_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-figures-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_GAP_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-gap-audit-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_GAP_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-gap-candidate-v1"
+DEFAULT_OBSERVED_STATE_V18_LEGACY_STRUCTURE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-structure-candidate-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -63547,6 +63548,498 @@ def cmd_v18nfwgapcandidate(args: argparse.Namespace) -> None:
     print(f"Wrote v18 NFW-gap candidate to {out_dir.resolve()}")
 
 
+def legacy_structure_log_slope(points: list[dict], value_fn: Callable[[dict], float], xmin: float, xmax: float) -> float:
+    pairs: list[tuple[float, float]] = []
+    for point in points:
+        x_val = point.get("x", point["r"] / max(points[-1]["r"], 1e-9))
+        value = value_fn(point)
+        if xmin <= x_val <= xmax and point["r"] > 0.0 and value > 0.0 and math.isfinite(value):
+            pairs.append((math.log(point["r"]), math.log(value)))
+    if len(pairs) < 3:
+        return math.nan
+    xs = [item[0] for item in pairs]
+    ys = [item[1] for item in pairs]
+    x_mean = safe_mean(xs)
+    y_mean = safe_mean(ys)
+    denom = sum((x_val - x_mean) ** 2 for x_val in xs)
+    if denom <= 0.0:
+        return math.nan
+    return sum((x_val - x_mean) * (y_val - y_mean) for x_val, y_val in pairs) / denom
+
+
+def v18_legacy_structure_features(curve: dict) -> dict:
+    points = curve["points"]
+    outer_gas: list[float] = []
+    outer_disk: list[float] = []
+    outer_bulge: list[float] = []
+    gas_disk_crossings: list[float] = []
+    for point in points:
+        gas = point["vGas"] ** 2
+        disk = curve["mlDisk"] * point["vDisk"] ** 2
+        bulge = curve["mlBulge"] * point["vBulge"] ** 2
+        total = gas + disk + bulge
+        if total > 0.0 and point["x"] >= 0.50:
+            outer_gas.append(gas / total)
+            outer_disk.append(disk / total)
+            outer_bulge.append(bulge / total)
+        if gas >= disk:
+            gas_disk_crossings.append(point["x"])
+    vbar_out = math.sqrt(max(points[-1]["bar2"], 0.0))
+    return {
+        "mBarGlobal": legacy_structure_log_slope(points, lambda point: max(point["bar2"], 0.0) * point["r"], 0.05, 1.01),
+        "mBarOuter": legacy_structure_log_slope(points, lambda point: max(point["bar2"], 0.0) * point["r"], 0.45, 1.01),
+        "mObsGlobal": legacy_structure_log_slope(points, lambda point: point["vObs"] ** 2 * point["r"], 0.05, 1.01),
+        "gasDiskCrossoverX": max(gas_disk_crossings) if gas_disk_crossings else 0.0,
+        "outerGasMean": safe_mean(outer_gas),
+        "outerDiskMean": safe_mean(outer_disk),
+        "outerBulgeMean": safe_mean(outer_bulge),
+        "logCicBarProxy": math.log10(max(vbar_out * curve["rOut"] ** 3, 1e-9)),
+        "hOverRout": curve["h"] / max(curve["rOut"], 1e-9),
+    }
+
+
+def v18_legacy_structure_completion_family(curve: dict, features: dict) -> str:
+    if curve["lockedModelRoute"] != "low-load":
+        return ""
+    gas_edge_completion = (
+        features["gasDiskCrossoverX"] > 0.95
+        and 0.43 <= features["outerGasMean"] <= 0.53
+        and 0.19 <= features["hOverRout"] <= 0.235
+        and 1.75 <= curve["memoryLoad"] <= 2.15
+        and 0.36 <= curve["lockedModelUOut"] <= 0.405
+        and 0.80 <= curve["lockedModelUMax"] <= 0.86
+        and features["mBarGlobal"] < 1.42
+    )
+    disk_edge_completion = (
+        features["gasDiskCrossoverX"] < 0.05
+        and 0.28 <= features["outerGasMean"] <= 0.43
+        and 0.20 <= features["hOverRout"] <= 0.285
+        and 2.00 <= curve["memoryLoad"] <= 3.25
+        and 0.40 <= curve["lockedModelUOut"] <= 0.445
+        and curve["lockedModelUMax"] < 0.90
+        and features["mBarGlobal"] > 1.65
+        and 1.15 <= features["mBarOuter"] <= 1.40
+    )
+    if gas_edge_completion:
+        return "gas-disk crossover outer-completion"
+    if disk_edge_completion:
+        return "disk-edge mass-slope completion"
+    return ""
+
+
+def v18_legacy_structure_activations(curve: dict) -> tuple[dict, dict, str]:
+    features = v18_legacy_structure_features(curve)
+    base = v18_nfw_gap_candidate_activations(curve)
+    family = v18_legacy_structure_completion_family(curve, features)
+    completion = 1.0 if family else 0.0
+    acts = {
+        "completion": completion,
+        "lowSuppression": base["lowSuppression"],
+        "bufferedSuppression": base["bufferedSuppression"],
+        "radialOuterTransfer": 0.0,
+        "radialInnerTransfer": 0.0,
+        "anyActivation": max(completion, base["lowSuppression"], base["bufferedSuppression"]),
+    }
+    return acts, features, family
+
+
+def v18_legacy_structure_score_rows(
+    curves: list[dict],
+    strengths: dict[str, float],
+    v18_lookup: dict[tuple[str, int], float],
+    weak_names: set[str],
+    high_names: set[str],
+    priority_names: set[str],
+    split_names: tuple[set[str], set[str]] | None = None,
+    forced_activations: dict[str, dict[str, float]] | None = None,
+    forced_families: dict[str, str] | None = None,
+) -> list[dict]:
+    train_names, holdout_names = split_names if split_names is not None else (set(), set())
+    rows: list[dict] = []
+    for curve in curves:
+        name = curve["name"]
+        v18_supports = [v18_lookup[(name, index)] for index in range(len(curve["points"]))]
+        if name in weak_names:
+            acts = {
+                "completion": 0.0,
+                "lowSuppression": 0.0,
+                "bufferedSuppression": 0.0,
+                "radialOuterTransfer": 0.0,
+                "radialInnerTransfer": 0.0,
+                "anyActivation": 0.0,
+            }
+            features = v18_legacy_structure_features(curve)
+            family = ""
+            candidate_supports = v18_supports[:]
+        else:
+            acts, features, family = v18_legacy_structure_activations(curve)
+            if forced_activations and name in forced_activations:
+                acts = forced_activations[name]
+                family = forced_families.get(name, "forced-null") if forced_families else "forced-null"
+            candidate_supports, acts = v18_nfw_gap_candidate_supports(curve, v18_supports, strengths, acts)
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        v18_score = v18_competitor_support_score(curve, v18_supports)
+        candidate = v18_competitor_support_score(curve, candidate_supports)
+        set_label = v18_nfw_gap_candidate_set_label(name, weak_names, high_names)
+        split = "weak-excluded" if name in weak_names else ("holdout" if name in holdout_names else "train" if name in train_names else "")
+        branch_hits = [key for key, value in acts.items() if key != "anyActivation" and value >= 0.20]
+        rows.append(
+            {
+                "galaxy": name,
+                "set": set_label,
+                "split": split,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "priorityNfwGapCase": name in priority_names,
+                "canonicalRmse": canonical["rmse"],
+                "v18Rmse": v18_score["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "candidateRoute": candidate.get("candidateRoute", ""),
+                "v18Route": v18_score.get("candidateRoute", ""),
+                "candidateGainVsV18KmS": v18_score["rmse"] - candidate["rmse"],
+                "candidateGainVsV18Pct": pct_improvement(v18_score["rmse"], candidate["rmse"]),
+                "candidateRegressionVsV18KmS": max(0.0, candidate["rmse"] - v18_score["rmse"]),
+                "completionActivation": acts["completion"],
+                "lowSuppressionActivation": acts["lowSuppression"],
+                "bufferedSuppressionActivation": acts["bufferedSuppression"],
+                "anyActivation": acts["anyActivation"],
+                "legacyCompletionFamily": family,
+                "branchHits": "; ".join(branch_hits),
+                "mBarGlobal": features["mBarGlobal"],
+                "mBarOuter": features["mBarOuter"],
+                "mObsGlobal": features["mObsGlobal"],
+                "gasDiskCrossoverX": features["gasDiskCrossoverX"],
+                "outerGasMean": features["outerGasMean"],
+                "outerDiskMean": features["outerDiskMean"],
+                "outerBulgeMean": features["outerBulgeMean"],
+                "logCicBarProxy": features["logCicBarProxy"],
+                "hOverRout": features["hOverRout"],
+                "memoryLoad": curve["memoryLoad"],
+                "uOut": curve["lockedModelUOut"],
+                "uMax": curve["lockedModelUMax"],
+                "above20Candidate": candidate["rmse"] >= 20.0,
+                "above20V18": v18_score["rmse"] >= 20.0,
+                "protectedRegressionKmS": max(0.0, candidate["rmse"] - v18_score["rmse"]) if set_label == "clean-protected" else "",
+            }
+        )
+    return rows
+
+
+def v18_legacy_structure_null_rows(
+    clean_curves: list[dict],
+    rows: list[dict],
+    strengths: dict[str, float],
+    v18_lookup: dict[tuple[str, int], float],
+    weak_names: set[str],
+    high_names: set[str],
+    priority_names: set[str],
+) -> list[dict]:
+    output: list[dict] = []
+    candidate_forces = {
+        row["galaxy"]: {
+            "completion": parse_float(row["completionActivation"], 0.0),
+            "lowSuppression": parse_float(row["lowSuppressionActivation"], 0.0),
+            "bufferedSuppression": parse_float(row["bufferedSuppressionActivation"], 0.0),
+            "radialOuterTransfer": 0.0,
+            "radialInnerTransfer": 0.0,
+            "anyActivation": parse_float(row["anyActivation"], 0.0),
+        }
+        for row in rows
+        if row["set"] != "weak-systematics-excluded"
+    }
+    by_route = {
+        route: [curve["name"] for curve in clean_curves if curve["lockedModelRoute"] == route]
+        for route in sorted({curve["lockedModelRoute"] for curve in clean_curves})
+    }
+    active_counts = {
+        "completion": sum(1 for row in rows if row["set"] != "weak-systematics-excluded" and parse_float(row["completionActivation"], 0.0) >= 0.20),
+        "lowSuppression": sum(1 for row in rows if row["set"] != "weak-systematics-excluded" and parse_float(row["lowSuppressionActivation"], 0.0) >= 0.20),
+        "bufferedSuppression": sum(1 for row in rows if row["set"] != "weak-systematics-excluded" and parse_float(row["bufferedSuppressionActivation"], 0.0) >= 0.20),
+    }
+    for seed in V18_NFW_GAP_SEEDS:
+        rng = random.Random(seed)
+        shuffled_names = sorted(candidate_forces)
+        shuffled_values = list(candidate_forces.values())
+        rng.shuffle(shuffled_values)
+        shuffled = dict(zip(shuffled_names, shuffled_values))
+        shuffled_rows = v18_legacy_structure_score_rows(
+            clean_curves,
+            strengths,
+            v18_lookup,
+            weak_names,
+            high_names,
+            priority_names,
+            forced_activations=shuffled,
+        )
+        metric = v18_nfw_gap_candidate_metric(shuffled_rows)
+        output.append(
+            {
+                "nullType": "branch-label-shuffle",
+                "seed": seed,
+                "highGainVsV18Pct": metric["highGainVsV18Pct"],
+                "priorityGainVsV18Pct": metric["priorityGainVsV18Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "activeForcedCount": len(shuffled),
+            }
+        )
+
+        forced: dict[str, dict[str, float]] = {}
+        for branch, count in active_counts.items():
+            route = "buffered single-crossing" if branch == "bufferedSuppression" else "low-load"
+            pool = by_route.get(route, [])[:]
+            rng.shuffle(pool)
+            for name in pool[:count]:
+                forced.setdefault(
+                    name,
+                    {
+                        "completion": 0.0,
+                        "lowSuppression": 0.0,
+                        "bufferedSuppression": 0.0,
+                        "radialOuterTransfer": 0.0,
+                        "radialInnerTransfer": 0.0,
+                        "anyActivation": 0.0,
+                    },
+                )
+                forced[name][branch] = 1.0
+                forced[name]["anyActivation"] = max(forced[name]["anyActivation"], 1.0)
+        random_rows = v18_legacy_structure_score_rows(
+            clean_curves,
+            strengths,
+            v18_lookup,
+            weak_names,
+            high_names,
+            priority_names,
+            forced_activations=forced,
+        )
+        metric = v18_nfw_gap_candidate_metric(random_rows)
+        output.append(
+            {
+                "nullType": "same-route-active-count-random",
+                "seed": seed,
+                "highGainVsV18Pct": metric["highGainVsV18Pct"],
+                "priorityGainVsV18Pct": metric["priorityGainVsV18Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "activeForcedCount": sum(len(item) for item in forced.values()),
+            }
+        )
+
+        protected_pool = [
+            row["galaxy"]
+            for row in rows
+            if row["set"] == "clean-protected" and row["lockedRoute"] == "low-load"
+        ]
+        rng.shuffle(protected_pool)
+        protected_forced = {
+            name: {
+                "completion": 1.0,
+                "lowSuppression": 0.0,
+                "bufferedSuppression": 0.0,
+                "radialOuterTransfer": 0.0,
+                "radialInnerTransfer": 0.0,
+                "anyActivation": 1.0,
+            }
+            for name in protected_pool[: active_counts["completion"]]
+        }
+        protected_rows = v18_legacy_structure_score_rows(
+            clean_curves,
+            strengths,
+            v18_lookup,
+            weak_names,
+            high_names,
+            priority_names,
+            forced_activations=protected_forced,
+        )
+        metric = v18_nfw_gap_candidate_metric(protected_rows)
+        output.append(
+            {
+                "nullType": "protected-lookalike-completion-stress",
+                "seed": seed,
+                "highGainVsV18Pct": metric["highGainVsV18Pct"],
+                "priorityGainVsV18Pct": metric["priorityGainVsV18Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "activeForcedCount": len(protected_forced),
+            }
+        )
+    return output
+
+
+def write_v18_legacy_structure_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_legacy_structure_candidate"
+    lock_capsule = write_observed_state_v18_release_lock_final_artifacts(DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_FINAL_OUT)
+    context = observed_state_candidate_context()
+    curves = context["curves"]
+    clean_curves = context["cleanCurves"]
+    weak_names = context["weakNames"]
+    high_names = context["highNames"]
+    train_names, holdout_names = observed_state_split(clean_curves, SPLIT_SEED, HOLDOUT_FRACTION)
+    expression = observed_state_app_expression(context["fit"], context["ampCap"])
+    v18_lookup = observed_state_browser_formula_supports(curves, expression)
+    priority_names, _ = v18_nfw_gap_candidate_priority_names()
+    strengths = {"completion": 0.50, "lowSuppression": 0.30, "bufferedSuppression": 0.10, "transfer": 0.0}
+    rows = v18_legacy_structure_score_rows(
+        curves,
+        strengths,
+        v18_lookup,
+        weak_names,
+        high_names,
+        priority_names,
+        (train_names, holdout_names),
+    )
+    all_metric = v18_nfw_gap_candidate_metric(rows)
+    holdout_metric = v18_nfw_gap_candidate_metric(rows, "holdout")
+    null_rows = v18_legacy_structure_null_rows(clean_curves, rows, strengths, v18_lookup, weak_names, high_names, priority_names)
+    best_null = max([parse_float(row["priorityGainVsV18Pct"]) for row in null_rows] or [math.nan])
+    null_margin = all_metric["priorityGainVsV18Pct"] - best_null if math.isfinite(best_null) else math.nan
+    feature_rows = [
+        {
+            "galaxy": row["galaxy"],
+            "set": row["set"],
+            "lockedRoute": row["lockedRoute"],
+            "mBarGlobal": row["mBarGlobal"],
+            "mBarOuter": row["mBarOuter"],
+            "mObsGlobal": row["mObsGlobal"],
+            "gasDiskCrossoverX": row["gasDiskCrossoverX"],
+            "outerGasMean": row["outerGasMean"],
+            "outerDiskMean": row["outerDiskMean"],
+            "outerBulgeMean": row["outerBulgeMean"],
+            "logCicBarProxy": row["logCicBarProxy"],
+            "hOverRout": row["hOverRout"],
+            "memoryLoad": row["memoryLoad"],
+            "uOut": row["uOut"],
+            "uMax": row["uMax"],
+            "legacyCompletionFamily": row["legacyCompletionFamily"],
+        }
+        for row in rows
+    ]
+    score_summary = {
+        "candidateId": "observed-state-response-v18.19-legacy-structure-candidate",
+        "baseCandidate": "MTS v18.10 observed-state response release candidate",
+        "v18ReferenceHighGainPct": lock_capsule["summary"]["cleanHighGainPct"],
+        "v18ReferenceCleanGainPct": lock_capsule["summary"]["cleanGainPct"],
+        "candidateHighGainVsV18Pct": all_metric["highGainVsV18Pct"],
+        "candidatePriorityGainVsV18Pct": all_metric["priorityGainVsV18Pct"],
+        "holdoutHighGainVsV18Pct": holdout_metric["highGainVsV18Pct"],
+        "holdoutPriorityGainVsV18Pct": holdout_metric["priorityGainVsV18Pct"],
+        "candidateHighAbove20": all_metric["highAbove20Candidate"],
+        "candidateProtectedMaxRegressionKmS": all_metric["protectedMaxRegressionKmS"],
+        "weakSystematicsLeakage": all_metric["weakSystematicsLeakage"],
+        "bestNullPriorityGainPct": best_null,
+        "nullMarginPriorityPct": null_margin,
+        "legacyCompletionHighHits": sum(1 for row in rows if row["set"] == "clean-high-rmse" and row["legacyCompletionFamily"]),
+        "legacyCompletionProtectedHits": sum(1 for row in rows if row["set"] == "clean-protected" and row["legacyCompletionFamily"]),
+    }
+    passes = {
+        "highGainOverV18AtLeast5Pct": score_summary["candidateHighGainVsV18Pct"] >= 5.0,
+        "priorityGainAtLeast15Pct": score_summary["candidatePriorityGainVsV18Pct"] >= 15.0,
+        "highAbove20Zero": score_summary["candidateHighAbove20"] == 0,
+        "protectedRegressionBelow3": score_summary["candidateProtectedMaxRegressionKmS"] < 3.0,
+        "weakLeakageZero": score_summary["weakSystematicsLeakage"] == 0,
+        "nullMarginAtLeast10Pct": math.isfinite(null_margin) and null_margin >= 10.0,
+    }
+    verdict = "v18.19 candidate promoted for review" if all(passes.values()) else "v18.19 candidate not promoted"
+    score_summary["verdict"] = verdict
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_summary])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", rows)
+    write_csv(out_dir / f"{prefix}_legacy_features.csv", feature_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    formula = {
+        "candidateId": score_summary["candidateId"],
+        "baseCandidate": score_summary["baseCandidate"],
+        "lawChange": "v18.10 plus legacy-mined baryonic structure discriminator for NFW-gap completion cases",
+        "strengths": strengths,
+        "legacyVariables": [
+            "mBarGlobal = slope log(Vbar^2 r) / log(r)",
+            "mBarOuter = outer slope log(Vbar^2 r) / log(r)",
+            "gasDiskCrossoverX = max r/rOut where Vgas^2 >= MLdisk Vdisk^2",
+            "outerGasMean",
+            "outerDiskMean",
+            "logCicBarProxy = log10(Vbar_out rOut^3)",
+        ],
+        "completionFamilies": {
+            "gas-disk crossover outer-completion": "low-load, gas support remains comparable to disk at the edge, shallow baryonic mass slope, moderate memory load",
+            "disk-edge mass-slope completion": "low-load, disk-dominated outer baryons with declining outer baryonic slope and moderate memory load",
+        },
+        "canonicalMtsChanged": False,
+        "forbiddenInputsUsed": False,
+        "forbiddenInputs": ["galaxy name", "NFW parameters", "raw residual lookup", "raw RMSE as formula input", "weak/systematics fitting"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-legacy-structure-candidate-v1",
+        "verdict": verdict,
+        "summary": score_summary,
+        "passes": passes,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_legacy_features.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    changed = sorted(
+        [row for row in rows if row["set"] == "clean-high-rmse" and abs(parse_float(row["candidateGainVsV18KmS"], 0.0)) > 0.05],
+        key=lambda row: -parse_float(row["candidateGainVsV18KmS"], 0.0),
+    )[:18]
+    report = [
+        "# MTS v18.19 Legacy-Structure Candidate",
+        "",
+        "This mode tests legacy-mined baryonic structure variables against the v18.10 NFW-gap leftovers. It is a framework test, not a summary pack.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- High-RMSE gain over v18.10: `{fmt(score_summary['candidateHighGainVsV18Pct'])}%`.",
+        f"- Priority NFW-gap gain over v18.10: `{fmt(score_summary['candidatePriorityGainVsV18Pct'])}%`.",
+        f"- Holdout high-RMSE gain over v18.10: `{fmt(score_summary['holdoutHighGainVsV18Pct'])}%`.",
+        f"- Protected max regression: `{fmt(score_summary['candidateProtectedMaxRegressionKmS'])}` km/s.",
+        f"- High above 20 km/s: `{score_summary['candidateHighAbove20']}`.",
+        f"- Weak/systematics leakage: `{score_summary['weakSystematicsLeakage']}`.",
+        f"- Null margin on priority gap: `{fmt(score_summary['nullMarginPriorityPct'])}` points.",
+        "",
+        "## Changed High-RMSE Cases",
+        "",
+        "| Galaxy | v18 RMSE | candidate RMSE | gain | legacy family |",
+        "| --- | ---: | ---: | ---: | --- |",
+        *[
+            f"| {row['galaxy']} | {fmt(row['v18Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['candidateGainVsV18KmS'])} | {row['legacyCompletionFamily'] or row['branchHits']} |"
+            for row in changed
+        ],
+        "",
+        "## Acceptance Gates",
+        "",
+        "| Gate | Pass |",
+        "| --- | ---: |",
+        *[f"| {key} | `{value}` |" for key, value in passes.items()],
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    return capsule
+
+
+def cmd_v18legacystructurecandidate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_LEGACY_STRUCTURE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_legacy_structure_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.19 legacy-structure candidate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high_gain_vs_v18={fmt(summary['candidateHighGainVsV18Pct'])}%",
+                f"priority_gain_vs_v18={fmt(summary['candidatePriorityGainVsV18Pct'])}%",
+                f"protected={fmt(summary['candidateProtectedMaxRegressionKmS'])}",
+                f"above20={summary['candidateHighAbove20']}",
+                f"null_margin={fmt(summary['nullMarginPriorityPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 legacy-structure candidate to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -76569,6 +77062,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwgapaudit",
             "v18nfwgapcandidate",
             "observedstatev18nfwgapcandidate",
+            "v18legacystructurecandidate",
+            "observedstatev18legacystructurecandidate",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -76853,6 +77348,8 @@ def main() -> None:
         cmd_v18nfwgapaudit(args)
     elif args.mode in {"v18nfwgapcandidate", "observedstatev18nfwgapcandidate"}:
         cmd_v18nfwgapcandidate(args)
+    elif args.mode in {"v18legacystructurecandidate", "observedstatev18legacystructurecandidate"}:
+        cmd_v18legacystructurecandidate(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
