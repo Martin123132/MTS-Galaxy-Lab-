@@ -194,6 +194,7 @@ DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BROWSER_OUT = OUTPUT_PACK_ROOT / "mts-v1
 DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial-phase-benchmark-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_TAIL_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-tail-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_PHASE_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-phase-candidate-v1"
+DEFAULT_OBSERVED_STATE_V18_NFW_ATTACK_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-gap-attack-ledger-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -67515,6 +67516,321 @@ def cmd_v18nfwphasecandidate(args: argparse.Namespace) -> None:
     print(f"Wrote v18 NFW-phase candidate to {out_dir.resolve()}")
 
 
+def v18_nfw_attack_read_or_build() -> tuple[dict, list[dict], list[dict], dict[str, dict], dict[str, dict], dict[str, dict], dict[str, dict]]:
+    benchmark_dir = DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BENCHMARK_OUT
+    tail_dir = DEFAULT_OBSERVED_STATE_V18_NFW_TAIL_OUT
+    phase_dir = DEFAULT_OBSERVED_STATE_V18_NFW_PHASE_OUT
+    if not (benchmark_dir / "mts_v18_radial_phase_benchmark_capsule.json").exists():
+        write_v18_radial_phase_benchmark_artifacts(benchmark_dir)
+    if not (tail_dir / "mts_v18_nfw_tail_candidate_capsule.json").exists():
+        write_v18_nfw_tail_candidate_artifacts(tail_dir)
+    if not (phase_dir / "mts_v18_nfw_phase_candidate_capsule.json").exists():
+        write_v18_nfw_phase_candidate_artifacts(phase_dir)
+    benchmark_capsule = json.loads((benchmark_dir / "mts_v18_radial_phase_benchmark_capsule.json").read_text(encoding="utf-8"))
+    benchmark_rows = read_csv_rows(benchmark_dir / "mts_v18_radial_phase_benchmark_high_rmse_wins.csv")
+    benchmark_case_rows = read_csv_rows(benchmark_dir / "mts_v18_radial_phase_benchmark_case_ledger.csv")
+    tail_rows = {
+        row["galaxy"]: row
+        for row in read_csv_rows(tail_dir / "mts_v18_nfw_tail_candidate_competitor_gap.csv")
+    }
+    phase_rows = {
+        row["galaxy"]: row
+        for row in read_csv_rows(phase_dir / "mts_v18_nfw_phase_candidate_competitor_gap.csv")
+    }
+    shape_rows = {
+        row["galaxy"]: row
+        for row in read_csv_rows(phase_dir / "mts_v18_nfw_phase_candidate_shape_audit.csv")
+    }
+    phase_case_rows = {
+        row["galaxy"]: row
+        for row in read_csv_rows(phase_dir / "mts_v18_nfw_phase_candidate_case_ledger.csv")
+    }
+    return benchmark_capsule, benchmark_rows, benchmark_case_rows, tail_rows, phase_rows, shape_rows, phase_case_rows
+
+
+def v18_nfw_attack_classify(row: dict) -> tuple[str, str, bool]:
+    gap = parse_float(row.get("v1821MinusNfwPriorKmS"), 0.0)
+    v1821_rmse = parse_float(row.get("v18_21Rmse"), math.nan)
+    quality = parse_float(row.get("qualityCode"), math.nan)
+    shape = row.get("shapeClass", "")
+    tail_gain = parse_float(row.get("tailGainVsV1821KmS"), 0.0)
+    phase_gain = parse_float(row.get("phaseGainVsV1821KmS"), 0.0)
+    route = row.get("lockedRoute", "")
+    if math.isfinite(quality) and quality >= 2 and gap >= 2.0:
+        return "quality/provenance first", "Inspect SPARC source/provenance before adding a transport branch.", False
+    if tail_gain >= 2.0:
+        return "tail anatomy, not law", "Tail trimming helps this case but failed null/holdout gates; keep as anatomy only.", False
+    if phase_gain >= 1.0:
+        return "phase anatomy, not law", "Inward phase transfer helps this case but failed null/holdout gates; keep as anatomy only.", False
+    if v1821_rmse <= 8.0 and gap <= 3.0:
+        return "already competitive small-gap", "Do not tune; v18.21 is already close and NFW is a fitted per-galaxy ceiling.", False
+    if shape in {"mixed phase", "mostly amplitude tie"}:
+        return "fitted-halo flexibility / heterogeneous", "Do not add a scalar law; the shape is not coherent across zones.", False
+    if shape == "mid+outer oversupport" and v1821_rmse > 10.0 and route in {"low-load", "buffered single-crossing"}:
+        return "law-facing support-safety gap", "Only a future support-safety branch is worth testing, and it must beat lookalike nulls.", True
+    if shape == "inner deficit outer excess" and gap >= 3.0:
+        return "law-facing radial-transfer gap", "Only a future radial-transfer branch is worth testing, and it must beat same-shape nulls.", True
+    if shape in {"outer oversupport/tail", "mid oversupport/shelf"} and v1821_rmse > 10.0:
+        return "law-facing shelf/tail gap", "Only a narrow shelf/tail branch is worth testing, not global support scaling.", True
+    return "watchlist, no branch yet", "Keep in the case ledger but do not build a law from this isolated pattern.", False
+
+
+def write_v18_nfw_gap_attack_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_nfw_gap_attack"
+    benchmark_capsule, benchmark_rows, benchmark_case_rows, tail_rows, phase_rows, shape_rows, phase_case_rows = v18_nfw_attack_read_or_build()
+    base = v18_radial_phase_base_context()
+    table1_by_name = base["table1ByName"]
+    benchmark_case_by_name = {row["galaxy"]: row for row in benchmark_case_rows}
+    case_rows: list[dict] = []
+    for bench in benchmark_rows:
+        gap = parse_float(bench.get("v1821MinusNfwPriorKmS"), 0.0)
+        if gap <= 0.5:
+            continue
+        name = bench["galaxy"]
+        table = table1_by_name.get(name, {})
+        phase_case = phase_case_rows.get(name, {})
+        shape = shape_rows.get(name, {})
+        tail = tail_rows.get(name, {})
+        phase = phase_rows.get(name, {})
+        bench_case = benchmark_case_by_name.get(name, {})
+        tail_gain = parse_float(tail.get("gapClosedVsV1821KmS"), 0.0)
+        phase_gain = parse_float(phase.get("gapClosedVsV1821KmS"), 0.0)
+        row = {
+            "galaxy": name,
+            "lockedRoute": bench.get("lockedRoute", ""),
+            "v18_21Rmse": parse_float(bench.get("v18_21Rmse")),
+            "nfwPriorRmse": parse_float(bench.get("nfwPriorRmse")),
+            "nfwFreeRmse": parse_float(bench.get("nfwFreeRmse")),
+            "v1821MinusNfwPriorKmS": gap,
+            "shapeClass": shape.get("shapeClass", ""),
+            "innerMeanV1821MinusNfwKmS": shape.get("innerMeanV1821MinusNfwKmS", ""),
+            "midMeanV1821MinusNfwKmS": shape.get("midMeanV1821MinusNfwKmS", ""),
+            "outerMeanV1821MinusNfwKmS": shape.get("outerMeanV1821MinusNfwKmS", ""),
+            "innerMeanV1821ResidualKmS": shape.get("innerMeanV1821ResidualKmS", ""),
+            "midMeanV1821ResidualKmS": shape.get("midMeanV1821ResidualKmS", ""),
+            "outerMeanV1821ResidualKmS": shape.get("outerMeanV1821ResidualKmS", ""),
+            "v1821BranchHits": bench.get("branchHitsV1821", ""),
+            "tailGainVsV1821KmS": tail_gain,
+            "tailBranchHits": tail.get("branchHits", ""),
+            "phaseGainVsV1821KmS": phase_gain,
+            "phaseBranchHits": phase.get("branchHits", ""),
+            "qualityCode": table.get("qualityCode", ""),
+            "qualityLabel": table.get("qualityLabel", ""),
+            "inclinationDeg": table.get("inclinationDeg", ""),
+            "inclinationUncertaintyDeg": table.get("inclinationUncertaintyDeg", ""),
+            "distanceMethod": table.get("distanceMethod", ""),
+            "rotationCurveRefCodes": table.get("rotationCurveRefCodes", ""),
+            "memoryLoad": phase_case.get("memoryLoad", bench_case.get("memoryLoad", "")),
+            "uOut": phase_case.get("uOut", bench_case.get("uOut", "")),
+            "uMax": phase_case.get("uMax", bench_case.get("uMax", "")),
+            "hOverRout": phase_case.get("hOverRout", bench_case.get("hOverRout", "")),
+            "outerGasShare": phase_case.get("outerGasShare", bench_case.get("outerGasShare", "")),
+            "outerDiskShare": phase_case.get("outerDiskShare", bench_case.get("outerDiskShare", "")),
+            "barCurv": phase_case.get("barCurv", bench_case.get("barCurv", "")),
+            "pointDensity": phase_case.get("pointDensity", bench_case.get("pointDensity", "")),
+            "mBar_1e9Msun": phase_case.get("mBar_1e9Msun", bench_case.get("mBar_1e9Msun", "")),
+            "tableGasFraction": phase_case.get("tableGasFraction", bench_case.get("tableGasFraction", "")),
+        }
+        classification, next_action, law_facing = v18_nfw_attack_classify(row)
+        row["attackClass"] = classification
+        row["nextAction"] = next_action
+        row["lawFacing"] = law_facing
+        case_rows.append(row)
+    case_rows.sort(key=lambda row: (-parse_float(row["v1821MinusNfwPriorKmS"], 0.0), row["galaxy"]))
+
+    class_rows: list[dict] = []
+    for attack_class in sorted({row["attackClass"] for row in case_rows}):
+        rows = [row for row in case_rows if row["attackClass"] == attack_class]
+        class_rows.append(
+            {
+                "attackClass": attack_class,
+                "caseCount": len(rows),
+                "meanV1821Rmse": safe_mean(parse_float(row["v18_21Rmse"]) for row in rows),
+                "meanNfwPriorRmse": safe_mean(parse_float(row["nfwPriorRmse"]) for row in rows),
+                "meanGapKmS": safe_mean(parse_float(row["v1821MinusNfwPriorKmS"]) for row in rows),
+                "maxGapKmS": max([parse_float(row["v1821MinusNfwPriorKmS"]) for row in rows] or [math.nan]),
+                "topGalaxies": "; ".join(row["galaxy"] for row in rows[:8]),
+                "lawFacingCount": sum(1 for row in rows if parse_bool(row.get("lawFacing"))),
+            }
+        )
+    shape_rows_summary: list[dict] = []
+    for shape_class in sorted({row["shapeClass"] for row in case_rows}):
+        rows = [row for row in case_rows if row["shapeClass"] == shape_class]
+        shape_rows_summary.append(
+            {
+                "shapeClass": shape_class,
+                "caseCount": len(rows),
+                "meanGapKmS": safe_mean(parse_float(row["v1821MinusNfwPriorKmS"]) for row in rows),
+                "meanV1821Rmse": safe_mean(parse_float(row["v18_21Rmse"]) for row in rows),
+                "topGalaxies": "; ".join(row["galaxy"] for row in rows[:8]),
+            }
+        )
+    quality_rows: list[dict] = []
+    for quality_code in sorted({str(row["qualityCode"]) for row in case_rows}):
+        rows = [row for row in case_rows if str(row["qualityCode"]) == quality_code]
+        quality_rows.append(
+            {
+                "qualityCode": quality_code,
+                "qualityLabel": rows[0].get("qualityLabel", "") if rows else "",
+                "caseCount": len(rows),
+                "meanGapKmS": safe_mean(parse_float(row["v1821MinusNfwPriorKmS"]) for row in rows),
+                "lawFacingCount": sum(1 for row in rows if parse_bool(row.get("lawFacing"))),
+                "topGalaxies": "; ".join(row["galaxy"] for row in rows[:8]),
+            }
+        )
+    next_target_rows = [
+        {
+            "priority": index,
+            "target": row["attackClass"],
+            "galaxy": row["galaxy"],
+            "lockedRoute": row["lockedRoute"],
+            "shapeClass": row["shapeClass"],
+            "v18_21Rmse": row["v18_21Rmse"],
+            "nfwPriorRmse": row["nfwPriorRmse"],
+            "gapKmS": row["v1821MinusNfwPriorKmS"],
+            "qualityCode": row["qualityCode"],
+            "nextAction": row["nextAction"],
+        }
+        for index, row in enumerate([row for row in case_rows if parse_bool(row["lawFacing"])], start=1)
+    ]
+    rejected_branch_rows = [
+        {
+            "candidate": "v18.22 NFW-tail trim",
+            "status": "rejected",
+            "reason": "Same-route/random and protected-lookalike nulls matched the priority gain; holdout priority gain was zero.",
+            "bestChangedCases": "F579-V1; F563-V1; F574-2",
+        },
+        {
+            "candidate": "v18.23 inward phase transfer",
+            "status": "rejected",
+            "reason": "Only NGC1705 moved materially; null margin was zero and holdout priority gain was zero.",
+            "bestChangedCases": "NGC1705",
+        },
+    ]
+    score_rows = [
+        {"metric": "remainingNfwGapCasesOver0p5KmS", "value": len(case_rows)},
+        {"metric": "lawFacingCases", "value": sum(1 for row in case_rows if parse_bool(row["lawFacing"]))},
+        {"metric": "qualityProvenanceFirstCases", "value": sum(1 for row in case_rows if row["attackClass"] == "quality/provenance first")},
+        {"metric": "alreadyCompetitiveOrFlexibilityCases", "value": sum(1 for row in case_rows if row["attackClass"] in {"already competitive small-gap", "fitted-halo flexibility / heterogeneous"})},
+        {"metric": "largestRemainingGapKmS", "value": max([parse_float(row["v1821MinusNfwPriorKmS"]) for row in case_rows] or [math.nan])},
+        {"metric": "v1821AllMeanRmse", "value": benchmark_capsule["summary"]["v1821AllMeanRmse"]},
+        {"metric": "v1821HighMeanRmse", "value": benchmark_capsule["summary"]["v1821HighMeanRmse"]},
+        {"metric": "v1821HighGainPct", "value": benchmark_capsule["summary"]["v1821CleanHighGainPct"]},
+    ]
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_class_summary.csv", class_rows)
+    write_csv(out_dir / f"{prefix}_shape_summary.csv", shape_rows_summary)
+    write_csv(out_dir / f"{prefix}_quality_ledger.csv", quality_rows)
+    write_csv(out_dir / f"{prefix}_next_law_targets.csv", next_target_rows)
+    write_csv(out_dir / f"{prefix}_rejected_branches.csv", rejected_branch_rows)
+
+    verdict = "remaining NFW gap is heterogeneous; keep v18.21 locked"
+    report = [
+        "# MTS v18.24 NFW Gap Attack Ledger",
+        "",
+        "This is not a new law and not a summary pack. It classifies the remaining cases where NFW-prior still beats locked v18.21, after the v18.22 tail-trim and v18.23 phase-transfer candidates failed null/holdout gates.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Remaining v18.21/NFW-prior gaps over 0.5 km/s: `{len(case_rows)}`.",
+        f"- Law-facing cases worth future branch work: `{sum(1 for row in case_rows if parse_bool(row['lawFacing']))}`.",
+        f"- Quality/provenance-first cases: `{sum(1 for row in case_rows if row['attackClass'] == 'quality/provenance first')}`.",
+        f"- Already-competitive or fitted-flexibility cases: `{sum(1 for row in case_rows if row['attackClass'] in {'already competitive small-gap', 'fitted-halo flexibility / heterogeneous'})}`.",
+        "",
+        "## Attack Classes",
+        "",
+        "| Class | Cases | Mean v18.21 RMSE | Mean NFW-prior RMSE | Mean gap | Law-facing | Top galaxies |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for row in class_rows:
+        report.append(
+            f"| {row['attackClass']} | {row['caseCount']} | {fmt(row['meanV1821Rmse'])} | {fmt(row['meanNfwPriorRmse'])} | {fmt(row['meanGapKmS'])} | {row['lawFacingCount']} | {row['topGalaxies']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Law-Facing Targets",
+            "",
+            "| Galaxy | Route | Shape | v18.21 RMSE | NFW-prior RMSE | Gap | Quality | Next action |",
+            "| --- | --- | --- | ---: | ---: | ---: | --- | --- |",
+        ]
+    )
+    for row in next_target_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | {row['shapeClass']} | {fmt(row['v18_21Rmse'])} | {fmt(row['nfwPriorRmse'])} | {fmt(row['gapKmS'])} | Q={row['qualityCode']} | {row['nextAction']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Rejected Follow-Up Branches",
+            "",
+            "| Candidate | Status | Reason |",
+            "| --- | --- | --- |",
+        ]
+    )
+    for row in rejected_branch_rows:
+        report.append(f"| {row['candidate']} | {row['status']} | {row['reason']} |")
+    report.extend(
+        [
+            "",
+            "## Practical Next Move",
+            "",
+            "Do not add another scalar support, tail trim, or inward phase patch. The remaining NFW-prior gap is heterogeneous. The only framework-facing route left is a deliberately small support-safety branch for high-quality mid/outer oversupport cases, with source-quality checks before any law claim.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-nfw-gap-attack-ledger-v1",
+        "verdict": verdict,
+        "summary": {
+            "remainingNfwGapCasesOver0p5KmS": len(case_rows),
+            "lawFacingCases": sum(1 for row in case_rows if parse_bool(row["lawFacing"])),
+            "qualityProvenanceFirstCases": sum(1 for row in case_rows if row["attackClass"] == "quality/provenance first"),
+            "attackClasses": {row["attackClass"]: row["caseCount"] for row in class_rows},
+            "shapeClasses": {row["shapeClass"]: row["caseCount"] for row in shape_rows_summary},
+            "v1821AllMeanRmse": benchmark_capsule["summary"]["v1821AllMeanRmse"],
+            "v1821HighMeanRmse": benchmark_capsule["summary"]["v1821HighMeanRmse"],
+            "v1821HighGainPct": benchmark_capsule["summary"]["v1821CleanHighGainPct"],
+        },
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_class_summary.csv",
+            f"{prefix}_shape_summary.csv",
+            f"{prefix}_quality_ledger.csv",
+            f"{prefix}_next_law_targets.csv",
+            f"{prefix}_rejected_branches.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18nfwgapattack(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NFW_ATTACK_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_nfw_gap_attack_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.24 NFW-gap attack ledger")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"remaining={summary['remainingNfwGapCasesOver0p5KmS']}",
+                f"law_facing={summary['lawFacingCases']}",
+                f"quality_first={summary['qualityProvenanceFirstCases']}",
+                f"v18_21_high_rmse={fmt(summary['v1821HighMeanRmse'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 NFW-gap attack ledger to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -80553,6 +80869,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwtailcandidate",
             "v18nfwphasecandidate",
             "observedstatev18nfwphasecandidate",
+            "v18nfwgapattack",
+            "observedstatev18nfwgapattack",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -80853,6 +81171,8 @@ def main() -> None:
         cmd_v18nfwtailcandidate(args)
     elif args.mode in {"v18nfwphasecandidate", "observedstatev18nfwphasecandidate"}:
         cmd_v18nfwphasecandidate(args)
+    elif args.mode in {"v18nfwgapattack", "observedstatev18nfwgapattack"}:
+        cmd_v18nfwgapattack(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
