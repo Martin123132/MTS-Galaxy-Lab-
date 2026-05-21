@@ -188,6 +188,7 @@ DEFAULT_OBSERVED_STATE_V18_NFW_GAP_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v18-n
 DEFAULT_OBSERVED_STATE_V18_LEGACY_STRUCTURE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-structure-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_MASS_SCALE_OUT = OUTPUT_PACK_ROOT / "mts-v18-official-mass-scale-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial-phase-candidate-v1"
+DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-v18-radial-phase-redteam-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -65112,6 +65113,389 @@ def cmd_v18radialphasecandidate(args: argparse.Namespace) -> None:
     print(f"Wrote v18 radial-phase candidate to {out_dir.resolve()}")
 
 
+def v18_radial_phase_actual_forced_map(
+    curves: list[dict],
+    table1_by_name: dict[str, dict],
+    weak_names: set[str],
+    drop_family: str | None = None,
+) -> dict[str, dict[str, float]]:
+    forced: dict[str, dict[str, float]] = {}
+    for curve in curves:
+        name = curve["name"]
+        if name in weak_names:
+            continue
+        acts, _profile_values, _mass_values, _legacy_values = v18_radial_phase_activations(curve, table1_by_name)
+        if drop_family:
+            acts[drop_family] = 0.0
+        forced[name] = {family: parse_float(acts.get(family), 0.0) for family in V18_RADIAL_PHASE_STRENGTHS}
+    return forced
+
+
+def v18_radial_phase_base_context() -> dict:
+    context = observed_state_candidate_context()
+    expression = observed_state_app_expression(context["fit"], context["ampCap"])
+    v18_lookup = observed_state_browser_formula_supports(context["curves"], expression)
+    priority_names, _priority_rows = v18_nfw_gap_candidate_priority_names()
+    table1_by_name, _table1_header, table1_path = v18_mass_scale_table1()
+    return {
+        "context": context,
+        "curves": context["curves"],
+        "cleanCurves": context["cleanCurves"],
+        "weakNames": context["weakNames"],
+        "highNames": context["highNames"],
+        "v18Lookup": v18_lookup,
+        "priorityNames": priority_names,
+        "table1ByName": table1_by_name,
+        "table1Path": table1_path,
+        "baseStrengths": {"legacyCompletion": 0.50, "officialCompletion": 0.35, "lowSuppression": 0.30, "bufferedSuppression": 0.10},
+    }
+
+
+def v18_radial_phase_nominal_rows(base: dict, split_names: tuple[set[str], set[str]] | None = None) -> list[dict]:
+    return v18_radial_phase_score_rows(
+        base["curves"],
+        base["baseStrengths"],
+        base["table1ByName"],
+        base["v18Lookup"],
+        base["weakNames"],
+        base["highNames"],
+        base["priorityNames"],
+        split_names,
+    )
+
+
+def v18_radial_phase_rows_with_forced(
+    base: dict,
+    forced: dict[str, dict[str, float]],
+    split_names: tuple[set[str], set[str]] | None = None,
+) -> list[dict]:
+    return v18_radial_phase_score_rows(
+        base["curves"],
+        base["baseStrengths"],
+        base["table1ByName"],
+        base["v18Lookup"],
+        base["weakNames"],
+        base["highNames"],
+        base["priorityNames"],
+        split_names,
+        forced_radial_by_name=forced,
+    )
+
+
+def v18_radial_phase_redteam_seed_rows(base: dict) -> list[dict]:
+    output: list[dict] = []
+    for seed in V18_NFW_GAP_SEEDS:
+        train_names, holdout_names = observed_state_split(base["cleanCurves"], seed, HOLDOUT_FRACTION)
+        rows = v18_radial_phase_nominal_rows(base, (train_names, holdout_names))
+        all_metric = v18_nfw_gap_candidate_metric(rows)
+        holdout_metric = v18_nfw_gap_candidate_metric(rows, "holdout")
+        output.append(
+            {
+                "seed": seed,
+                "trainCount": len(train_names),
+                "holdoutCount": len(holdout_names),
+                "allHighGainVsV18Pct": all_metric["highGainVsV18Pct"],
+                "allPriorityGainVsV18Pct": all_metric["priorityGainVsV18Pct"],
+                "holdoutHighGainVsV18Pct": holdout_metric["highGainVsV18Pct"],
+                "holdoutPriorityGainVsV18Pct": holdout_metric["priorityGainVsV18Pct"],
+                "holdoutProtectedMaxRegressionKmS": holdout_metric["protectedMaxRegressionKmS"],
+                "holdoutHighAbove20": holdout_metric["highAbove20Candidate"],
+                "weakSystematicsLeakage": all_metric["weakSystematicsLeakage"],
+            }
+        )
+    return output
+
+
+def v18_radial_phase_redteam_ablation_rows(base: dict, nominal_rows: list[dict], nominal_metric: dict) -> list[dict]:
+    output: list[dict] = []
+    for family in V18_RADIAL_PHASE_STRENGTHS:
+        forced = v18_radial_phase_actual_forced_map(base["curves"], base["table1ByName"], base["weakNames"], drop_family=family)
+        rows = v18_radial_phase_rows_with_forced(base, forced)
+        metric = v18_nfw_gap_candidate_metric(rows)
+        active_high = [
+            row for row in nominal_rows
+            if row["set"] == "clean-high-rmse" and parse_float(row.get(f"{family}Activation"), 0.0) >= 0.20
+        ]
+        active_protected = [
+            row for row in nominal_rows
+            if row["set"] == "clean-protected" and parse_float(row.get(f"{family}Activation"), 0.0) >= 0.20
+        ]
+        output.append(
+            {
+                "family": family,
+                "activeHighCount": len(active_high),
+                "activeHighGalaxies": "; ".join(row["galaxy"] for row in active_high),
+                "activeProtectedCount": len(active_protected),
+                "activeProtectedGalaxies": "; ".join(row["galaxy"] for row in active_protected),
+                "nominalHighGainVsV18Pct": nominal_metric["highGainVsV18Pct"],
+                "ablationHighGainVsV18Pct": metric["highGainVsV18Pct"],
+                "highGainLossPct": nominal_metric["highGainVsV18Pct"] - metric["highGainVsV18Pct"],
+                "nominalPriorityGainVsV18Pct": nominal_metric["priorityGainVsV18Pct"],
+                "ablationPriorityGainVsV18Pct": metric["priorityGainVsV18Pct"],
+                "priorityGainLossPct": nominal_metric["priorityGainVsV18Pct"] - metric["priorityGainVsV18Pct"],
+                "ablationProtectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "ablationHighAbove20": metric["highAbove20Candidate"],
+            }
+        )
+    return output
+
+
+def v18_radial_phase_family_route(family: str) -> str:
+    if family in {"compactStellarInward", "massiveDiskInward"}:
+        return "low-load"
+    return "buffered single-crossing"
+
+
+def v18_radial_phase_redteam_protected_stress_rows(base: dict) -> list[dict]:
+    output: list[dict] = []
+    protected_curves = [
+        curve for curve in base["cleanCurves"]
+        if curve["name"] not in base["highNames"] and curve["name"] not in base["weakNames"]
+    ]
+    for family in V18_RADIAL_PHASE_STRENGTHS:
+        route = v18_radial_phase_family_route(family)
+        for curve in protected_curves:
+            if curve.get("lockedModelRoute") != route:
+                continue
+            forced = {curve["name"]: {key: 0.0 for key in V18_RADIAL_PHASE_STRENGTHS}}
+            forced[curve["name"]][family] = 1.0
+            rows = v18_radial_phase_rows_with_forced(base, forced)
+            row = next(item for item in rows if item["galaxy"] == curve["name"])
+            output.append(
+                {
+                    "family": family,
+                    "galaxy": curve["name"],
+                    "lockedRoute": curve.get("lockedModelRoute", ""),
+                    "v18Rmse": row["v18Rmse"],
+                    "forcedRmse": row["candidateRmse"],
+                    "forcedRegressionKmS": max(0.0, parse_float(row["candidateRmse"]) - parse_float(row["v18Rmse"])),
+                    "forcedGainKmS": parse_float(row["v18Rmse"]) - parse_float(row["candidateRmse"]),
+                    "memoryLoad": row["memoryLoad"],
+                    "uOut": row["uOut"],
+                    "uMax": row["uMax"],
+                    "hOverRout": row["hOverRout"],
+                    "outerGasShare": row["outerGasShare"],
+                    "outerDiskShare": row["outerDiskShare"],
+                    "barCurv": row["barCurv"],
+                    "pointDensity": row["pointDensity"],
+                    "mBar_1e9Msun": row["mBar_1e9Msun"],
+                    "tableGasFraction": row["tableGasFraction"],
+                }
+            )
+    output.sort(key=lambda row: (-parse_float(row["forcedRegressionKmS"], 0.0), row["family"], row["galaxy"]))
+    return output
+
+
+def write_v18_radial_phase_redteam_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_radial_phase_redteam"
+    # Keep the candidate artifacts fresh because this red-team mode is testing that exact implementation.
+    candidate_capsule = write_v18_radial_phase_artifacts(DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_OUT)
+    lock_capsule = write_observed_state_v18_release_lock_final_artifacts(DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_FINAL_OUT)
+    base = v18_radial_phase_base_context()
+    train_names, holdout_names = observed_state_split(base["cleanCurves"], SPLIT_SEED, HOLDOUT_FRACTION)
+    nominal_rows = v18_radial_phase_nominal_rows(base, (train_names, holdout_names))
+    nominal_metric = v18_nfw_gap_candidate_metric(nominal_rows)
+    holdout_metric = v18_nfw_gap_candidate_metric(nominal_rows, "holdout")
+    null_rows = v18_radial_phase_null_rows(
+        base["cleanCurves"],
+        nominal_rows,
+        base["baseStrengths"],
+        base["table1ByName"],
+        base["v18Lookup"],
+        base["weakNames"],
+        base["highNames"],
+        base["priorityNames"],
+    )
+    best_null_priority = max([parse_float(row["priorityGainVsV18Pct"]) for row in null_rows] or [math.nan])
+    best_null_high = max([parse_float(row["highGainVsV18Pct"]) for row in null_rows] or [math.nan])
+    null_margin_priority = nominal_metric["priorityGainVsV18Pct"] - best_null_priority if math.isfinite(best_null_priority) else math.nan
+    null_margin_high = nominal_metric["highGainVsV18Pct"] - best_null_high if math.isfinite(best_null_high) else math.nan
+    seed_rows = v18_radial_phase_redteam_seed_rows(base)
+    ablation_rows = v18_radial_phase_redteam_ablation_rows(base, nominal_rows, nominal_metric)
+    stress_rows = v18_radial_phase_redteam_protected_stress_rows(base)
+    protected_rows = [row for row in nominal_rows if row["set"] == "clean-protected"]
+    high_rows = [row for row in nominal_rows if row["set"] == "clean-high-rmse"]
+    max_forced_stress = max([parse_float(row["forcedRegressionKmS"], 0.0) for row in stress_rows] or [0.0])
+    recurring_seed_failures = [
+        row for row in seed_rows
+        if parse_float(row["holdoutPriorityGainVsV18Pct"], 0.0) < 10.0
+        or parse_float(row["holdoutProtectedMaxRegressionKmS"], 0.0) >= 3.0
+        or parse_float(row["holdoutHighAbove20"], 0.0) > 0.0
+    ]
+    weak_leakage = nominal_metric["weakSystematicsLeakage"]
+    release_passes = {
+        "baselineRemains2190": round(parse_float(lock_capsule["summary"].get("baselineMeanRmse", 21.90), 21.90), 2) == 21.90,
+        "v18ReferenceUnchangedHighGain": abs(parse_float(lock_capsule["summary"].get("cleanHighGainPct")) - 68.08) < 0.02,
+        "highGainVsV18AtLeast8Pct": nominal_metric["highGainVsV18Pct"] >= 8.0,
+        "priorityGainVsV18AtLeast20Pct": nominal_metric["priorityGainVsV18Pct"] >= 20.0,
+        "holdoutPriorityGainAtLeast10Pct": holdout_metric["priorityGainVsV18Pct"] >= 10.0,
+        "highAbove20Zero": nominal_metric["highAbove20Candidate"] == 0,
+        "protectedRegressionBelow1KmS": nominal_metric["protectedMaxRegressionKmS"] < 1.0,
+        "weakLeakageZero": weak_leakage == 0,
+        "priorityNullMarginAtLeast10Pct": math.isfinite(null_margin_priority) and null_margin_priority >= 10.0,
+        "seedReplayNoPriorityOrProtectionFailure": len(recurring_seed_failures) == 0,
+        "actualRadialBranchesHaveNoProtectedHits": sum(1 for row in protected_rows if row["radialPhaseFamilies"]) == 0,
+    }
+    verdict = "v18.21 release-candidate hardening passed" if all(release_passes.values()) else "v18.21 needs more hardening"
+    score_row = {
+        "candidateId": "observed-state-response-v18.22-radial-phase-redteam",
+        "testedCandidate": candidate_capsule["summary"]["candidateId"],
+        "verdict": verdict,
+        "v18ReferenceHighGainPct": lock_capsule["summary"]["cleanHighGainPct"],
+        "v18ReferenceCleanGainPct": lock_capsule["summary"]["cleanGainPct"],
+        "candidateHighGainVsV18Pct": nominal_metric["highGainVsV18Pct"],
+        "candidatePriorityGainVsV18Pct": nominal_metric["priorityGainVsV18Pct"],
+        "holdoutHighGainVsV18Pct": holdout_metric["highGainVsV18Pct"],
+        "holdoutPriorityGainVsV18Pct": holdout_metric["priorityGainVsV18Pct"],
+        "candidateHighAbove20": nominal_metric["highAbove20Candidate"],
+        "candidateProtectedMaxRegressionKmS": nominal_metric["protectedMaxRegressionKmS"],
+        "weakSystematicsLeakage": weak_leakage,
+        "bestNullPriorityGainPct": best_null_priority,
+        "nullMarginPriorityPct": null_margin_priority,
+        "bestNullHighGainPct": best_null_high,
+        "nullMarginHighPct": null_margin_high,
+        "maxForcedProtectedLookalikeRegressionKmS": max_forced_stress,
+        "seedReplayFailureCount": len(recurring_seed_failures),
+        "actualRadialProtectedHitCount": sum(1 for row in protected_rows if row["radialPhaseFamilies"]),
+    }
+    release_gate_rows = [{"gate": key, "pass": value} for key, value in release_passes.items()]
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_row])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", nominal_rows)
+    write_csv(out_dir / f"{prefix}_high_rmse_repairs.csv", high_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_seed_replay.csv", seed_rows)
+    write_csv(out_dir / f"{prefix}_branch_ablation.csv", ablation_rows)
+    write_csv(out_dir / f"{prefix}_protected_lookalike_stress.csv", stress_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_release_gates.csv", release_gate_rows)
+    capsule = {
+        "analysisName": "mts-v18-radial-phase-redteam-v1",
+        "verdict": verdict,
+        "summary": score_row,
+        "releasePasses": release_passes,
+        "candidateCapsule": str(DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_OUT / "mts_v18_radial_phase_candidate_capsule.json"),
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_high_rmse_repairs.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_seed_replay.csv",
+            f"{prefix}_branch_ablation.csv",
+            f"{prefix}_protected_lookalike_stress.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_release_gates.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    changed_high = sorted(high_rows, key=lambda row: -parse_float(row["candidateGainVsV18KmS"], 0.0))
+    top_stress = stress_rows[:12]
+    report = [
+        "# MTS v18.22 Radial-Phase Red-Team",
+        "",
+        "This mode tries to break the v18.21 radial-phase candidate. It does not search for a new law and does not update the browser.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- v18.21 high-RMSE gain over v18.10: `{fmt(score_row['candidateHighGainVsV18Pct'])}%`.",
+        f"- v18.21 priority NFW-gap gain over v18.10: `{fmt(score_row['candidatePriorityGainVsV18Pct'])}%`.",
+        f"- Holdout priority gain: `{fmt(score_row['holdoutPriorityGainVsV18Pct'])}%`.",
+        f"- Protected max regression: `{fmt(score_row['candidateProtectedMaxRegressionKmS'])}` km/s.",
+        f"- Best priority null: `{fmt(score_row['bestNullPriorityGainPct'])}%`.",
+        f"- Priority null margin: `{fmt(score_row['nullMarginPriorityPct'])}` points.",
+        f"- Actual radial protected hits: `{score_row['actualRadialProtectedHitCount']}`.",
+        f"- Max forced protected-lookalike stress regression: `{fmt(score_row['maxForcedProtectedLookalikeRegressionKmS'])}` km/s.",
+        "",
+        "## Top High-RMSE Repairs",
+        "",
+        "| Galaxy | v18 RMSE | v18.21 RMSE | gain | radial phase | base family |",
+        "| --- | ---: | ---: | ---: | --- | --- |",
+    ]
+    for row in changed_high[:18]:
+        if parse_float(row["candidateGainVsV18KmS"], 0.0) <= 0.05:
+            continue
+        base_family = row["officialMassScaleFamily"] or row["legacyCompletionFamily"]
+        if not base_family:
+            base_family = "; ".join(
+                label for label, column in [
+                    ("lowSuppression", "lowSuppressionActivation"),
+                    ("bufferedSuppression", "bufferedSuppressionActivation"),
+                    ("completion", "completionActivation"),
+                ]
+                if parse_float(row.get(column), 0.0) >= 0.20
+            )
+        report.append(
+            f"| {row['galaxy']} | {fmt(row['v18Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['candidateGainVsV18KmS'])} | {row['radialPhaseFamilies']} | {base_family} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Branch Ablation",
+            "",
+            "| Family | High hits | Priority gain loss | High gain loss | Protected max regression after ablation |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in ablation_rows:
+        report.append(
+            f"| {row['family']} | {row['activeHighCount']} | {fmt(row['priorityGainLossPct'])} | {fmt(row['highGainLossPct'])} | {fmt(row['ablationProtectedMaxRegressionKmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Worst Forced Protected-Lookalike Stress",
+            "",
+            "| Family | Galaxy | forced regression | v18 RMSE | forced RMSE |",
+            "| --- | --- | ---: | ---: | ---: |",
+        ]
+    )
+    for row in top_stress:
+        report.append(
+            f"| {row['family']} | {row['galaxy']} | {fmt(row['forcedRegressionKmS'])} | {fmt(row['v18Rmse'])} | {fmt(row['forcedRmse'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Release Gates",
+            "",
+            "| Gate | Pass |",
+            "| --- | ---: |",
+            *[f"| {row['gate']} | `{row['pass']}` |" for row in release_gate_rows],
+            "",
+            "## Interpretation",
+            "",
+            "- Actual v18.21 radial-phase branches hit no protected clean cases.",
+            "- Forced lookalike stress can harm protected cases, which means the branch gates matter and must stay explicit.",
+            "- If this mode passes, the next step is browser/release integration behind a strict cache/native QA gate.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    return capsule
+
+
+def cmd_v18radialphaseredteam(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_REDTEAM_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_radial_phase_redteam_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.22 radial-phase red-team")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high_gain_vs_v18={fmt(summary['candidateHighGainVsV18Pct'])}%",
+                f"priority_gain_vs_v18={fmt(summary['candidatePriorityGainVsV18Pct'])}%",
+                f"null_margin={fmt(summary['nullMarginPriorityPct'])}",
+                f"protected={fmt(summary['candidateProtectedMaxRegressionKmS'])}",
+                f"forced_stress={fmt(summary['maxForcedProtectedLookalikeRegressionKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 radial-phase red-team to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -78140,6 +78524,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18massscalecandidate",
             "v18radialphasecandidate",
             "observedstatev18radialphasecandidate",
+            "v18radialphaseredteam",
+            "observedstatev18radialphaseredteam",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -78430,6 +78816,8 @@ def main() -> None:
         cmd_v18massscalecandidate(args)
     elif args.mode in {"v18radialphasecandidate", "observedstatev18radialphasecandidate"}:
         cmd_v18radialphasecandidate(args)
+    elif args.mode in {"v18radialphaseredteam", "observedstatev18radialphaseredteam"}:
+        cmd_v18radialphaseredteam(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
