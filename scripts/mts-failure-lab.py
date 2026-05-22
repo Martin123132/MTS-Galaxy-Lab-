@@ -206,6 +206,7 @@ DEFAULT_OBSERVED_STATE_V18_NFW_CASE_PAIR_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-c
 DEFAULT_OBSERVED_STATE_V18_NFW_FRONTIER_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-frontier-lock-v1"
 DEFAULT_OBSERVED_STATE_V18_REVIEWER_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-reviewer-stress-v1"
 DEFAULT_OBSERVED_STATE_V18_ML_PROTOCOL_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-protocol-v1"
+DEFAULT_OBSERVED_STATE_V18_ML_BOUNDARY_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-boundary-audit-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -72554,6 +72555,394 @@ def cmd_v18mlprotocol(args: argparse.Namespace) -> None:
     print(f"Wrote v18 M/L protocol to {out_dir.resolve()}")
 
 
+def v18_ml_boundary_failure_direction(rows: list[dict]) -> str:
+    low_count = 0
+    high_count = 0
+    mixed_count = 0
+    for row in rows:
+        disk = parse_float(row.get("diskFactor"), 1.0)
+        bulge = parse_float(row.get("bulgeFactor"), 1.0)
+        if disk < 1.0 and bulge <= 1.0:
+            low_count += 1
+        elif disk > 1.0 and bulge >= 1.0:
+            high_count += 1
+        else:
+            mixed_count += 1
+    if low_count > high_count and low_count >= mixed_count:
+        return "low-M/L boundary"
+    if high_count > low_count and high_count >= mixed_count:
+        return "high-M/L boundary"
+    return "mixed disk/bulge M/L boundary"
+
+
+def v18_ml_boundary_case_verdict(core_count: int, wide_count: int, direction: str, route: str) -> tuple[str, str]:
+    if core_count >= 5:
+        return (
+            "core M/L boundary case",
+            "Do not add a transport branch from this alone; require external stellar M/L/decomposition provenance before treating the residual as physics.",
+        )
+    if core_count > 0:
+        return (
+            "mild core M/L boundary case",
+            "Keep in the reviewer watchlist; external M/L provenance is more valuable than threshold tuning.",
+        )
+    if wide_count > 0:
+        return (
+            "wide-envelope watchlist only",
+            "Not a v18.26 law failure under the core protocol; cite as a wide-envelope calibration boundary.",
+        )
+    return (
+        "not an M/L boundary failure",
+        f"No above-20 failure found in the M/L protocol for route {route}.",
+    )
+
+
+def write_v18_ml_boundary_audit_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_ml_boundary"
+    protocol_capsule = write_v18_ml_protocol_artifacts(DEFAULT_OBSERVED_STATE_V18_ML_PROTOCOL_OUT)
+    frontier_capsule = write_v18_nfw_frontier_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_FRONTIER_LOCK_OUT)
+    protocol_dir = DEFAULT_OBSERVED_STATE_V18_ML_PROTOCOL_OUT
+    case_rows = read_csv_rows(protocol_dir / "mts_v18_ml_protocol_case_ledger.csv")
+    high_failure_summary = read_csv_rows(protocol_dir / "mts_v18_ml_protocol_high_failure_summary.csv")
+    group_rows = read_csv_rows(protocol_dir / "mts_v18_ml_protocol_group_summary.csv")
+    variant_rows = read_csv_rows(protocol_dir / "mts_v18_ml_protocol_variant_summary.csv")
+    target_names = [row["galaxy"] for row in high_failure_summary]
+    target_name_set = set(target_names)
+
+    failing_rows = [
+        row for row in case_rows
+        if row["galaxy"] in target_name_set and row["set"] == "clean-high-rmse" and parse_bool(row.get("above20Candidate"))
+    ]
+    nominal_by_name = {
+        row["galaxy"]: row
+        for row in case_rows
+        if row.get("variantId") == "nominal" and row["galaxy"] in target_name_set
+    }
+    target_rows: list[dict] = []
+    for summary in high_failure_summary:
+        name = summary["galaxy"]
+        failures = [row for row in failing_rows if row["galaxy"] == name]
+        core_failures = [row for row in failures if row.get("protocolTier") == "core-plus-minus-10pct"]
+        wide_failures = [row for row in failures if row.get("protocolTier") == "wide-plus-minus-15pct"]
+        nominal = nominal_by_name.get(name, {})
+        direction = v18_ml_boundary_failure_direction(failures)
+        verdict, next_action = v18_ml_boundary_case_verdict(
+            len(core_failures),
+            len(wide_failures),
+            direction,
+            summary.get("lockedRoute", nominal.get("lockedRoute", "")),
+        )
+        target_rows.append(
+            {
+                "galaxy": name,
+                "lockedRoute": summary.get("lockedRoute", nominal.get("lockedRoute", "")),
+                "boundaryVerdict": verdict,
+                "failureDirection": direction,
+                "failureVariantCount": len(failures),
+                "coreFailureCount": len(core_failures),
+                "wideFailureCount": len(wide_failures),
+                "nominalCanonicalRmse": nominal.get("canonicalRmse", ""),
+                "nominalV18_21Rmse": nominal.get("v18_21Rmse", ""),
+                "nominalV18_26Rmse": nominal.get("candidateRmse", ""),
+                "nominalGainVsCanonicalPct": nominal.get("candidateGainVsCanonicalPct", ""),
+                "worstRmse": max([parse_float(row["candidateRmse"]) for row in failures] or [math.nan]),
+                "worstVariant": max(failures, key=lambda row: parse_float(row["candidateRmse"]))["variantId"] if failures else "",
+                "branchHits": summary.get("branchHits", nominal.get("branchHits", "")),
+                "memoryLoad": nominal.get("memoryLoad", ""),
+                "uOut": nominal.get("uOut", ""),
+                "uMax": nominal.get("uMax", ""),
+                "hOverRout": nominal.get("hOverRout", ""),
+                "outerGasShare": nominal.get("outerGasShare", ""),
+                "outerDiskShare": nominal.get("outerDiskShare", ""),
+                "barCurv": nominal.get("barCurv", ""),
+                "mBar_1e9Msun": nominal.get("mBar_1e9Msun", ""),
+                "tableGasFraction": nominal.get("tableGasFraction", ""),
+                "nextAction": next_action,
+            }
+        )
+    target_rows.sort(
+        key=lambda row: (
+            -parse_float(row["coreFailureCount"], 0.0),
+            -parse_float(row["failureVariantCount"], 0.0),
+            -parse_float(row["worstRmse"], 0.0),
+            row["galaxy"],
+        )
+    )
+
+    nominal_clean_rows = [
+        row for row in case_rows
+        if row.get("variantId") == "nominal" and row["set"] != "weak-systematics-excluded"
+    ]
+    nominal_target_rows = [row for row in nominal_clean_rows if row["galaxy"] in target_name_set]
+    scales = v18_nfw_case_pair_feature_scales(nominal_clean_rows)
+    nearest_rows: list[dict] = []
+    for target in nominal_target_rows:
+        distances: list[dict] = []
+        for row in nominal_clean_rows:
+            if row["galaxy"] == target["galaxy"]:
+                continue
+            distance, feature_count = v18_nfw_case_pair_feature_distance(row, target, scales)
+            if not math.isfinite(distance):
+                continue
+            distances.append(
+                {
+                    "targetGalaxy": target["galaxy"],
+                    "neighborGalaxy": row["galaxy"],
+                    "neighborSet": row["set"],
+                    "neighborRoute": row["lockedRoute"],
+                    "sameRoute": row["lockedRoute"] == target["lockedRoute"],
+                    "stateDistance": distance,
+                    "featureCount": feature_count,
+                    "neighborIsMlBoundaryTarget": row["galaxy"] in target_name_set,
+                    "neighborV18_26Rmse": row["candidateRmse"],
+                    "neighborAbove20Nominal": row["above20Candidate"],
+                    "neighborBranchHits": row.get("branchHits", ""),
+                }
+            )
+        distances.sort(key=lambda row: (parse_float(row["stateDistance"]), row["neighborGalaxy"]))
+        nearest_rows.extend(distances[:10])
+
+    route_group_rows: list[dict] = []
+    for route in sorted({row["lockedRoute"] for row in target_rows}):
+        rows = [row for row in target_rows if row["lockedRoute"] == route]
+        route_group_rows.append(
+            {
+                "lockedRoute": route,
+                "targetCount": len(rows),
+                "coreBoundaryCount": sum(1 for row in rows if parse_float(row["coreFailureCount"], 0.0) > 0),
+                "wideOnlyCount": sum(1 for row in rows if parse_float(row["coreFailureCount"], 0.0) == 0 and parse_float(row["wideFailureCount"], 0.0) > 0),
+                "meanWorstRmse": safe_mean(parse_float(row["worstRmse"]) for row in rows),
+                "galaxies": "; ".join(row["galaxy"] for row in rows),
+                "directions": "; ".join(sorted({row["failureDirection"] for row in rows})),
+            }
+        )
+
+    core_targets = [row for row in target_rows if parse_float(row["coreFailureCount"], 0.0) > 0]
+    wide_only_targets = [
+        row for row in target_rows
+        if parse_float(row["coreFailureCount"], 0.0) == 0 and parse_float(row["wideFailureCount"], 0.0) > 0
+    ]
+    target_routes = sorted({row["lockedRoute"] for row in target_rows})
+    core_routes = sorted({row["lockedRoute"] for row in core_targets})
+    close_target_pairs = [
+        row for row in nearest_rows
+        if parse_bool(row["neighborIsMlBoundaryTarget"]) and parse_float(row["stateDistance"], math.inf) <= 0.35
+    ]
+    protected_neighbors_near = [
+        row for row in nearest_rows
+        if row["neighborSet"] == "clean-protected" and parse_float(row["stateDistance"], math.inf) <= 0.35
+    ]
+    shared_branch_justified = (
+        len(core_targets) >= 4
+        and len(core_routes) == 1
+        and len(close_target_pairs) >= len(core_targets)
+        and len(protected_neighbors_near) == 0
+    )
+    if shared_branch_justified:
+        verdict = "M/L boundary cluster may justify a future state branch"
+    elif core_targets:
+        verdict = "M/L calibration boundary; no shared branch"
+    elif wide_only_targets:
+        verdict = "wide-envelope watchlist; v18.26 core protocol stable"
+    else:
+        verdict = "no M/L boundary signal"
+
+    reviewer_table = [
+        {
+            "claim": "v18.26 nominal high-RMSE repair",
+            "value": protocol_capsule["summary"]["nominalHighGainPct"],
+            "unit": "percent gain vs locked MTS",
+            "source": str(protocol_dir / "mts_v18_ml_protocol_capsule.json"),
+        },
+        {
+            "claim": "v18.26 nominal clean-set repair",
+            "value": protocol_capsule["summary"]["nominalCleanGainPct"],
+            "unit": "percent gain vs locked MTS",
+            "source": str(protocol_dir / "mts_v18_ml_protocol_capsule.json"),
+        },
+        {
+            "claim": "core +/-10% M/L median high-RMSE repair",
+            "value": protocol_capsule["summary"]["coreMedianHighGainPct"],
+            "unit": "percent gain vs locked MTS",
+            "source": str(protocol_dir / "mts_v18_ml_protocol_group_summary.csv"),
+        },
+        {
+            "claim": "core +/-10% M/L minimum high-RMSE repair",
+            "value": protocol_capsule["summary"]["coreMinHighGainPct"],
+            "unit": "percent gain vs locked MTS",
+            "source": str(protocol_dir / "mts_v18_ml_protocol_group_summary.csv"),
+        },
+        {
+            "claim": "wide +/-15% M/L median high-RMSE repair",
+            "value": protocol_capsule["summary"]["wideMedianHighGainPct"],
+            "unit": "percent gain vs locked MTS",
+            "source": str(protocol_dir / "mts_v18_ml_protocol_group_summary.csv"),
+        },
+        {
+            "claim": "protected regression under M/L protocol",
+            "value": protocol_capsule["summary"]["protectedRegressionMax"],
+            "unit": "km/s",
+            "source": str(protocol_dir / "mts_v18_ml_protocol_capsule.json"),
+        },
+        {
+            "claim": "weak/systematics leakage under M/L protocol",
+            "value": protocol_capsule["summary"]["weakSystematicsLeakageMax"],
+            "unit": "count",
+            "source": str(protocol_dir / "mts_v18_ml_protocol_capsule.json"),
+        },
+        {
+            "claim": "core M/L boundary cases",
+            "value": len(core_targets),
+            "unit": "galaxies",
+            "source": f"{prefix}_target_ledger.csv",
+        },
+    ]
+
+    passes = {
+        "frontierLockPassed": frontier_capsule.get("verdict") == "v18.26 NFW frontier locked",
+        "mlProtocolPassed": protocol_capsule.get("verdict") == "v18.26 M/L protocol passed",
+        "protectedRegressionZero": parse_float(protocol_capsule["summary"]["protectedRegressionMax"], math.inf) == 0.0,
+        "weakLeakageZero": parse_float(protocol_capsule["summary"]["weakSystematicsLeakageMax"], math.inf) == 0.0,
+        "sharedBranchNotJustified": not shared_branch_justified,
+        "coreBoundaryTargetsNamed": len(core_targets) > 0,
+        "lawUnchanged": True,
+    }
+
+    guard = {
+        "candidateId": "observed-state-response-v18.33-ml-boundary-audit",
+        "verdict": verdict,
+        "lawChanged": False,
+        "baseLaw": "locked v18.26 radial-transfer candidate",
+        "mlProtocolSource": str(protocol_dir),
+        "coreBoundaryTargets": [row["galaxy"] for row in core_targets],
+        "wideOnlyTargets": [row["galaxy"] for row in wide_only_targets],
+        "sharedBranchJustified": shared_branch_justified,
+        "forbiddenInputs": ["galaxy names in formula", "raw residual lookup", "raw RMSE formula input", "NFW parameters", "weak/systematics training"],
+    }
+
+    score_rows = [
+        {"metric": "verdict", "value": verdict},
+        {"metric": "targetCount", "value": len(target_rows)},
+        {"metric": "coreBoundaryTargetCount", "value": len(core_targets)},
+        {"metric": "wideOnlyTargetCount", "value": len(wide_only_targets)},
+        {"metric": "targetRoutes", "value": "; ".join(target_routes)},
+        {"metric": "coreBoundaryRoutes", "value": "; ".join(core_routes)},
+        {"metric": "closeTargetPairCount", "value": len(close_target_pairs)},
+        {"metric": "nearProtectedNeighborCount", "value": len(protected_neighbors_near)},
+        {"metric": "sharedBranchJustified", "value": shared_branch_justified},
+        {"metric": "protectedRegressionMax", "value": protocol_capsule["summary"]["protectedRegressionMax"]},
+        {"metric": "weakSystematicsLeakageMax", "value": protocol_capsule["summary"]["weakSystematicsLeakageMax"]},
+    ]
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", target_rows)
+    write_csv(out_dir / f"{prefix}_failure_variant_ledger.csv", failing_rows)
+    write_csv(out_dir / f"{prefix}_nearest_neighbors.csv", nearest_rows)
+    write_csv(out_dir / f"{prefix}_route_group_summary.csv", route_group_rows)
+    write_csv(out_dir / f"{prefix}_reviewer_benchmark_table.csv", reviewer_table)
+    (out_dir / f"{prefix}_formula_guard.json").write_text(json.dumps(json_clean(guard), indent=2, sort_keys=True), encoding="utf-8")
+
+    report = [
+        "# MTS v18.33 M/L Boundary Audit",
+        "",
+        "This mode does not change v18.26. It uses the passed M/L protocol to decide whether the remaining above-20 stress cases form a new transport-law target or a calibration/provenance boundary.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- M/L protocol verdict: `{protocol_capsule.get('verdict')}`.",
+        f"- Boundary targets: `{len(target_rows)}`.",
+        f"- Core +/-10% boundary targets: `{len(core_targets)}`.",
+        f"- Wide-only watchlist targets: `{len(wide_only_targets)}`.",
+        f"- Routes represented: `{'; '.join(target_routes)}`.",
+        f"- Close target-pair links: `{len(close_target_pairs)}`.",
+        f"- Near protected neighbors: `{len(protected_neighbors_near)}`.",
+        f"- Shared branch justified: `{shared_branch_justified}`.",
+        "",
+        "## Boundary Targets",
+        "",
+        "| Galaxy | Route | Verdict | Direction | Core fails | Wide fails | Nominal v18.26 | Worst RMSE | Worst variant | Next action |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
+    ]
+    for row in target_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | {row['boundaryVerdict']} | {row['failureDirection']} | {row['coreFailureCount']} | {row['wideFailureCount']} | {fmt(row['nominalV18_26Rmse'])} | {fmt(row['worstRmse'])} | {row['worstVariant']} | {row['nextAction']} |"
+        )
+    report.extend(["", "## Route Groups", "", "| Route | Targets | Core | Wide-only | Mean worst RMSE | Galaxies |", "| --- | ---: | ---: | ---: | ---: | --- |"])
+    for row in route_group_rows:
+        report.append(
+            f"| {row['lockedRoute']} | {row['targetCount']} | {row['coreBoundaryCount']} | {row['wideOnlyCount']} | {fmt(row['meanWorstRmse'])} | {row['galaxies']} |"
+        )
+    report.extend(["", "## Reviewer Benchmark Table", "", "| Claim | Value | Unit |", "| --- | ---: | --- |"])
+    for row in reviewer_table:
+        report.append(f"| {row['claim']} | {fmt(row['value'])} | {row['unit']} |")
+    report.extend(["", "## Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.extend(
+        [
+            "",
+            "## Next Work",
+            "",
+            "Do not add a new v18.34 branch from this audit. The boundary targets split across low-load and buffered routes and have protected-neighbor exposure. The valuable next step is external M/L/decomposition provenance for the core boundary cases, especially UGC09133, F561-1, UGC06786, UGC03205, and NGC5033.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-v18-ml-boundary-audit-v1",
+        "verdict": verdict,
+        "summary": {
+            "targetCount": len(target_rows),
+            "coreBoundaryTargetCount": len(core_targets),
+            "wideOnlyTargetCount": len(wide_only_targets),
+            "targetRoutes": target_routes,
+            "coreBoundaryRoutes": core_routes,
+            "closeTargetPairCount": len(close_target_pairs),
+            "nearProtectedNeighborCount": len(protected_neighbors_near),
+            "sharedBranchJustified": shared_branch_justified,
+            "protectedRegressionMax": protocol_capsule["summary"]["protectedRegressionMax"],
+            "weakSystematicsLeakageMax": protocol_capsule["summary"]["weakSystematicsLeakageMax"],
+            "passes": passes,
+        },
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_failure_variant_ledger.csv",
+            f"{prefix}_nearest_neighbors.csv",
+            f"{prefix}_route_group_summary.csv",
+            f"{prefix}_reviewer_benchmark_table.csv",
+            f"{prefix}_formula_guard.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18mlboundaryaudit(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_ML_BOUNDARY_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_ml_boundary_audit_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.33 M/L boundary audit")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"targets={summary['targetCount']}",
+                f"core={summary['coreBoundaryTargetCount']}",
+                f"wide_only={summary['wideOnlyTargetCount']}",
+                f"routes={';'.join(summary['targetRoutes'])}",
+                f"shared_branch={summary['sharedBranchJustified']}",
+                f"protected={fmt(summary['protectedRegressionMax'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 M/L boundary audit to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -85616,6 +86005,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18reviewerstress",
             "v18mlprotocol",
             "observedstatev18mlprotocol",
+            "v18mlboundaryaudit",
+            "observedstatev18mlboundaryaudit",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -85940,6 +86331,8 @@ def main() -> None:
         cmd_v18reviewerstress(args)
     elif args.mode in {"v18mlprotocol", "observedstatev18mlprotocol"}:
         cmd_v18mlprotocol(args)
+    elif args.mode in {"v18mlboundaryaudit", "observedstatev18mlboundaryaudit"}:
+        cmd_v18mlboundaryaudit(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
