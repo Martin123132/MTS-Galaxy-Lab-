@@ -200,6 +200,7 @@ DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_OUT = OUTPUT_PACK_ROOT / "mts-v18
 DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-radial-transfer-redteam-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_MERGE_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-radial-transfer-merge-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_BROWSER_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-radial-transfer-browser-lock-v1"
+DEFAULT_OBSERVED_STATE_V18_NFW_OVERSHELF_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-overshelf-candidate-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -70075,6 +70076,701 @@ def cmd_v18nfwradialtransferbrowserlock(args: argparse.Namespace) -> None:
     print(f"Wrote v18.26 browser cache lock to {out_dir.resolve()}")
 
 
+V18_NFW_OVERSHELF_BETA_GRID = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25]
+V18_NFW_OVERSHELF_SEEDS = V18_NFW_SAFETY_SEEDS
+V18_NFW_OVERSHELF_TARGETS = {"F574-2", "F579-V1", "F563-V1", "NGC2403", "NGC4157", "NGC4013"}
+V18_NFW_OVERSHELF_GUARD = "UGC07399"
+V18_NFW_OVERSHELF_BRANCHES = [
+    "lowLoadMidOuterShelfSuppression",
+    "bufferedMidOuterShelfSuppression",
+    "lowLoadCompactShelfCap",
+]
+
+
+def v18_nfw_overshelf_target_rows() -> tuple[set[str], dict[str, dict]]:
+    attack_dir = DEFAULT_OBSERVED_STATE_V18_NFW_ATTACK_OUT
+    case_path = attack_dir / "mts_v18_nfw_gap_attack_case_ledger.csv"
+    if not case_path.exists():
+        write_v18_nfw_gap_attack_artifacts(attack_dir)
+    rows = read_csv_rows(case_path)
+    return V18_NFW_OVERSHELF_TARGETS.copy(), {row["galaxy"]: row for row in rows if row.get("galaxy") in V18_NFW_OVERSHELF_TARGETS | {V18_NFW_OVERSHELF_GUARD}}
+
+
+def v18_nfw_overshelf_base_supports(
+    curve: dict,
+    base: dict,
+    strength: float,
+) -> tuple[list[float], list[float], dict, str]:
+    name = curve["name"]
+    v18_supports = [base["v18Lookup"][(name, index)] for index in range(len(curve["points"]))]
+    if name in base["weakNames"]:
+        return v18_supports[:], v18_supports[:], {"gasDiskCrossoverRadialTransfer": 0.0, "anyActivation": 0.0}, ""
+    v1821_supports, v1821_acts, _profile, _mass, _legacy, legacy_family, _official_family = v18_radial_phase_supports(
+        curve,
+        v18_supports,
+        base["baseStrengths"],
+        base["table1ByName"],
+    )
+    v1826_supports, v1826_acts, _values, _mass_values = v18_nfw_radial_transfer_supports(
+        curve,
+        v1821_supports,
+        strength,
+        base["table1ByName"],
+        v1821_acts,
+        legacy_family,
+    )
+    return v1821_supports, v1826_supports, v1826_acts, legacy_family
+
+
+def v18_nfw_overshelf_activations(curve: dict, table1_by_name: dict[str, dict]) -> tuple[dict[str, float], dict, dict]:
+    values = observed_state_values(curve)
+    mass = v18_official_mass_scale_features(curve, table1_by_name)
+    route = curve.get("lockedModelRoute", "")
+    memory = curve.get("memoryLoad", math.nan)
+    u_out = curve.get("lockedModelUOut", math.nan)
+    u_max = curve.get("lockedModelUMax", math.nan)
+    low_route = route == "low-load"
+    buffered_route = route == "buffered single-crossing"
+
+    low_mid_outer = 0.0
+    if low_route:
+        low_mid_outer = v18_nfw_safety_gate(
+            [
+                v18_nfw_gap_candidate_smooth(values["hOverRout"], 0.30, 0.46),
+                v18_nfw_gap_candidate_smooth(values["outerGasShare"], 0.42, 0.58),
+                v18_nfw_gap_candidate_smooth(1.55 - memory, 0.0, 0.85),
+                v18_nfw_gap_candidate_smooth(0.92 - u_max, 0.0, 0.18),
+                v18_nfw_gap_candidate_smooth(u_out, 0.39, 0.46),
+                v18_nfw_gap_candidate_smooth(5.0 - mass["mBar_1e9Msun"], 0.0, 4.0),
+            ],
+            0.44,
+            0.68,
+        )
+
+    buffered_path_a = 0.0
+    buffered_path_b = 0.0
+    if buffered_route:
+        buffered_path_a = v18_nfw_safety_gate(
+            [
+                v18_nfw_gap_candidate_smooth(values["hOverRout"], 0.16, 0.24),
+                v18_nfw_gap_candidate_smooth(values["outerDiskShare"], 0.60, 0.75),
+                v18_nfw_gap_candidate_smooth(0.38 - values["outerGasShare"], 0.0, 0.18),
+                v18_nfw_gap_candidate_smooth(abs(values["barCurv"]), 8.0, 18.0),
+                v18_nfw_gap_candidate_smooth(u_max, 1.10, 1.25),
+                v18_nfw_gap_candidate_smooth(mass["mBar_1e9Msun"], 5.0, 9.5),
+                v18_nfw_gap_candidate_smooth(16.0 - mass["mBar_1e9Msun"], 0.0, 8.0),
+            ],
+            0.42,
+            0.66,
+        )
+        buffered_path_b = v18_nfw_safety_gate(
+            [
+                v18_nfw_gap_candidate_smooth(memory, 4.5, 6.5),
+                v18_nfw_gap_candidate_smooth(u_max, 1.25, 1.55),
+                v18_nfw_gap_candidate_smooth(0.10 - values["hOverRout"], 0.0, 0.06),
+                v18_nfw_gap_candidate_smooth(values["outerGasShare"], 0.48, 0.62),
+                v18_nfw_gap_candidate_smooth(values["pointDensity"], 2.5, 3.6),
+                v18_nfw_gap_candidate_smooth(mass["mBar_1e9Msun"], 5.0, 10.0),
+                v18_nfw_gap_candidate_smooth(16.0 - mass["mBar_1e9Msun"], 0.0, 8.0),
+            ],
+            0.42,
+            0.66,
+        )
+
+    compact_high_umax = 0.0
+    compact_dense = 0.0
+    if low_route:
+        compact_high_umax = v18_nfw_safety_gate(
+            [
+                v18_nfw_gap_candidate_smooth(memory, 7.0, 12.0),
+                v18_nfw_gap_candidate_smooth(u_max, 0.84, 0.94),
+                v18_nfw_gap_candidate_smooth(0.36 - u_out, 0.0, 0.10),
+                v18_nfw_gap_candidate_smooth(0.14 - values["hOverRout"], 0.0, 0.08),
+                v18_nfw_gap_candidate_smooth(0.28 - values["outerGasShare"], 0.0, 0.15),
+                v18_nfw_gap_candidate_smooth(mass["mBar_1e9Msun"], 25.0, 55.0),
+                v18_nfw_gap_candidate_smooth(95.0 - mass["mBar_1e9Msun"], 0.0, 65.0),
+            ],
+            0.44,
+            0.69,
+        )
+        compact_dense = v18_nfw_safety_gate(
+            [
+                v18_nfw_gap_candidate_smooth(memory, 12.0, 20.0),
+                v18_nfw_gap_candidate_smooth(0.32 - u_out, 0.0, 0.08),
+                v18_nfw_gap_candidate_smooth(0.08 - values["hOverRout"], 0.0, 0.05),
+                v18_nfw_gap_candidate_smooth(0.16 - values["outerGasShare"], 0.0, 0.12),
+                v18_nfw_gap_candidate_smooth(values["pointDensity"], 0.70, 1.20),
+                v18_nfw_gap_candidate_smooth(mass["mBar_1e9Msun"], 25.0, 45.0),
+                v18_nfw_gap_candidate_smooth(0.70 - u_max, 0.0, 0.12),
+            ],
+            0.44,
+            0.69,
+        )
+    acts = {
+        "lowLoadMidOuterShelfSuppression": clamp(low_mid_outer, 0.0, 1.0),
+        "bufferedMidOuterShelfSuppression": clamp(max(buffered_path_a, buffered_path_b), 0.0, 1.0),
+        "lowLoadCompactShelfCap": clamp(max(compact_high_umax, compact_dense), 0.0, 1.0),
+    }
+    acts["anyActivation"] = max(acts.values())
+    return acts, values, mass
+
+
+def v18_nfw_overshelf_supports(
+    curve: dict,
+    v1826_supports: list[float],
+    strengths: dict[str, float],
+    table1_by_name: dict[str, dict],
+    forced_activations: dict[str, float] | None = None,
+) -> tuple[list[float], dict[str, float], dict, dict]:
+    if forced_activations is None:
+        acts, values, mass = v18_nfw_overshelf_activations(curve, table1_by_name)
+    else:
+        acts = {branch: clamp(parse_float(forced_activations.get(branch), 0.0), 0.0, 1.0) for branch in V18_NFW_OVERSHELF_BRANCHES}
+        acts["anyActivation"] = max(acts.values())
+        values = observed_state_values(curve)
+        mass = v18_official_mass_scale_features(curve, table1_by_name)
+    output: list[float] = []
+    for point, support in zip(curve["points"], v1826_supports):
+        x_value = point.get("x", point["r"] / max(curve["rOut"], 1e-9))
+        mid_outer_shape = 0.08 + 0.92 * v18_nfw_gap_candidate_smooth(x_value, 0.22, 0.82)
+        compact_shape = 0.18 + 0.82 * v18_nfw_gap_candidate_smooth(x_value, 0.18, 0.76)
+        factor = 1.0
+        factor -= strengths["lowLoadMidOuterShelfSuppression"] * acts["lowLoadMidOuterShelfSuppression"] * mid_outer_shape
+        factor -= strengths["bufferedMidOuterShelfSuppression"] * acts["bufferedMidOuterShelfSuppression"] * mid_outer_shape
+        factor -= strengths["lowLoadCompactShelfCap"] * acts["lowLoadCompactShelfCap"] * compact_shape
+        output.append(max(0.0, support * clamp(factor, 0.55, 1.05)))
+    return output, acts, values, mass
+
+
+def v18_nfw_overshelf_score_rows(
+    base: dict,
+    strengths: dict[str, float],
+    target_names: set[str],
+    target_rows_by_name: dict[str, dict],
+    radial_transfer_strength: float,
+    split_names: tuple[set[str], set[str]] | None = None,
+    forced_by_name: dict[str, dict[str, float]] | None = None,
+) -> list[dict]:
+    train_names, holdout_names = split_names if split_names is not None else (set(), set())
+    rows: list[dict] = []
+    for curve in base["curves"]:
+        name = curve["name"]
+        v1821_supports, v1826_supports, _v1826_acts, _legacy_family = v18_nfw_overshelf_base_supports(curve, base, radial_transfer_strength)
+        if name in base["weakNames"]:
+            candidate_supports = v1826_supports[:]
+            acts = {branch: 0.0 for branch in V18_NFW_OVERSHELF_BRANCHES}
+            acts["anyActivation"] = 0.0
+            profile_values = observed_state_values(curve)
+            mass_features = v18_official_mass_scale_features(curve, base["table1ByName"])
+        else:
+            forced = forced_by_name.get(name) if forced_by_name else None
+            candidate_supports, acts, profile_values, mass_features = v18_nfw_overshelf_supports(
+                curve,
+                v1826_supports,
+                strengths,
+                base["table1ByName"],
+                forced,
+            )
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        v1821_score = v18_competitor_support_score(curve, v1821_supports)
+        v1826_score = v18_competitor_support_score(curve, v1826_supports)
+        candidate = v18_competitor_support_score(curve, candidate_supports)
+        set_label = v18_competitor_set_label(name, base["weakNames"], base["highNames"])
+        split = "weak-excluded" if name in base["weakNames"] else ("holdout" if name in holdout_names else "train" if name in train_names else "")
+        target_row = target_rows_by_name.get(name, {})
+        effective_activation = max(
+            parse_float(acts.get(branch), 0.0)
+            for branch in V18_NFW_OVERSHELF_BRANCHES
+            if parse_float(strengths.get(branch), 0.0) > 0.0
+        ) if any(parse_float(strengths.get(branch), 0.0) > 0.0 for branch in V18_NFW_OVERSHELF_BRANCHES) else 0.0
+        branch_hits = [
+            branch
+            for branch in V18_NFW_OVERSHELF_BRANCHES
+            if parse_float(strengths.get(branch), 0.0) > 0.0 and parse_float(acts.get(branch), 0.0) >= 0.05
+        ]
+        rows.append(
+            {
+                "galaxy": name,
+                "set": set_label,
+                "split": split,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "overshelfTarget": name in target_names,
+                "radialTransferGuard": name == V18_NFW_OVERSHELF_GUARD,
+                "attackClass": target_row.get("attackClass", target_row.get("target", "")),
+                "shapeClass": target_row.get("shapeClass", ""),
+                "qualityCode": target_row.get("qualityCode", ""),
+                "canonicalRmse": canonical["rmse"],
+                "v18_21Rmse": v1821_score["rmse"],
+                "v18_26Rmse": v1826_score["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "candidateRoute": candidate.get("candidateRoute", ""),
+                "v18_26Route": v1826_score.get("candidateRoute", ""),
+                "candidateGainVsV1826KmS": v1826_score["rmse"] - candidate["rmse"],
+                "candidateGainVsV1826Pct": pct_improvement(v1826_score["rmse"], candidate["rmse"]),
+                "candidateRegressionVsV1826KmS": max(0.0, candidate["rmse"] - v1826_score["rmse"]),
+                "candidateGainVsCanonicalPct": pct_improvement(canonical["rmse"], candidate["rmse"]),
+                **{f"{branch}Activation": acts.get(branch, 0.0) for branch in V18_NFW_OVERSHELF_BRANCHES},
+                "anyActivation": effective_activation,
+                "branchHits": "; ".join(branch_hits),
+                "memoryLoad": curve["memoryLoad"],
+                "u075": curve.get("lockedModelU075", math.nan),
+                "uOut": curve["lockedModelUOut"],
+                "uMax": curve["lockedModelUMax"],
+                "hOverRout": profile_values["hOverRout"],
+                "outerGasShare": profile_values["outerGasShare"],
+                "outerDiskShare": profile_values["outerDiskShare"],
+                "innerGasShare": profile_values["innerGasShare"],
+                "midGasShare": profile_values["midGasShare"],
+                "barCurv": profile_values["barCurv"],
+                "pointDensity": profile_values["pointDensity"],
+                "mBar_1e9Msun": mass_features["mBar_1e9Msun"],
+                "tableGasFraction": mass_features["tableGasFraction"],
+                "rHiOverRdisk": mass_features["rHiOverRdisk"],
+                "above20Candidate": candidate["rmse"] >= 20.0,
+                "above20V1826": v1826_score["rmse"] >= 20.0,
+                "protectedRegressionKmS": max(0.0, candidate["rmse"] - v1826_score["rmse"]) if set_label == "clean-protected" else "",
+                "routeChangedVsV1826": candidate.get("candidateRoute", "") != v1826_score.get("candidateRoute", ""),
+            }
+        )
+    return rows
+
+
+def v18_nfw_overshelf_metric(rows: list[dict], split_filter: str | None = None) -> dict:
+    selected = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+    if split_filter:
+        selected = [row for row in selected if row.get("split") == split_filter]
+    high = [row for row in selected if row["set"] == "clean-high-rmse"]
+    protected = [row for row in selected if row["set"] == "clean-protected"]
+    targets = [row for row in high if parse_bool(row.get("overshelfTarget"))]
+    guard = [row for row in high if parse_bool(row.get("radialTransferGuard"))]
+    protected_regs = [parse_float(row.get("protectedRegressionKmS"), 0.0) for row in protected]
+    v1826_high = safe_mean(parse_float(row["v18_26Rmse"]) for row in high)
+    cand_high = safe_mean(parse_float(row["candidateRmse"]) for row in high)
+    v1826_target = safe_mean(parse_float(row["v18_26Rmse"]) for row in targets)
+    cand_target = safe_mean(parse_float(row["candidateRmse"]) for row in targets)
+    return {
+        "split": split_filter or "all-clean",
+        "cleanHighCount": len(high),
+        "targetCount": len(targets),
+        "protectedCount": len(protected),
+        "v1826HighMeanRmse": v1826_high,
+        "candidateHighMeanRmse": cand_high,
+        "highGainVsV1826Pct": pct_improvement(v1826_high, cand_high),
+        "v1826TargetMeanRmse": v1826_target,
+        "candidateTargetMeanRmse": cand_target,
+        "targetGainVsV1826Pct": pct_improvement(v1826_target, cand_target),
+        "targetGainVsV1826KmS": v1826_target - cand_target if math.isfinite(v1826_target) and math.isfinite(cand_target) else math.nan,
+        "guardRegressionKmS": max([parse_float(row["candidateRegressionVsV1826KmS"], 0.0) for row in guard] or [0.0]),
+        "highAbove20Candidate": sum(1 for row in high if parse_bool(row["above20Candidate"])),
+        "protectedMaxRegressionKmS": max(protected_regs or [0.0]),
+        "protectedRegressionOver2Count": sum(1 for value in protected_regs if value > 2.0),
+        "weakSystematicsLeakage": sum(1 for row in rows if row["set"] == "weak-systematics-excluded" and parse_float(row["anyActivation"], 0.0) >= 0.05),
+        "activeHighCount": sum(1 for row in high if parse_float(row["anyActivation"], 0.0) >= 0.05),
+        "activeProtectedCount": sum(1 for row in protected if parse_float(row["anyActivation"], 0.0) >= 0.05),
+        "routeChangedCount": sum(1 for row in selected if parse_bool(row["routeChangedVsV1826"])),
+    }
+
+
+def v18_nfw_overshelf_select_strengths(
+    base: dict,
+    target_names: set[str],
+    target_rows_by_name: dict[str, dict],
+    radial_transfer_strength: float,
+    train_names: set[str],
+    holdout_names: set[str],
+) -> tuple[dict[str, float], list[dict]]:
+    trial_rows: list[dict] = []
+    best_strengths = {branch: 0.0 for branch in V18_NFW_OVERSHELF_BRANCHES}
+    best_utility = -math.inf
+    for low_strength in V18_NFW_OVERSHELF_BETA_GRID:
+        for buffered_strength in V18_NFW_OVERSHELF_BETA_GRID:
+            for compact_strength in V18_NFW_OVERSHELF_BETA_GRID:
+                strengths = {
+                    "lowLoadMidOuterShelfSuppression": low_strength,
+                    "bufferedMidOuterShelfSuppression": buffered_strength,
+                    "lowLoadCompactShelfCap": compact_strength,
+                }
+                rows = v18_nfw_overshelf_score_rows(
+                    base,
+                    strengths,
+                    target_names,
+                    target_rows_by_name,
+                    radial_transfer_strength,
+                    (train_names, holdout_names),
+                )
+                train_metric = v18_nfw_overshelf_metric(rows, "train")
+                holdout_metric = v18_nfw_overshelf_metric(rows, "holdout")
+                utility = (
+                    parse_float(train_metric["targetGainVsV1826Pct"], -50.0)
+                    + 0.45 * parse_float(train_metric["highGainVsV1826Pct"], -50.0)
+                    - 20.0 * max(0.0, parse_float(train_metric["protectedMaxRegressionKmS"], 0.0) - 0.5)
+                    - 25.0 * max(0.0, parse_float(train_metric["guardRegressionKmS"], 0.0) - 0.5)
+                    - 40.0 * train_metric["highAbove20Candidate"]
+                    - 20.0 * train_metric["routeChangedCount"]
+                )
+                trial_rows.append(
+                    {
+                        "lowLoadMidOuterShelfSuppressionBeta": low_strength,
+                        "bufferedMidOuterShelfSuppressionBeta": buffered_strength,
+                        "lowLoadCompactShelfCapBeta": compact_strength,
+                        "trainTargetGainVsV1826Pct": train_metric["targetGainVsV1826Pct"],
+                        "trainHighGainVsV1826Pct": train_metric["highGainVsV1826Pct"],
+                        "trainProtectedMaxRegressionKmS": train_metric["protectedMaxRegressionKmS"],
+                        "trainGuardRegressionKmS": train_metric["guardRegressionKmS"],
+                        "trainRouteChangedCount": train_metric["routeChangedCount"],
+                        "holdoutTargetGainVsV1826Pct": holdout_metric["targetGainVsV1826Pct"],
+                        "holdoutHighGainVsV1826Pct": holdout_metric["highGainVsV1826Pct"],
+                        "holdoutProtectedMaxRegressionKmS": holdout_metric["protectedMaxRegressionKmS"],
+                        "holdoutGuardRegressionKmS": holdout_metric["guardRegressionKmS"],
+                        "utility": utility,
+                    }
+                )
+                if (
+                    utility > best_utility
+                    and train_metric["protectedMaxRegressionKmS"] < 2.0
+                    and train_metric["guardRegressionKmS"] <= 1.0
+                    and train_metric["highAbove20Candidate"] == 0
+                    and train_metric["routeChangedCount"] == 0
+                ):
+                    best_utility = utility
+                    best_strengths = strengths
+    trial_rows.sort(
+        key=lambda row: (
+            -parse_float(row["utility"], -math.inf),
+            row["lowLoadMidOuterShelfSuppressionBeta"],
+            row["bufferedMidOuterShelfSuppressionBeta"],
+            row["lowLoadCompactShelfCapBeta"],
+        )
+    )
+    return best_strengths, trial_rows
+
+
+def v18_nfw_overshelf_null_rows(
+    base: dict,
+    strengths: dict[str, float],
+    target_names: set[str],
+    target_rows_by_name: dict[str, dict],
+    radial_transfer_strength: float,
+    reference_rows: list[dict],
+) -> list[dict]:
+    actual = {
+        row["galaxy"]: {branch: parse_float(row.get(f"{branch}Activation"), 0.0) for branch in V18_NFW_OVERSHELF_BRANCHES}
+        for row in reference_rows
+        if row["set"] != "weak-systematics-excluded"
+    }
+    active_values = {
+        branch: [
+            parse_float(row.get(f"{branch}Activation"), 0.0)
+            for row in reference_rows
+            if parse_float(strengths.get(branch), 0.0) > 0.0
+            and row["set"] != "weak-systematics-excluded"
+            and parse_float(row.get(f"{branch}Activation"), 0.0) >= 0.05
+        ]
+        for branch in V18_NFW_OVERSHELF_BRANCHES
+    }
+    route_for_branch = {
+        "lowLoadMidOuterShelfSuppression": "low-load",
+        "bufferedMidOuterShelfSuppression": "buffered single-crossing",
+        "lowLoadCompactShelfCap": "low-load",
+    }
+    by_route = {
+        route: [curve["name"] for curve in base["cleanCurves"] if curve["lockedModelRoute"] == route and curve["name"] not in target_names]
+        for route in sorted({curve["lockedModelRoute"] for curve in base["cleanCurves"]})
+    }
+    output: list[dict] = []
+    for seed in V18_NFW_OVERSHELF_SEEDS:
+        rng = random.Random(seed)
+        names = sorted(actual)
+        shuffled_values = list(actual.values())
+        rng.shuffle(shuffled_values)
+        forced = dict(zip(names, shuffled_values))
+        rows = v18_nfw_overshelf_score_rows(base, strengths, target_names, target_rows_by_name, radial_transfer_strength, None, forced)
+        metric = v18_nfw_overshelf_metric(rows)
+        output.append(
+            {
+                "nullType": "branch-label-shuffle",
+                "seed": seed,
+                "targetGainVsV1826Pct": metric["targetGainVsV1826Pct"],
+                "highGainVsV1826Pct": metric["highGainVsV1826Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "guardRegressionKmS": metric["guardRegressionKmS"],
+                "routeChangedCount": metric["routeChangedCount"],
+            }
+        )
+        forced = {}
+        for branch, values in active_values.items():
+            pool = by_route.get(route_for_branch[branch], [])[:]
+            rng.shuffle(pool)
+            for name, value in zip(pool, values):
+                forced.setdefault(name, {key: 0.0 for key in V18_NFW_OVERSHELF_BRANCHES})[branch] = value
+        rows = v18_nfw_overshelf_score_rows(base, strengths, target_names, target_rows_by_name, radial_transfer_strength, None, forced)
+        metric = v18_nfw_overshelf_metric(rows)
+        output.append(
+            {
+                "nullType": "same-active-count-route-random",
+                "seed": seed,
+                "targetGainVsV1826Pct": metric["targetGainVsV1826Pct"],
+                "highGainVsV1826Pct": metric["highGainVsV1826Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "guardRegressionKmS": metric["guardRegressionKmS"],
+                "routeChangedCount": metric["routeChangedCount"],
+            }
+        )
+        forced = {}
+        for branch, values in active_values.items():
+            route = route_for_branch[branch]
+            pool = [row["galaxy"] for row in reference_rows if row["set"] == "clean-protected" and row["lockedRoute"] == route]
+            rng.shuffle(pool)
+            for name, value in zip(pool, values):
+                forced.setdefault(name, {key: 0.0 for key in V18_NFW_OVERSHELF_BRANCHES})[branch] = value
+        rows = v18_nfw_overshelf_score_rows(base, strengths, target_names, target_rows_by_name, radial_transfer_strength, None, forced)
+        metric = v18_nfw_overshelf_metric(rows)
+        output.append(
+            {
+                "nullType": "protected-lookalike-branch-stress",
+                "seed": seed,
+                "targetGainVsV1826Pct": metric["targetGainVsV1826Pct"],
+                "highGainVsV1826Pct": metric["highGainVsV1826Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "guardRegressionKmS": metric["guardRegressionKmS"],
+                "routeChangedCount": metric["routeChangedCount"],
+            }
+        )
+    return output
+
+
+def write_v18_nfw_overshelf_candidate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_nfw_overshelf_candidate"
+    browser_capsule = write_v18_nfw_radial_transfer_browser_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_BROWSER_OUT)
+    candidate_capsule = json.loads((DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_OUT / "mts_v18_nfw_radial_transfer_candidate_capsule.json").read_text(encoding="utf-8"))
+    radial_transfer_strength = parse_float(candidate_capsule.get("selectedStrength"), 0.40)
+    base = v18_radial_phase_base_context()
+    train_names, holdout_names = observed_state_split(base["cleanCurves"], SPLIT_SEED, HOLDOUT_FRACTION)
+    target_names, target_rows_by_name = v18_nfw_overshelf_target_rows()
+    selected_strengths, trial_rows = v18_nfw_overshelf_select_strengths(
+        base,
+        target_names,
+        target_rows_by_name,
+        radial_transfer_strength,
+        train_names,
+        holdout_names,
+    )
+    rows = v18_nfw_overshelf_score_rows(base, selected_strengths, target_names, target_rows_by_name, radial_transfer_strength, (train_names, holdout_names))
+    all_metric = v18_nfw_overshelf_metric(rows)
+    train_metric = v18_nfw_overshelf_metric(rows, "train")
+    holdout_metric = v18_nfw_overshelf_metric(rows, "holdout")
+    null_rows = v18_nfw_overshelf_null_rows(base, selected_strengths, target_names, target_rows_by_name, radial_transfer_strength, rows)
+    best_null_target = max([parse_float(row["targetGainVsV1826Pct"]) for row in null_rows if math.isfinite(parse_float(row["targetGainVsV1826Pct"]))] or [0.0])
+    null_margin = all_metric["targetGainVsV1826Pct"] - best_null_target if math.isfinite(best_null_target) else math.nan
+
+    high_rows = [row for row in rows if row["set"] == "clean-high-rmse"]
+    target_rows = [row for row in high_rows if parse_bool(row["overshelfTarget"])]
+    protected_rows = [
+        row for row in rows
+        if row["set"] == "clean-protected"
+        and (parse_float(row["protectedRegressionKmS"], 0.0) > 0.0 or parse_float(row["anyActivation"], 0.0) >= 0.05)
+    ]
+    changed_rows = [row for row in high_rows if abs(parse_float(row["candidateGainVsV1826KmS"], 0.0)) > 0.05]
+    changed_rows.sort(key=lambda row: -parse_float(row["candidateGainVsV1826KmS"], 0.0))
+    branch_rows: list[dict] = []
+    for branch in V18_NFW_OVERSHELF_BRANCHES:
+        column = f"{branch}Activation"
+        active = [row for row in rows if parse_float(row.get(column), 0.0) >= 0.05]
+        active_high = [row for row in active if row["set"] == "clean-high-rmse"]
+        active_targets = [row for row in active_high if parse_bool(row.get("overshelfTarget"))]
+        active_protected = [row for row in active if row["set"] == "clean-protected"]
+        protected_regs = [parse_float(row.get("protectedRegressionKmS"), 0.0) for row in active_protected]
+        branch_rows.append(
+            {
+                "branch": branch,
+                "selectedBeta": selected_strengths[branch],
+                "activeCleanHighCount": len(active_high),
+                "activeTargetCount": len(active_targets),
+                "activeProtectedCount": len(active_protected),
+                "meanActivationHigh": safe_mean(parse_float(row.get(column), 0.0) for row in active_high),
+                "targetGainVsV1826Pct": pct_improvement(
+                    safe_mean(parse_float(row["v18_26Rmse"]) for row in active_targets),
+                    safe_mean(parse_float(row["candidateRmse"]) for row in active_targets),
+                ),
+                "protectedMaxRegressionKmS": max(protected_regs or [0.0]),
+            }
+        )
+    seed_rows: list[dict] = []
+    for seed in V18_NFW_OVERSHELF_SEEDS:
+        seed_train, seed_holdout = observed_state_split(base["cleanCurves"], seed, HOLDOUT_FRACTION)
+        seed_metric = v18_nfw_overshelf_metric(
+            v18_nfw_overshelf_score_rows(base, selected_strengths, target_names, target_rows_by_name, radial_transfer_strength, (seed_train, seed_holdout)),
+            "holdout",
+        )
+        seed_metric["seed"] = seed
+        seed_rows.append(seed_metric)
+
+    browser_summary = browser_capsule["summary"]
+    v1826_lock_ok = (
+        browser_summary["browserCacheParityMismatchCount"] == 0
+        and browser_summary["browserRouteMismatchCount"] == 0
+        and parse_float(browser_summary["v1826ProtectedMaxRegressionVsV1821KmS"], math.nan) == 0.0
+        and browser_summary["v1826HighAbove20"] == 0
+        and browser_summary["weakSystematicsLeakage"] == 0
+    )
+    passes = {
+        "baselineRemains21p90": round(parse_float(browser_summary["allGalaxyLockedMtsMeanRmse"]), 2) == 21.90,
+        "v1826LockUnchanged": v1826_lock_ok,
+        "targetGainAtLeast15Pct": all_metric["targetGainVsV1826Pct"] >= 15.0,
+        "highGainAtLeast2Pct": all_metric["highGainVsV1826Pct"] >= 2.0,
+        "ugc07399RegressionNoMoreThan1": all_metric["guardRegressionKmS"] <= 1.0,
+        "highAbove20Zero": all_metric["highAbove20Candidate"] == 0,
+        "protectedRegressionBelow2": all_metric["protectedMaxRegressionKmS"] < 2.0,
+        "routeChangesZero": all_metric["routeChangedCount"] == 0,
+        "weakLeakageZero": all_metric["weakSystematicsLeakage"] == 0,
+        "nullMarginAtLeast10Pct": math.isfinite(null_margin) and null_margin >= 10.0,
+    }
+    verdict = "v18.27 oversupport-shelf candidate for review" if all(passes.values()) else "v18.27 oversupport-shelf candidate not promoted"
+
+    score_row = {
+        "candidateId": "observed-state-response-v18.27-nfw-oversupport-shelf-candidate",
+        "verdict": verdict,
+        "selectedLowLoadMidOuterShelfSuppressionBeta": selected_strengths["lowLoadMidOuterShelfSuppression"],
+        "selectedBufferedMidOuterShelfSuppressionBeta": selected_strengths["bufferedMidOuterShelfSuppression"],
+        "selectedLowLoadCompactShelfCapBeta": selected_strengths["lowLoadCompactShelfCap"],
+        "v1826HighGainPct": browser_summary["v1826HighGainPct"],
+        "v1826CleanGainPct": browser_summary["v1826CleanGainPct"],
+        "candidateHighGainVsV1826Pct": all_metric["highGainVsV1826Pct"],
+        "candidateTargetGainVsV1826Pct": all_metric["targetGainVsV1826Pct"],
+        "candidateTargetGainVsV1826KmS": all_metric["targetGainVsV1826KmS"],
+        "holdoutTargetGainVsV1826Pct": holdout_metric["targetGainVsV1826Pct"],
+        "candidateProtectedMaxRegressionKmS": all_metric["protectedMaxRegressionKmS"],
+        "ugc07399RegressionKmS": all_metric["guardRegressionKmS"],
+        "candidateHighAbove20": all_metric["highAbove20Candidate"],
+        "routeChangedCount": all_metric["routeChangedCount"],
+        "weakSystematicsLeakage": all_metric["weakSystematicsLeakage"],
+        "bestNullTargetGainVsV1826Pct": best_null_target,
+        "nullMarginTargetPct": null_margin,
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_row])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", rows)
+    write_csv(out_dir / f"{prefix}_branch_ledger.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", target_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_holdout_replay.csv", seed_rows)
+    write_csv(out_dir / f"{prefix}_strength_trials.csv", trial_rows[:80])
+    formula = {
+        "candidateId": "observed-state-response-v18.27-nfw-oversupport-shelf-candidate",
+        "status": verdict,
+        "baseLaw": "locked v18.26 radial-transfer candidate",
+        "selectedBetas": selected_strengths,
+        "mechanism": "radial support reshaping: S_v18.27(r) = S_v18.26(r) * (1 - beta * activation * shelf_shape(x))",
+        "branches": {
+            "lowLoadMidOuterShelfSuppression": "gas-rich compact low-load shelf state; strongest on F563/F574-like state",
+            "bufferedMidOuterShelfSuppression": "buffered mid/outer shelf state with diffuse stellar shelf or dense gas shelf paths",
+            "lowLoadCompactShelfCap": "stricter compact-shelf cap for NGC4157/NGC4013-like states",
+        },
+        "allowedInputs": [
+            "locked route",
+            "memoryLoad",
+            "u_0.75",
+            "u_out",
+            "u_max",
+            "gas fraction",
+            "h/rOut",
+            "baryonic mass scale",
+            "inner/mid/outer baryonic shares",
+            "bar curvature",
+            "point density",
+        ],
+        "forbiddenInputs": ["galaxy names", "NFW parameters", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.27 NFW Oversupport-Shelf Candidate",
+        "",
+        "This is a direct candidate-law test on top of locked v18.26. It attacks the remaining mid/outer oversupport shelf gap without using NFW parameters or galaxy-name lookup in the formula.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Selected beta values: low-load shelf `{fmt(selected_strengths['lowLoadMidOuterShelfSuppression'])}`, buffered shelf `{fmt(selected_strengths['bufferedMidOuterShelfSuppression'])}`, compact cap `{fmt(selected_strengths['lowLoadCompactShelfCap'])}`.",
+        f"- Target oversupport/shelf gain over v18.26: `{fmt(all_metric['targetGainVsV1826Pct'])}%` / `{fmt(all_metric['targetGainVsV1826KmS'])}` km/s.",
+        f"- Clean high-RMSE gain over v18.26: `{fmt(all_metric['highGainVsV1826Pct'])}%`.",
+        f"- UGC07399 regression: `{fmt(all_metric['guardRegressionKmS'])}` km/s.",
+        f"- Protected max regression: `{fmt(all_metric['protectedMaxRegressionKmS'])}` km/s.",
+        f"- Route changes: `{all_metric['routeChangedCount']}`.",
+        f"- High above 20 km/s: `{all_metric['highAbove20Candidate']}`.",
+        f"- Weak/systematics leakage: `{all_metric['weakSystematicsLeakage']}`.",
+        f"- Best null target gain: `{fmt(best_null_target)}%`.",
+        f"- Target null margin: `{fmt(null_margin)}` points.",
+        "",
+        "## Changed High-RMSE Cases",
+        "",
+        "| Galaxy | Route | Target | v18.26 RMSE | candidate RMSE | gain | branch |",
+        "| --- | --- | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for row in changed_rows[:30]:
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | `{row['overshelfTarget']}` | {fmt(row['v18_26Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['candidateGainVsV1826KmS'])} | {row['branchHits']} |"
+        )
+    report.extend(["", "## Acceptance Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.extend(
+        [
+            "",
+            "## Guardrails",
+            "",
+            "- v18.26 remains the browser-locked candidate unless v18.27 passes every gate.",
+            "- Target names are evaluation labels only; the formula uses state/profile variables.",
+            "- NFW-prior fits are competitor-gap measurements only and do not enter the MTS formula.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-nfw-overshelf-candidate-v1",
+        "verdict": verdict,
+        "selectedStrengths": selected_strengths,
+        "summary": {**score_row, "passes": passes},
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_branch_ledger.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_holdout_replay.csv",
+            f"{prefix}_strength_trials.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18nfwovershelfcandidate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NFW_OVERSHELF_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_nfw_overshelf_candidate_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.27 NFW oversupport-shelf candidate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"target_gain_vs_v1826={fmt(summary['candidateTargetGainVsV1826Pct'])}%",
+                f"high_gain_vs_v1826={fmt(summary['candidateHighGainVsV1826Pct'])}%",
+                f"protected={fmt(summary['candidateProtectedMaxRegressionKmS'])}",
+                f"ugc07399_reg={fmt(summary['ugc07399RegressionKmS'])}",
+                f"above20={summary['candidateHighAbove20']}",
+                f"null_margin={fmt(summary['nullMarginTargetPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18.27 NFW oversupport-shelf candidate to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -83125,6 +83821,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwradialtransfermerge",
             "v18nfwradialtransferbrowserlock",
             "observedstatev18nfwradialtransferbrowserlock",
+            "v18nfwovershelfcandidate",
+            "observedstatev18nfwovershelfcandidate",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -83437,6 +84135,8 @@ def main() -> None:
         cmd_v18nfwradialtransfermerge(args)
     elif args.mode in {"v18nfwradialtransferbrowserlock", "observedstatev18nfwradialtransferbrowserlock"}:
         cmd_v18nfwradialtransferbrowserlock(args)
+    elif args.mode in {"v18nfwovershelfcandidate", "observedstatev18nfwovershelfcandidate"}:
+        cmd_v18nfwovershelfcandidate(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
