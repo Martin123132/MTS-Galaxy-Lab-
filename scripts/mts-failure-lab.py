@@ -211,6 +211,8 @@ DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-pr
 DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-ml-provenance-v1")
 DEFAULT_OBSERVED_STATE_V18_ML_SOURCE_ACCEPTANCE_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-source-acceptance-v1"
 DEFAULT_OBSERVED_STATE_V18_ML_SOURCE_ACCEPTANCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-ml-source-acceptance-v1")
+DEFAULT_OBSERVED_STATE_V18_ML_TABLE_HUNT_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-table-hunt-v1"
+DEFAULT_OBSERVED_STATE_V18_ML_TABLE_HUNT_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-ml-table-hunt-v1")
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -73557,6 +73559,21 @@ def v18_ml_acceptance_numeric_values(snippet: str) -> list[float]:
     values: list[float] = []
     for pattern in V18_ML_ACCEPTANCE_NUMERIC_PATTERNS:
         for match in pattern.finditer(snippet):
+            match_text = match.group(0).lower()
+            if any(
+                token in match_text
+                for token in [
+                    "free parameter",
+                    "halo parameter",
+                    "fig.",
+                    "figure",
+                    "contour",
+                    "sigma",
+                    "km/s",
+                    "atoms/cm",
+                ]
+            ):
+                continue
             try:
                 value = float(match.group(1))
             except (TypeError, ValueError):
@@ -73844,6 +73861,411 @@ def cmd_v18mlsourceacceptance(args: argparse.Namespace) -> None:
         )
     )
     print(f"Wrote v18 M/L source acceptance to {out_dir.resolve()}")
+
+
+V18_ML_TABLE_HUNT_SOURCE_REGISTRY = [
+    {
+        "sourceId": "noordermeer-2007-rotation-html",
+        "referenceCode": "No07",
+        "sourceFamily": "Noordermeer 2007 rotation curves",
+        "url": "https://oup.silverchair-cdn.com/article-minimal/1014139",
+        "role": "paper-html",
+        "suffix": "html",
+        "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+        "evidenceClass": "rotation-curve paper; mass models explicitly deferred",
+    },
+    {
+        "sourceId": "noordermeer-2007-photometry-html",
+        "referenceCode": "No07-phot",
+        "sourceFamily": "Noordermeer & van der Hulst 2007 photometry/decomposition",
+        "url": "https://oup.silverchair-cdn.com/article-minimal/1013997",
+        "role": "paper-html",
+        "suffix": "html",
+        "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+        "evidenceClass": "photometry and bulge-disc decomposition paper",
+    },
+    {
+        "sourceId": "noordermeer-2003-arxiv-html",
+        "referenceCode": "No03-conf",
+        "sourceFamily": "Noordermeer early-type disk mass-distribution proceedings",
+        "url": "https://arxiv.org/abs/astro-ph/0310868",
+        "role": "paper-html",
+        "suffix": "html",
+        "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+        "evidenceClass": "proceedings lead; UGC 9133 M/L limits mentioned",
+    },
+    {
+        "sourceId": "noordermeer-2003-arxiv-pdf",
+        "referenceCode": "No03-conf",
+        "sourceFamily": "Noordermeer early-type disk mass-distribution proceedings",
+        "url": "https://arxiv.org/pdf/astro-ph/0310868",
+        "role": "paper-pdf",
+        "suffix": "pdf",
+        "maxBytes": V21_SOURCE_MAX_PDF_BYTES,
+        "evidenceClass": "proceedings PDF; possible UGC 9133 M/L limits",
+    },
+    {
+        "sourceId": "sanders-noordermeer-2007-mond-html",
+        "referenceCode": "SN07-MOND",
+        "sourceFamily": "Sanders & Noordermeer 2007 MOND fit",
+        "url": "https://arxiv.org/abs/astro-ph/0703352",
+        "role": "paper-html",
+        "suffix": "html",
+        "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+        "evidenceClass": "dynamical MOND fitted M/L values; competitor evidence only",
+    },
+    {
+        "sourceId": "sanders-noordermeer-2007-mond-pdf",
+        "referenceCode": "SN07-MOND",
+        "sourceFamily": "Sanders & Noordermeer 2007 MOND fit",
+        "url": "https://arxiv.org/pdf/astro-ph/0703352",
+        "role": "paper-pdf",
+        "suffix": "pdf",
+        "maxBytes": V21_SOURCE_MAX_PDF_BYTES,
+        "evidenceClass": "dynamical MOND fitted M/L values; competitor evidence only",
+    },
+    {
+        "sourceId": "noordermeer-verheijen-2007-tf-pdf",
+        "referenceCode": "NV07-TF",
+        "sourceFamily": "Noordermeer & Verheijen 2007 Tully-Fisher",
+        "url": "https://adsabs.harvard.edu/pdf/2007MNRAS.381.1463N",
+        "role": "paper-pdf",
+        "suffix": "pdf",
+        "maxBytes": V21_SOURCE_MAX_PDF_BYTES,
+        "evidenceClass": "global K-band M/L convention; not per-galaxy prior",
+    },
+    {
+        "sourceId": "deblok-mcgaugh-1997-html",
+        "referenceCode": "dB97",
+        "sourceFamily": "de Blok & McGaugh 1997 LSB mass models",
+        "url": "https://academic.oup.com/mnras/article/290/3/533/996157",
+        "role": "paper-html",
+        "suffix": "html",
+        "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+        "evidenceClass": "LSB mass models; may include fitted M/L assumptions",
+    },
+    {
+        "sourceId": "deblok-mcgaugh-1997-arxiv-html",
+        "referenceCode": "dB97",
+        "sourceFamily": "de Blok & McGaugh 1997 LSB mass models",
+        "url": "https://arxiv.org/abs/astro-ph/9704274",
+        "role": "paper-html",
+        "suffix": "html",
+        "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+        "evidenceClass": "LSB mass models arXiv source",
+    },
+    {
+        "sourceId": "deblok-mcgaugh-1997-arxiv-pdf",
+        "referenceCode": "dB97",
+        "sourceFamily": "de Blok & McGaugh 1997 LSB mass models",
+        "url": "https://arxiv.org/pdf/astro-ph/9704274",
+        "role": "paper-pdf",
+        "suffix": "pdf",
+        "maxBytes": V21_SOURCE_MAX_PDF_BYTES,
+        "evidenceClass": "LSB mass models arXiv PDF",
+    },
+    {
+        "sourceId": "whisp-aa-442-137-readme",
+        "referenceCode": "No05",
+        "sourceFamily": "WHISP Noordermeer 2005 CDS",
+        "url": "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/A+A/442/137?format=html&tex=true",
+        "role": "cds-readme-html",
+        "suffix": "html",
+        "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+        "evidenceClass": "HI/photometry catalogue metadata; not expected to contain stellar M/L",
+    },
+]
+
+V18_ML_TABLE_HUNT_ALIASES = {
+    "UGC09133": ["UGC09133", "UGC 9133", "UGC9133", "NGC5533", "NGC 5533"],
+    "UGC06786": ["UGC06786", "UGC 6786", "UGC6786"],
+    "UGC03205": ["UGC03205", "UGC 3205", "UGC3205"],
+    "F561-1": ["F561-1", "F 561-1", "F561"],
+    "NGC5033": ["NGC5033", "NGC 5033"],
+}
+
+
+def v18_ml_table_hunt_download_inventory(source_cache: Path, offline: bool) -> list[dict]:
+    rows = []
+    for source in V18_ML_TABLE_HUNT_SOURCE_REGISTRY:
+        path = source_cache / source["role"] / f"{safe_file_stem(source['sourceId'])}.{source['suffix']}"
+        if not offline:
+            v21_source_download(source["url"], path, int(source["maxBytes"]), offline)
+        exists = path.exists()
+        rows.append(
+            {
+                **source,
+                "cachePath": str(path),
+                "cacheStatus": "available" if exists else "missing",
+                "downloaded": False,
+                "sizeBytes": path.stat().st_size if exists else "",
+                "sha256": file_sha256(path) if exists else "",
+                "largeDownloadAllowed": False,
+            }
+        )
+    rows.sort(key=lambda row: (row["referenceCode"], row["sourceId"]))
+    return rows
+
+
+def v18_ml_table_hunt_source_text(row: dict, offline: bool) -> tuple[str, str]:
+    path = Path(row["cachePath"])
+    if not path.exists():
+        return "", "missing"
+    if row["role"] == "paper-pdf" or path.suffix.lower() == ".pdf":
+        return v21_source_pdf_text(path, offline)
+    return v21_metadata_cached_text(str(path)), "html/text"
+
+
+def v18_ml_table_hunt_target_rows() -> list[dict]:
+    if not (DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_OUT / "mts_v18_ml_provenance_source_targets.csv").exists():
+        write_v18_ml_provenance_artifacts(DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_OUT, DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_CACHE, True)
+    rows = read_csv_rows(DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_OUT / "mts_v18_ml_provenance_source_targets.csv")
+    return [row for row in rows if parse_float(row.get("coreFailureCount"), 0.0) > 0]
+
+
+def v18_ml_table_hunt_snippets(text: str, galaxy: str) -> list[dict]:
+    aliases = V18_ML_TABLE_HUNT_ALIASES.get(galaxy, [galaxy])
+    lower = text.lower()
+    centers: list[tuple[str, int]] = []
+    for alias in aliases:
+        needle = alias.lower()
+        start = 0
+        while needle:
+            index = lower.find(needle, start)
+            if index < 0:
+                break
+            centers.append(("case", index))
+            start = index + max(1, len(needle))
+    for pattern in V18_ML_ACCEPTANCE_NUMERIC_PATTERNS:
+        for match in pattern.finditer(text):
+            centers.append(("ml", match.start()))
+    rows = []
+    used = set()
+    for scope_hint, center in centers[:120]:
+        start = max(0, center - 900)
+        end = min(len(text), center + 900)
+        key = (start, end)
+        if key in used:
+            continue
+        used.add(key)
+        snippet = text[start:end].strip()
+        values = v18_ml_acceptance_numeric_values(snippet)
+        if not values:
+            continue
+        snippet_lower = snippet.lower()
+        case_specific = any(alias.lower() in snippet_lower for alias in aliases)
+        rows.append(
+            {
+                "scopeHint": scope_hint,
+                "caseSpecific": case_specific,
+                "numericMlValues": "; ".join(fmt_num(value) for value in values),
+                "numericMlValueCount": len(values),
+                "snippet": snippet[:1200],
+            }
+        )
+    return rows
+
+
+def v18_ml_table_hunt_classification(source_row: dict, snippet_row: dict) -> tuple[str, bool, str]:
+    evidence = source_row.get("evidenceClass", "").lower()
+    text = snippet_row.get("snippet", "").lower()
+    case_specific = parse_bool(snippet_row.get("caseSpecific"))
+    if "mond" in evidence or "mond" in text:
+        return "dynamical-fitted M/L; competitor evidence only", False, "MOND/dynamical fitted M/L cannot be used as independent MTS transport input."
+    if "global" in evidence or "assuming an average" in text or "constant mass-to-light" in text:
+        return "global M/L convention; not per-galaxy prior", False, "Global convention can be used as context, not as a per-galaxy repair."
+    if not case_specific:
+        return "source-wide numeric M/L context", False, "No case-specific numeric M/L value."
+    if any(term in text for term in ["maximum disc", "maximum disk", "fit", "fitted", "mond", "halo"]):
+        return "dynamical/model-fitted case M/L", False, "Case-specific but model-fitted; not an independent stellar-population prior."
+    return "candidate independent per-galaxy M/L prior", True, "Manual confirmation required before rescore."
+
+
+def v18_ml_table_hunt_numeric_rows(target_rows: list[dict], fetch_rows: list[dict], offline: bool) -> tuple[list[dict], dict]:
+    rows = []
+    parsers = set()
+    for source in fetch_rows:
+        if source["cacheStatus"] != "available":
+            continue
+        text, parser = v18_ml_table_hunt_source_text(source, offline)
+        if parser:
+            parsers.add(parser)
+        if not text:
+            continue
+        for target in target_rows:
+            for snippet in v18_ml_table_hunt_snippets(text, target["galaxy"]):
+                classification, usable, reason = v18_ml_table_hunt_classification(source, snippet)
+                rows.append(
+                    {
+                        "galaxy": target["galaxy"],
+                        "aliases": "; ".join(V18_ML_TABLE_HUNT_ALIASES.get(target["galaxy"], [target["galaxy"]])),
+                        "failureDirection": target.get("failureDirection", ""),
+                        "referenceCode": source["referenceCode"],
+                        "sourceId": source["sourceId"],
+                        "sourceFamily": source["sourceFamily"],
+                        "sourceRole": source["role"],
+                        "sourcePath": source["cachePath"],
+                        "sourceUrl": source["url"],
+                        "parser": parser,
+                        "caseSpecific": snippet["caseSpecific"],
+                        "numericMlValues": snippet["numericMlValues"],
+                        "numericMlValueCount": snippet["numericMlValueCount"],
+                        "evidenceClassification": classification,
+                        "usableForMtsRescore": usable,
+                        "reasonNotUsable": "" if usable else reason,
+                        "snippet": snippet["snippet"],
+                    }
+                )
+    rows.sort(key=lambda row: (row["galaxy"], str(not parse_bool(row["usableForMtsRescore"])), row["sourceId"]))
+    return rows, {"parsers": "; ".join(sorted(parsers))}
+
+
+def v18_ml_table_hunt_case_verdict_rows(target_rows: list[dict], numeric_rows: list[dict]) -> list[dict]:
+    by_galaxy: dict[str, list[dict]] = {}
+    for row in numeric_rows:
+        by_galaxy.setdefault(row["galaxy"], []).append(row)
+    rows = []
+    for target in target_rows:
+        items = by_galaxy.get(target["galaxy"], [])
+        usable = [row for row in items if parse_bool(row.get("usableForMtsRescore"))]
+        fitted = [row for row in items if "fitted" in row.get("evidenceClassification", "")]
+        global_rows = [row for row in items if "global" in row.get("evidenceClassification", "")]
+        source_wide = [row for row in items if "source-wide" in row.get("evidenceClassification", "")]
+        if usable:
+            verdict = "source-table M/L candidate found"
+            next_action = "Run provenance-backed M/L rescore after manual confirmation."
+        elif fitted:
+            verdict = "only dynamical fitted M/L found"
+            next_action = "Keep out of MTS formula; use only as competitor/context evidence."
+        elif global_rows or source_wide:
+            verdict = "only global/source-wide M/L context found"
+            next_action = "Do not use for per-galaxy M/L repair."
+        else:
+            verdict = "no numeric M/L table value found"
+            next_action = "Keep as calibration-boundary limitation unless new table appears."
+        rows.append(
+            {
+                "galaxy": target["galaxy"],
+                "lockedRoute": target.get("lockedRoute", ""),
+                "failureDirection": target.get("failureDirection", ""),
+                "coreFailureCount": target.get("coreFailureCount", ""),
+                "usablePerGalaxyMlCount": len(usable),
+                "dynamicalFittedMlCount": len(fitted),
+                "globalOrSourceWideMlCount": len(global_rows) + len(source_wide),
+                "verdict": verdict,
+                "nextAction": next_action,
+            }
+        )
+    return rows
+
+
+def write_v18_ml_table_hunt_artifacts(out_dir: Path, source_cache: Path, offline: bool) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source_cache.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_ml_table_hunt"
+    target_rows = v18_ml_table_hunt_target_rows()
+    fetch_rows = v18_ml_table_hunt_download_inventory(source_cache, offline)
+    numeric_rows, parse_meta = v18_ml_table_hunt_numeric_rows(target_rows, fetch_rows, offline)
+    verdict_rows = v18_ml_table_hunt_case_verdict_rows(target_rows, numeric_rows)
+    usable_cases = sum(1 for row in verdict_rows if parse_float(row["usablePerGalaxyMlCount"], 0.0) > 0)
+    fitted_cases = sum(1 for row in verdict_rows if parse_float(row["dynamicalFittedMlCount"], 0.0) > 0)
+    verdict = "usable source-table M/L found" if usable_cases else ("dynamical/global M/L only" if numeric_rows else "no numeric source-table M/L found")
+    score_rows = [
+        {"metric": "verdict", "value": verdict},
+        {"metric": "targetCount", "value": len(target_rows)},
+        {"metric": "sourceRegistryCount", "value": len(V18_ML_TABLE_HUNT_SOURCE_REGISTRY)},
+        {"metric": "cachedSourceCount", "value": sum(1 for row in fetch_rows if row["cacheStatus"] == "available")},
+        {"metric": "numericMlSnippetCount", "value": len(numeric_rows)},
+        {"metric": "usablePerGalaxyMlCaseCount", "value": usable_cases},
+        {"metric": "dynamicalFittedMlCaseCount", "value": fitted_cases},
+        {"metric": "weakSystematicsLeakage", "value": 0},
+    ]
+    write_csv(out_dir / f"{prefix}_source_registry.csv", V18_ML_TABLE_HUNT_SOURCE_REGISTRY)
+    write_csv(out_dir / f"{prefix}_fetch_inventory.csv", fetch_rows)
+    write_csv(out_dir / f"{prefix}_numeric_evidence.csv", numeric_rows)
+    write_csv(out_dir / f"{prefix}_case_verdicts.csv", verdict_rows)
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    report = [
+        "# MTS v18.36 M/L Table Hunt",
+        "",
+        "This mode actively hunts for real external numeric M/L values in bounded papers, arXiv pages, ADS PDFs, and CDS pages for the five v18 M/L-boundary cases. It does not change v18.26.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Targets: `{len(target_rows)}`.",
+        f"- Source registry entries: `{len(V18_ML_TABLE_HUNT_SOURCE_REGISTRY)}`.",
+        f"- Cached source rows: `{sum(1 for row in fetch_rows if row['cacheStatus'] == 'available')}`.",
+        f"- Numeric M/L snippets: `{len(numeric_rows)}`.",
+        f"- Usable per-galaxy M/L cases: `{usable_cases}`.",
+        f"- Parser: `{parse_meta.get('parsers', '') or 'none'}`.",
+        "",
+        "## Case Verdicts",
+        "",
+        "| Galaxy | Direction | Usable M/L | Fitted M/L | Global/source-wide | Verdict | Next action |",
+        "| --- | --- | ---: | ---: | ---: | --- | --- |",
+    ]
+    for row in verdict_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['failureDirection']} | {row['usablePerGalaxyMlCount']} | {row['dynamicalFittedMlCount']} | {row['globalOrSourceWideMlCount']} | {row['verdict']} | {row['nextAction']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Rule",
+            "",
+            "Only independent, case-specific numeric stellar M/L values are eligible for a future MTS rescore. MOND/NFW/maximum-disc fitted M/L values and global constant M/L conventions are recorded as context but are not allowed as MTS formula inputs.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-ml-table-hunt-v1",
+        "verdict": verdict,
+        "summary": {
+            "targetCount": len(target_rows),
+            "sourceRegistryCount": len(V18_ML_TABLE_HUNT_SOURCE_REGISTRY),
+            "cachedSourceCount": sum(1 for row in fetch_rows if row["cacheStatus"] == "available"),
+            "numericMlSnippetCount": len(numeric_rows),
+            "usablePerGalaxyMlCaseCount": usable_cases,
+            "dynamicalFittedMlCaseCount": fitted_cases,
+            "lawChanged": False,
+            "weakSystematicsLeakage": 0,
+            "sourceCacheOnDDrive": str(source_cache).lower().startswith("d:"),
+        },
+        "sourceCache": str(source_cache),
+        "outputFiles": [
+            f"{prefix}_source_registry.csv",
+            f"{prefix}_fetch_inventory.csv",
+            f"{prefix}_numeric_evidence.csv",
+            f"{prefix}_case_verdicts.csv",
+            f"{prefix}_scores.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18mltablehunt(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_ML_TABLE_HUNT_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_OBSERVED_STATE_V18_ML_TABLE_HUNT_CACHE
+    capsule = write_v18_ml_table_hunt_artifacts(out_dir, source_cache, args.offline)
+    summary = capsule["summary"]
+    print("MTS v18.36 M/L table hunt")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"targets={summary['targetCount']}",
+                f"sources={summary['sourceRegistryCount']}",
+                f"cached={summary['cachedSourceCount']}",
+                f"numeric_snippets={summary['numericMlSnippetCount']}",
+                f"usable_ml_cases={summary['usablePerGalaxyMlCaseCount']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 M/L table hunt to {out_dir.resolve()}")
 
 
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
@@ -86914,6 +87336,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18mlprovenance",
             "v18mlsourceacceptance",
             "observedstatev18mlsourceacceptance",
+            "v18mltablehunt",
+            "observedstatev18mltablehunt",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -87244,6 +87668,8 @@ def main() -> None:
         cmd_v18mlprovenance(args)
     elif args.mode in {"v18mlsourceacceptance", "observedstatev18mlsourceacceptance"}:
         cmd_v18mlsourceacceptance(args)
+    elif args.mode in {"v18mltablehunt", "observedstatev18mltablehunt"}:
+        cmd_v18mltablehunt(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
