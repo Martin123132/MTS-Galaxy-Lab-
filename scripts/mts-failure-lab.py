@@ -195,6 +195,7 @@ DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-
 DEFAULT_OBSERVED_STATE_V18_NFW_TAIL_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-tail-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_PHASE_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-phase-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_ATTACK_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-gap-attack-ledger-v1"
+DEFAULT_OBSERVED_STATE_V18_NFW_SAFETY_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-safety-candidate-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -67831,6 +67832,691 @@ def cmd_v18nfwgapattack(args: argparse.Namespace) -> None:
     print(f"Wrote v18 NFW-gap attack ledger to {out_dir.resolve()}")
 
 
+V18_NFW_SAFETY_STRENGTH_GRID = [0.0, 0.05, 0.08, 0.12, 0.16, 0.22, 0.30]
+V18_NFW_SAFETY_SEEDS = [20260511, 20260512, 20260513, 20260514, 20260515, 314159, 271828, 42, 12345]
+
+
+def v18_nfw_safety_gate(features: Iterable[float], low: float = 0.48, high: float = 0.72) -> float:
+    clean = [clamp(parse_float(value, 0.0), 0.0, 1.0) for value in features]
+    if not clean:
+        return 0.0
+    return clamp(v18_nfw_gap_candidate_smooth(safe_mean(clean), low, high), 0.0, 1.0)
+
+
+def v18_nfw_safety_target_names() -> tuple[set[str], dict[str, dict]]:
+    attack_dir = DEFAULT_OBSERVED_STATE_V18_NFW_ATTACK_OUT
+    target_path = attack_dir / "mts_v18_nfw_gap_attack_next_law_targets.csv"
+    if not target_path.exists():
+        write_v18_nfw_gap_attack_artifacts(attack_dir)
+    rows = read_csv_rows(target_path)
+    target_rows = {
+        row["galaxy"]: row
+        for row in rows
+        if row.get("target", "") in {"law-facing support-safety gap", "law-facing shelf/tail gap"}
+    }
+    return set(target_rows), target_rows
+
+
+def v18_nfw_safety_activations(curve: dict, table1_by_name: dict[str, dict]) -> tuple[dict[str, float], dict, dict]:
+    values = observed_state_values(curve)
+    mass = v18_official_mass_scale_features(curve, table1_by_name)
+    route = curve.get("lockedModelRoute", "")
+    low_route = route == "low-load"
+    buffered_route = route == "buffered single-crossing"
+    u_out = curve.get("lockedModelUOut", math.nan)
+    u_max = curve.get("lockedModelUMax", math.nan)
+    memory_load = curve.get("memoryLoad", math.nan)
+    low_compact_shelf = (
+        v18_nfw_safety_gate(
+            [
+                v18_nfw_gap_candidate_smooth(memory_load, 7.2, 10.0),
+                v18_nfw_gap_candidate_smooth(0.39 - u_out, 0.0, 0.12),
+                v18_nfw_gap_candidate_smooth(u_max, 0.82, 1.02),
+                v18_nfw_gap_candidate_smooth(0.13 - values["hOverRout"], 0.0, 0.07),
+                v18_nfw_gap_candidate_smooth(values["outerDiskShare"], 0.55, 0.82),
+                v18_nfw_gap_candidate_smooth(0.32 - values["outerGasShare"], 0.0, 0.18),
+                v18_nfw_gap_candidate_smooth(mass["mBar_1e9Msun"], 28.0, 70.0),
+            ],
+            0.50,
+            0.74,
+        )
+        if low_route
+        else 0.0
+    )
+    buffered_massive_shelf = (
+        v18_nfw_safety_gate(
+            [
+                v18_nfw_gap_candidate_smooth(u_max, 1.05, 1.55),
+                v18_nfw_gap_candidate_smooth(0.18 - values["hOverRout"], 0.0, 0.11),
+                v18_nfw_gap_candidate_smooth(0.28 - values["outerGasShare"], 0.0, 0.22),
+                v18_nfw_gap_candidate_smooth(values["outerDiskShare"], 0.45, 0.86),
+                v18_nfw_gap_candidate_smooth(mass["mBar_1e9Msun"], 30.0, 95.0),
+                v18_nfw_gap_candidate_smooth(1.45 - values["pointDensity"], 0.0, 0.85),
+                v18_nfw_gap_candidate_smooth(abs(values["barCurv"]), 7.5, 55.0),
+            ],
+            0.43,
+            0.69,
+        )
+        if buffered_route
+        else 0.0
+    )
+    low_gas_rich_safety = (
+        v18_nfw_safety_gate(
+            [
+                v18_nfw_gap_candidate_smooth(u_max, 0.84, 1.02),
+                v18_nfw_gap_candidate_smooth(0.34 - u_out, 0.0, 0.14),
+                v18_nfw_gap_candidate_smooth(0.09 - values["hOverRout"], 0.0, 0.055),
+                v18_nfw_gap_candidate_smooth(values["outerGasShare"], 0.52, 0.72),
+                v18_nfw_gap_candidate_smooth(9.0 - mass["mBar_1e9Msun"], 0.0, 8.0),
+                v18_nfw_gap_candidate_smooth(values["pointDensity"], 2.0, 3.4),
+                v18_nfw_gap_candidate_smooth(mass["tableGasFraction"], 0.55, 0.78),
+            ],
+            0.50,
+            0.74,
+        )
+        if low_route
+        else 0.0
+    )
+    acts = {
+        "lowCompactShelfSafety": clamp(parse_float(low_compact_shelf), 0.0, 1.0),
+        "bufferedMassiveShelfSafety": clamp(parse_float(buffered_massive_shelf), 0.0, 1.0),
+        "lowGasRichSafety": clamp(parse_float(low_gas_rich_safety), 0.0, 1.0),
+    }
+    acts["anyActivation"] = max(acts.values())
+    return acts, values, mass
+
+
+def v18_nfw_safety_supports(
+    curve: dict,
+    v1821_supports: list[float],
+    strengths: dict[str, float],
+    table1_by_name: dict[str, dict],
+    forced_activations: dict[str, float] | None = None,
+) -> tuple[list[float], dict[str, float], dict, dict]:
+    if forced_activations is None:
+        acts, values, mass = v18_nfw_safety_activations(curve, table1_by_name)
+    else:
+        acts = {
+            "lowCompactShelfSafety": parse_float(forced_activations.get("lowCompactShelfSafety"), 0.0),
+            "bufferedMassiveShelfSafety": parse_float(forced_activations.get("bufferedMassiveShelfSafety"), 0.0),
+            "lowGasRichSafety": parse_float(forced_activations.get("lowGasRichSafety"), 0.0),
+        }
+        acts["anyActivation"] = max(acts.values())
+        values = observed_state_values(curve)
+        mass = v18_official_mass_scale_features(curve, table1_by_name)
+    output: list[float] = []
+    for point, support in zip(curve["points"], v1821_supports):
+        x_value = point.get("x", point["r"] / max(curve["rOut"], 1e-9))
+        inner_mid_shelf_shape = 0.88 - 0.36 * v18_nfw_gap_candidate_smooth(x_value, 0.55, 0.98)
+        outer_shelf_shape = 0.25 + 0.90 * v18_nfw_gap_candidate_smooth(x_value, 0.35, 0.96)
+        broad_safety_shape = 0.42 + 0.70 * v18_nfw_gap_candidate_smooth(x_value, 0.18, 0.92)
+        factor = 1.0
+        factor -= strengths["lowCompactShelf"] * acts["lowCompactShelfSafety"] * inner_mid_shelf_shape
+        factor -= strengths["bufferedMassiveShelf"] * acts["bufferedMassiveShelfSafety"] * outer_shelf_shape
+        factor -= strengths["lowGasRichSafety"] * acts["lowGasRichSafety"] * broad_safety_shape
+        if support > 0.0:
+            output.append(max(0.0, support * clamp(factor, 0.45, 1.05)))
+        else:
+            output.append(support)
+    return output, acts, values, mass
+
+
+def v18_nfw_safety_score_rows(
+    base: dict,
+    strengths: dict[str, float],
+    target_names: set[str],
+    target_rows_by_name: dict[str, dict],
+    split_names: tuple[set[str], set[str]] | None = None,
+    forced_by_name: dict[str, dict[str, float]] | None = None,
+) -> list[dict]:
+    train_names, holdout_names = split_names if split_names is not None else (set(), set())
+    rows: list[dict] = []
+    for curve in base["curves"]:
+        name = curve["name"]
+        v18_supports = [base["v18Lookup"][(name, index)] for index in range(len(curve["points"]))]
+        if name in base["weakNames"]:
+            v1821_supports = v18_supports[:]
+            candidate_supports = v1821_supports[:]
+            acts = {
+                "lowCompactShelfSafety": 0.0,
+                "bufferedMassiveShelfSafety": 0.0,
+                "lowGasRichSafety": 0.0,
+                "anyActivation": 0.0,
+            }
+            profile_values = observed_state_values(curve)
+            mass_features = v18_official_mass_scale_features(curve, base["table1ByName"])
+            radial_hits = ""
+        else:
+            v1821_supports, v1821_acts, _profile, _mass, _legacy, _legacy_family, _official_family = v18_radial_phase_supports(
+                curve,
+                v18_supports,
+                base["baseStrengths"],
+                base["table1ByName"],
+            )
+            forced = forced_by_name.get(name) if forced_by_name else None
+            candidate_supports, acts, profile_values, mass_features = v18_nfw_safety_supports(
+                curve,
+                v1821_supports,
+                strengths,
+                base["table1ByName"],
+                forced,
+            )
+            radial_hits = "; ".join(
+                family for family in V18_RADIAL_PHASE_STRENGTHS if parse_float(v1821_acts.get(family), 0.0) >= 0.20
+            )
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        v1821_score = v18_competitor_support_score(curve, v1821_supports)
+        candidate = v18_competitor_support_score(curve, candidate_supports)
+        set_label = v18_competitor_set_label(name, base["weakNames"], base["highNames"])
+        split = "weak-excluded" if name in base["weakNames"] else ("holdout" if name in holdout_names else "train" if name in train_names else "")
+        target_row = target_rows_by_name.get(name, {})
+        branch_hits = [
+            key
+            for key in ["lowCompactShelfSafety", "bufferedMassiveShelfSafety", "lowGasRichSafety"]
+            if parse_float(acts.get(key), 0.0) >= 0.05
+        ]
+        rows.append(
+            {
+                "galaxy": name,
+                "set": set_label,
+                "split": split,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "lawFacingSafetyTarget": name in target_names,
+                "attackClass": target_row.get("target", ""),
+                "shapeClass": target_row.get("shapeClass", ""),
+                "qualityCode": target_row.get("qualityCode", ""),
+                "canonicalRmse": canonical["rmse"],
+                "v18_21Rmse": v1821_score["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "candidateRoute": candidate.get("candidateRoute", ""),
+                "v18_21Route": v1821_score.get("candidateRoute", ""),
+                "candidateGainVsV1821KmS": v1821_score["rmse"] - candidate["rmse"],
+                "candidateGainVsV1821Pct": pct_improvement(v1821_score["rmse"], candidate["rmse"]),
+                "candidateRegressionVsV1821KmS": max(0.0, candidate["rmse"] - v1821_score["rmse"]),
+                "candidateGainVsCanonicalPct": pct_improvement(canonical["rmse"], candidate["rmse"]),
+                "lowCompactShelfSafetyActivation": acts["lowCompactShelfSafety"],
+                "bufferedMassiveShelfSafetyActivation": acts["bufferedMassiveShelfSafety"],
+                "lowGasRichSafetyActivation": acts["lowGasRichSafety"],
+                "anyActivation": acts["anyActivation"],
+                "branchHits": "; ".join(branch_hits),
+                "v1821RadialPhaseFamilies": radial_hits,
+                "memoryLoad": curve["memoryLoad"],
+                "uOut": curve["lockedModelUOut"],
+                "uMax": curve["lockedModelUMax"],
+                "hOverRout": profile_values["hOverRout"],
+                "outerGasShare": profile_values["outerGasShare"],
+                "outerDiskShare": profile_values["outerDiskShare"],
+                "barCurv": profile_values["barCurv"],
+                "pointDensity": profile_values["pointDensity"],
+                "mBar_1e9Msun": mass_features["mBar_1e9Msun"],
+                "tableGasFraction": mass_features["tableGasFraction"],
+                "rHiOverRdisk": mass_features["rHiOverRdisk"],
+                "sigmaBar_1e9MsunPerKpc2": mass_features["sigmaBar_1e9MsunPerKpc2"],
+                "above20Candidate": candidate["rmse"] >= 20.0,
+                "above20V1821": v1821_score["rmse"] >= 20.0,
+                "protectedRegressionKmS": max(0.0, candidate["rmse"] - v1821_score["rmse"]) if set_label == "clean-protected" else "",
+            }
+        )
+    return rows
+
+
+def v18_nfw_safety_metric(rows: list[dict], split_filter: str | None = None) -> dict:
+    selected = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+    if split_filter:
+        selected = [row for row in selected if row.get("split") == split_filter]
+    high = [row for row in selected if row["set"] == "clean-high-rmse"]
+    protected = [row for row in selected if row["set"] == "clean-protected"]
+    targets = [row for row in high if parse_bool(row.get("lawFacingSafetyTarget"))]
+    q1_targets = [row for row in targets if str(row.get("qualityCode")) in {"", "1", "1.0"}]
+    v1821_high_mean = safe_mean(parse_float(row["v18_21Rmse"]) for row in high)
+    cand_high_mean = safe_mean(parse_float(row["candidateRmse"]) for row in high)
+    v1821_target_mean = safe_mean(parse_float(row["v18_21Rmse"]) for row in targets)
+    cand_target_mean = safe_mean(parse_float(row["candidateRmse"]) for row in targets)
+    v1821_q1_target_mean = safe_mean(parse_float(row["v18_21Rmse"]) for row in q1_targets)
+    cand_q1_target_mean = safe_mean(parse_float(row["candidateRmse"]) for row in q1_targets)
+    protected_regs = [parse_float(row.get("protectedRegressionKmS"), 0.0) for row in protected]
+    return {
+        "split": split_filter or "all-clean",
+        "cleanHighCount": len(high),
+        "targetCount": len(targets),
+        "q1TargetCount": len(q1_targets),
+        "protectedCount": len(protected),
+        "v1821HighMeanRmse": v1821_high_mean,
+        "candidateHighMeanRmse": cand_high_mean,
+        "highGainVsV1821Pct": pct_improvement(v1821_high_mean, cand_high_mean),
+        "v1821TargetMeanRmse": v1821_target_mean,
+        "candidateTargetMeanRmse": cand_target_mean,
+        "targetGainVsV1821Pct": pct_improvement(v1821_target_mean, cand_target_mean),
+        "v1821Q1TargetMeanRmse": v1821_q1_target_mean,
+        "candidateQ1TargetMeanRmse": cand_q1_target_mean,
+        "q1TargetGainVsV1821Pct": pct_improvement(v1821_q1_target_mean, cand_q1_target_mean),
+        "highAbove20Candidate": sum(1 for row in high if parse_bool(row["above20Candidate"])),
+        "protectedMaxRegressionKmS": max(protected_regs or [0.0]),
+        "protectedRegressionOver1Count": sum(1 for value in protected_regs if value > 1.0),
+        "weakSystematicsLeakage": sum(1 for row in rows if row["set"] == "weak-systematics-excluded" and parse_float(row["anyActivation"], 0.0) >= 0.05),
+        "activeHighCount": sum(1 for row in high if parse_float(row["anyActivation"], 0.0) >= 0.05),
+        "activeProtectedCount": sum(1 for row in protected if parse_float(row["anyActivation"], 0.0) >= 0.05),
+    }
+
+
+def v18_nfw_safety_select_strengths(
+    base: dict,
+    target_names: set[str],
+    target_rows_by_name: dict[str, dict],
+    train_names: set[str],
+    holdout_names: set[str],
+) -> tuple[dict[str, float], list[dict]]:
+    trial_rows: list[dict] = []
+    best_strengths = {"lowCompactShelf": 0.0, "bufferedMassiveShelf": 0.0, "lowGasRichSafety": 0.0}
+    best_utility = -math.inf
+    for low_strength in V18_NFW_SAFETY_STRENGTH_GRID:
+        for buffered_strength in V18_NFW_SAFETY_STRENGTH_GRID:
+            for gas_strength in V18_NFW_SAFETY_STRENGTH_GRID:
+                strengths = {
+                    "lowCompactShelf": low_strength,
+                    "bufferedMassiveShelf": buffered_strength,
+                    "lowGasRichSafety": gas_strength,
+                }
+                rows = v18_nfw_safety_score_rows(base, strengths, target_names, target_rows_by_name, (train_names, holdout_names))
+                train_metric = v18_nfw_safety_metric(rows, "train")
+                holdout_metric = v18_nfw_safety_metric(rows, "holdout")
+                train_target_gain = parse_float(train_metric["q1TargetGainVsV1821Pct"], 0.0)
+                if not math.isfinite(train_target_gain):
+                    train_target_gain = parse_float(train_metric["targetGainVsV1821Pct"], -50.0)
+                train_high_gain = parse_float(train_metric["highGainVsV1821Pct"], -50.0)
+                utility = (
+                    train_target_gain
+                    + 0.35 * train_high_gain
+                    - max(0.0, train_metric["protectedMaxRegressionKmS"] - 0.5) * 12.0
+                    - train_metric["highAbove20Candidate"] * 25.0
+                    - train_metric["activeProtectedCount"] * 0.35
+                )
+                trial_rows.append(
+                    {
+                        "lowCompactShelfStrength": low_strength,
+                        "bufferedMassiveShelfStrength": buffered_strength,
+                        "lowGasRichSafetyStrength": gas_strength,
+                        "trainHighGainVsV1821Pct": train_metric["highGainVsV1821Pct"],
+                        "trainTargetGainVsV1821Pct": train_metric["targetGainVsV1821Pct"],
+                        "trainQ1TargetGainVsV1821Pct": train_metric["q1TargetGainVsV1821Pct"],
+                        "trainProtectedMaxRegressionKmS": train_metric["protectedMaxRegressionKmS"],
+                        "trainHighAbove20Candidate": train_metric["highAbove20Candidate"],
+                        "holdoutHighGainVsV1821Pct": holdout_metric["highGainVsV1821Pct"],
+                        "holdoutTargetGainVsV1821Pct": holdout_metric["targetGainVsV1821Pct"],
+                        "holdoutQ1TargetGainVsV1821Pct": holdout_metric["q1TargetGainVsV1821Pct"],
+                        "holdoutProtectedMaxRegressionKmS": holdout_metric["protectedMaxRegressionKmS"],
+                        "utility": utility,
+                    }
+                )
+                if (
+                    utility > best_utility
+                    and train_metric["protectedMaxRegressionKmS"] <= 1.0
+                    and train_metric["highAbove20Candidate"] == 0
+                ):
+                    best_utility = utility
+                    best_strengths = strengths
+    trial_rows.sort(
+        key=lambda row: (
+            -parse_float(row["utility"], -math.inf),
+            row["lowCompactShelfStrength"],
+            row["bufferedMassiveShelfStrength"],
+            row["lowGasRichSafetyStrength"],
+        )
+    )
+    return best_strengths, trial_rows
+
+
+def v18_nfw_safety_null_rows(
+    base: dict,
+    strengths: dict[str, float],
+    target_names: set[str],
+    target_rows_by_name: dict[str, dict],
+    reference_rows: list[dict],
+) -> list[dict]:
+    branch_columns = {
+        "lowCompactShelfSafety": "lowCompactShelfSafetyActivation",
+        "bufferedMassiveShelfSafety": "bufferedMassiveShelfSafetyActivation",
+        "lowGasRichSafety": "lowGasRichSafetyActivation",
+    }
+    clean_curves = base["cleanCurves"]
+    by_route = {
+        route: [curve["name"] for curve in clean_curves if curve["lockedModelRoute"] == route]
+        for route in sorted({curve["lockedModelRoute"] for curve in clean_curves})
+    }
+    route_for_branch = {
+        "lowCompactShelfSafety": "low-load",
+        "bufferedMassiveShelfSafety": "buffered single-crossing",
+        "lowGasRichSafety": "low-load",
+    }
+    actual = {
+        row["galaxy"]: {
+            branch: parse_float(row.get(column), 0.0)
+            for branch, column in branch_columns.items()
+        }
+        for row in reference_rows
+        if row["set"] != "weak-systematics-excluded"
+    }
+    active_values = {
+        branch: [
+            parse_float(row.get(column), 0.0)
+            for row in reference_rows
+            if row["set"] != "weak-systematics-excluded" and parse_float(row.get(column), 0.0) >= 0.05
+        ]
+        for branch, column in branch_columns.items()
+    }
+    output: list[dict] = []
+    for seed in V18_NFW_SAFETY_SEEDS:
+        rng = random.Random(seed)
+        names = sorted(actual)
+        shuffled_values = list(actual.values())
+        rng.shuffle(shuffled_values)
+        shuffled = dict(zip(names, shuffled_values))
+        shuffled_rows = v18_nfw_safety_score_rows(base, strengths, target_names, target_rows_by_name, None, shuffled)
+        metric = v18_nfw_safety_metric(shuffled_rows)
+        output.append(
+            {
+                "nullType": "activation-label-shuffle",
+                "seed": seed,
+                "highGainVsV1821Pct": metric["highGainVsV1821Pct"],
+                "targetGainVsV1821Pct": metric["targetGainVsV1821Pct"],
+                "q1TargetGainVsV1821Pct": metric["q1TargetGainVsV1821Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "activeForcedCount": sum(1 for acts in shuffled.values() for value in acts.values() if value >= 0.05),
+            }
+        )
+
+        forced: dict[str, dict[str, float]] = {}
+        for branch, values in active_values.items():
+            pool = by_route.get(route_for_branch[branch], [])[:]
+            rng.shuffle(pool)
+            for name, value in zip(pool, values):
+                forced.setdefault(
+                    name,
+                    {
+                        "lowCompactShelfSafety": 0.0,
+                        "bufferedMassiveShelfSafety": 0.0,
+                        "lowGasRichSafety": 0.0,
+                    },
+                )[branch] = value
+        random_rows = v18_nfw_safety_score_rows(base, strengths, target_names, target_rows_by_name, None, forced)
+        metric = v18_nfw_safety_metric(random_rows)
+        output.append(
+            {
+                "nullType": "same-route-active-value-random",
+                "seed": seed,
+                "highGainVsV1821Pct": metric["highGainVsV1821Pct"],
+                "targetGainVsV1821Pct": metric["targetGainVsV1821Pct"],
+                "q1TargetGainVsV1821Pct": metric["q1TargetGainVsV1821Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "activeForcedCount": sum(1 for acts in forced.values() for value in acts.values() if value >= 0.05),
+            }
+        )
+
+        forced = {}
+        for branch, values in active_values.items():
+            route = route_for_branch[branch]
+            pool = [row["galaxy"] for row in reference_rows if row["set"] == "clean-protected" and row["lockedRoute"] == route]
+            rng.shuffle(pool)
+            for name, value in zip(pool, values):
+                forced.setdefault(
+                    name,
+                    {
+                        "lowCompactShelfSafety": 0.0,
+                        "bufferedMassiveShelfSafety": 0.0,
+                        "lowGasRichSafety": 0.0,
+                    },
+                )[branch] = value
+        protected_rows = v18_nfw_safety_score_rows(base, strengths, target_names, target_rows_by_name, None, forced)
+        metric = v18_nfw_safety_metric(protected_rows)
+        output.append(
+            {
+                "nullType": "protected-lookalike-safety-stress",
+                "seed": seed,
+                "highGainVsV1821Pct": metric["highGainVsV1821Pct"],
+                "targetGainVsV1821Pct": metric["targetGainVsV1821Pct"],
+                "q1TargetGainVsV1821Pct": metric["q1TargetGainVsV1821Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "activeForcedCount": sum(1 for acts in forced.values() for value in acts.values() if value >= 0.05),
+            }
+        )
+    return output
+
+
+def write_v18_nfw_safety_candidate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_nfw_safety_candidate"
+    benchmark_capsule = write_v18_radial_phase_benchmark_artifacts(DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BENCHMARK_OUT)
+    if not (DEFAULT_OBSERVED_STATE_V18_NFW_ATTACK_OUT / "mts_v18_nfw_gap_attack_next_law_targets.csv").exists():
+        write_v18_nfw_gap_attack_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_ATTACK_OUT)
+    base = v18_radial_phase_base_context()
+    train_names, holdout_names = observed_state_split(base["cleanCurves"], SPLIT_SEED, HOLDOUT_FRACTION)
+    target_names, target_rows_by_name = v18_nfw_safety_target_names()
+    selected_strengths, trial_rows = v18_nfw_safety_select_strengths(base, target_names, target_rows_by_name, train_names, holdout_names)
+    rows = v18_nfw_safety_score_rows(base, selected_strengths, target_names, target_rows_by_name, (train_names, holdout_names))
+    all_metric = v18_nfw_safety_metric(rows)
+    train_metric = v18_nfw_safety_metric(rows, "train")
+    holdout_metric = v18_nfw_safety_metric(rows, "holdout")
+    null_rows = v18_nfw_safety_null_rows(base, selected_strengths, target_names, target_rows_by_name, rows)
+    best_null = max([parse_float(row["q1TargetGainVsV1821Pct"]) for row in null_rows if math.isfinite(parse_float(row["q1TargetGainVsV1821Pct"]))] or [math.nan])
+    null_margin = all_metric["q1TargetGainVsV1821Pct"] - best_null if math.isfinite(best_null) and math.isfinite(all_metric["q1TargetGainVsV1821Pct"]) else math.nan
+
+    high_rows = [row for row in rows if row["set"] == "clean-high-rmse"]
+    target_rows = [row for row in high_rows if parse_bool(row.get("lawFacingSafetyTarget"))]
+    protected_rows = [
+        row for row in rows
+        if row["set"] == "clean-protected"
+        and (parse_float(row["protectedRegressionKmS"], 0.0) > 0.0 or parse_float(row["anyActivation"], 0.0) >= 0.05)
+    ]
+    branch_rows: list[dict] = []
+    for branch, column in [
+        ("lowCompactShelfSafety", "lowCompactShelfSafetyActivation"),
+        ("bufferedMassiveShelfSafety", "bufferedMassiveShelfSafetyActivation"),
+        ("lowGasRichSafety", "lowGasRichSafetyActivation"),
+    ]:
+        active = [row for row in rows if parse_float(row.get(column), 0.0) >= 0.05]
+        active_high = [row for row in active if row["set"] == "clean-high-rmse"]
+        active_targets = [row for row in active_high if parse_bool(row.get("lawFacingSafetyTarget"))]
+        active_protected = [row for row in active if row["set"] == "clean-protected"]
+        protected_regs = [parse_float(row.get("protectedRegressionKmS"), 0.0) for row in active_protected]
+        branch_rows.append(
+            {
+                "branch": branch,
+                "activeCleanHighCount": len(active_high),
+                "activeTargetCount": len(active_targets),
+                "activeProtectedCount": len(active_protected),
+                "meanActivationHigh": safe_mean(parse_float(row.get(column), 0.0) for row in active_high),
+                "targetGainVsV1821Pct": pct_improvement(
+                    safe_mean(parse_float(row["v18_21Rmse"]) for row in active_targets),
+                    safe_mean(parse_float(row["candidateRmse"]) for row in active_targets),
+                ),
+                "protectedMaxRegressionKmS": max(protected_regs or [0.0]),
+            }
+        )
+
+    holdout_rows: list[dict] = []
+    for seed in V18_NFW_SAFETY_SEEDS:
+        seed_train, seed_holdout = observed_state_split(base["cleanCurves"], seed, HOLDOUT_FRACTION)
+        seed_rows = v18_nfw_safety_score_rows(base, selected_strengths, target_names, target_rows_by_name, (seed_train, seed_holdout))
+        metric = v18_nfw_safety_metric(seed_rows, "holdout")
+        metric["seed"] = seed
+        holdout_rows.append(metric)
+
+    changed = [
+        row for row in high_rows
+        if abs(parse_float(row["candidateGainVsV1821KmS"], 0.0)) > 0.05
+    ]
+    changed.sort(key=lambda row: -parse_float(row["candidateGainVsV1821KmS"], 0.0))
+    passes = {
+        "targetGainVsV1821AtLeast5Pct": all_metric["targetGainVsV1821Pct"] >= 5.0,
+        "q1TargetGainVsV1821AtLeast5Pct": all_metric["q1TargetGainVsV1821Pct"] >= 5.0,
+        "holdoutQ1TargetGainPositive": parse_float(holdout_metric["q1TargetGainVsV1821Pct"], -1.0) > 0.0,
+        "highGainVsV1821Positive": all_metric["highGainVsV1821Pct"] > 0.0,
+        "highAbove20Zero": all_metric["highAbove20Candidate"] == 0,
+        "protectedRegressionBelow1": all_metric["protectedMaxRegressionKmS"] < 1.0,
+        "weakLeakageZero": all_metric["weakSystematicsLeakage"] == 0,
+        "nullMarginAtLeast5Pct": math.isfinite(null_margin) and null_margin >= 5.0,
+    }
+    verdict = "v18.25 support-safety candidate for review" if all(passes.values()) else "v18.25 support-safety candidate not promoted"
+
+    score_rows = [
+        {"metric": key, "value": value}
+        for key, value in {
+            "v1821AllMeanRmse": benchmark_capsule["summary"]["v1821AllMeanRmse"],
+            "v1821HighMeanRmse": benchmark_capsule["summary"]["v1821HighMeanRmse"],
+            "candidateHighGainVsV1821Pct": all_metric["highGainVsV1821Pct"],
+            "candidateTargetGainVsV1821Pct": all_metric["targetGainVsV1821Pct"],
+            "candidateQ1TargetGainVsV1821Pct": all_metric["q1TargetGainVsV1821Pct"],
+            "trainQ1TargetGainVsV1821Pct": train_metric["q1TargetGainVsV1821Pct"],
+            "holdoutQ1TargetGainVsV1821Pct": holdout_metric["q1TargetGainVsV1821Pct"],
+            "candidateProtectedMaxRegressionKmS": all_metric["protectedMaxRegressionKmS"],
+            "candidateHighAbove20": all_metric["highAbove20Candidate"],
+            "weakSystematicsLeakage": all_metric["weakSystematicsLeakage"],
+            "bestNullQ1TargetGainVsV1821Pct": best_null,
+            "nullMarginQ1TargetPct": null_margin,
+        }.items()
+    ]
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", rows)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", target_rows)
+    write_csv(out_dir / f"{prefix}_branch_ledger.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_holdout_replay.csv", holdout_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_strength_trials.csv", trial_rows[:60])
+
+    formula = {
+        "candidateId": "observed-state-response-v18.25-nfw-support-safety-candidate",
+        "status": verdict,
+        "baseLaw": "locked v18.21 radial-phase release candidate",
+        "selectedStrengths": selected_strengths,
+        "mechanism": "narrow positive-support suppression for state/profile shelf or mid/outer oversupport cases",
+        "allowedInputs": [
+            "locked route",
+            "memoryLoad",
+            "u_out",
+            "u_max",
+            "h/rOut",
+            "outerGasShare",
+            "outerDiskShare",
+            "barCurv",
+            "pointDensity",
+            "official baryonic mass",
+            "official gas fraction",
+        ],
+        "forbiddenInputs": ["galaxy names", "NFW parameters", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    report = [
+        "# MTS v18.25 NFW Support-Safety Candidate",
+        "",
+        "This is a framework-forward candidate test, not a summary pack. It starts from locked v18.21 and tests one tiny support-safety response on state/profile patterns that look like high-quality shelf or mid/outer oversupport. NFW-prior fits are used only as the competitor gap being attacked.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Selected strengths: low compact shelf `{fmt(selected_strengths['lowCompactShelf'])}`, buffered massive shelf `{fmt(selected_strengths['bufferedMassiveShelf'])}`, low gas-rich safety `{fmt(selected_strengths['lowGasRichSafety'])}`.",
+        f"- Clean high-RMSE gain over v18.21: `{fmt(all_metric['highGainVsV1821Pct'])}%`.",
+        f"- Law-facing target gain over v18.21: `{fmt(all_metric['targetGainVsV1821Pct'])}%`.",
+        f"- Q1 law-facing target gain over v18.21: `{fmt(all_metric['q1TargetGainVsV1821Pct'])}%`.",
+        f"- Holdout Q1 law-facing target gain: `{fmt(holdout_metric['q1TargetGainVsV1821Pct'])}%`.",
+        f"- Protected max regression: `{fmt(all_metric['protectedMaxRegressionKmS'])}` km/s.",
+        f"- High above 20 km/s: `{all_metric['highAbove20Candidate']}`.",
+        f"- Best null Q1 target gain: `{fmt(best_null)}`%.",
+        f"- Null margin: `{fmt(null_margin)}` points.",
+        "",
+        "## Changed High-RMSE Cases",
+        "",
+        "| Galaxy | Route | Attack class | Q | v18.21 RMSE | candidate RMSE | gain | branch |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for row in changed[:30]:
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | {row['attackClass']} | {row['qualityCode']} | {fmt(row['v18_21Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['candidateGainVsV1821KmS'])} | {row['branchHits']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Acceptance Gates",
+            "",
+            "| Gate | Pass |",
+            "| --- | ---: |",
+        ]
+    )
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.extend(
+        [
+            "",
+            "## Guardrails",
+            "",
+            "- v18.21 remains the locked release candidate unless this branch passes nulls and is separately browser-hardened.",
+            "- No q, Gamma0, disk M/L, bulge M/L, galaxy-name, NFW-parameter, residual, or raw-RMSE lookup is introduced.",
+            "- Weak/systematics galaxies remain excluded from fitting and activation.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-v18-nfw-safety-candidate-v1",
+        "verdict": verdict,
+        "selectedStrengths": selected_strengths,
+        "summary": {
+            "candidateHighGainVsV1821Pct": all_metric["highGainVsV1821Pct"],
+            "candidateTargetGainVsV1821Pct": all_metric["targetGainVsV1821Pct"],
+            "candidateQ1TargetGainVsV1821Pct": all_metric["q1TargetGainVsV1821Pct"],
+            "trainQ1TargetGainVsV1821Pct": train_metric["q1TargetGainVsV1821Pct"],
+            "holdoutQ1TargetGainVsV1821Pct": holdout_metric["q1TargetGainVsV1821Pct"],
+            "protectedMaxRegressionKmS": all_metric["protectedMaxRegressionKmS"],
+            "highAbove20Candidate": all_metric["highAbove20Candidate"],
+            "weakSystematicsLeakage": all_metric["weakSystematicsLeakage"],
+            "bestNullQ1TargetGainVsV1821Pct": best_null,
+            "nullMarginQ1TargetPct": null_margin,
+            "passes": passes,
+        },
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_branch_ledger.csv",
+            f"{prefix}_holdout_replay.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_strength_trials.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18nfwsafetycandidate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NFW_SAFETY_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_nfw_safety_candidate_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.25 NFW support-safety candidate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high_gain_vs_v1821={fmt(summary['candidateHighGainVsV1821Pct'])}%",
+                f"target_gain_vs_v1821={fmt(summary['candidateTargetGainVsV1821Pct'])}%",
+                f"q1_target_gain={fmt(summary['candidateQ1TargetGainVsV1821Pct'])}%",
+                f"holdout_q1={fmt(summary['holdoutQ1TargetGainVsV1821Pct'])}%",
+                f"protected={fmt(summary['protectedMaxRegressionKmS'])}",
+                f"above20={summary['highAbove20Candidate']}",
+                f"null_margin={fmt(summary['nullMarginQ1TargetPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 NFW support-safety candidate to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -80871,6 +81557,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwphasecandidate",
             "v18nfwgapattack",
             "observedstatev18nfwgapattack",
+            "v18nfwsafetycandidate",
+            "observedstatev18nfwsafetycandidate",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -81173,6 +81861,8 @@ def main() -> None:
         cmd_v18nfwphasecandidate(args)
     elif args.mode in {"v18nfwgapattack", "observedstatev18nfwgapattack"}:
         cmd_v18nfwgapattack(args)
+    elif args.mode in {"v18nfwsafetycandidate", "observedstatev18nfwsafetycandidate"}:
+        cmd_v18nfwsafetycandidate(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
