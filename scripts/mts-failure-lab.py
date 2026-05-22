@@ -202,6 +202,7 @@ DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_MERGE_OUT = OUTPUT_PACK_ROOT / "m
 DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_BROWSER_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-radial-transfer-browser-lock-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_OVERSHELF_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-overshelf-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_PROVENANCE_BOUNDARY_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-provenance-boundary-v1"
+DEFAULT_OBSERVED_STATE_V18_NFW_CASE_PAIR_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-case-pair-audit-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -71208,6 +71209,401 @@ def cmd_v18nfwprovenanceboundary(args: argparse.Namespace) -> None:
     print(f"Wrote v18 NFW provenance-boundary audit to {out_dir.resolve()}")
 
 
+V18_NFW_CASE_PAIR_TARGETS = ("NGC2403", "NGC4157")
+V18_NFW_CASE_PAIR_FEATURES = [
+    "memoryLoad",
+    "u075",
+    "uOut",
+    "uMax",
+    "hOverRout",
+    "outerGasShare",
+    "outerDiskShare",
+    "innerGasShare",
+    "midGasShare",
+    "barCurv",
+    "pointDensity",
+    "mBar_1e9Msun",
+    "tableGasFraction",
+    "rHiOverRdisk",
+]
+
+
+def v18_nfw_case_pair_quantile(values: list[float], q: float) -> float:
+    clean = sorted(value for value in values if math.isfinite(value))
+    if not clean:
+        return math.nan
+    if len(clean) == 1:
+        return clean[0]
+    index = clamp(q, 0.0, 1.0) * (len(clean) - 1)
+    lower = int(math.floor(index))
+    upper = int(math.ceil(index))
+    if lower == upper:
+        return clean[lower]
+    return clean[lower] + (clean[upper] - clean[lower]) * (index - lower)
+
+
+def v18_nfw_case_pair_feature_scales(rows: list[dict]) -> dict[str, float]:
+    scales: dict[str, float] = {}
+    for feature in V18_NFW_CASE_PAIR_FEATURES:
+        values = [parse_float(row.get(feature)) for row in rows]
+        low = v18_nfw_case_pair_quantile(values, 0.10)
+        high = v18_nfw_case_pair_quantile(values, 0.90)
+        scale = high - low if math.isfinite(high) and math.isfinite(low) else math.nan
+        if not math.isfinite(scale) or abs(scale) < 1e-9:
+            finite = [value for value in values if math.isfinite(value)]
+            scale = (max(finite) - min(finite)) if finite else 1.0
+        scales[feature] = scale if math.isfinite(scale) and abs(scale) >= 1e-9 else 1.0
+    return scales
+
+
+def v18_nfw_case_pair_feature_distance(row: dict, target: dict, scales: dict[str, float]) -> tuple[float, int]:
+    terms: list[float] = []
+    for feature in V18_NFW_CASE_PAIR_FEATURES:
+        value = parse_float(row.get(feature))
+        target_value = parse_float(target.get(feature))
+        if math.isfinite(value) and math.isfinite(target_value):
+            terms.append(((value - target_value) / scales.get(feature, 1.0)) ** 2)
+    if not terms:
+        return math.nan, 0
+    return math.sqrt(safe_mean(terms)), len(terms)
+
+
+def v18_nfw_case_pair_verdict_for_target(target: dict, branch_rows: list[dict], nearest_rows: list[dict]) -> tuple[str, str]:
+    name = target["galaxy"]
+    branch_hits = [branch for branch in V18_NFW_OVERSHELF_BRANCHES if parse_float(target.get(f"{branch}Activation"), 0.0) >= 0.05]
+    branch_by_name = {row["branch"]: row for row in branch_rows}
+    if name == "NGC2403":
+        return (
+            "not a shared law target",
+            "Buffered shelf activation is broad, selected beta is zero, and v18.26 is already below 10 km/s; treat as NFW-ceiling/provenance watchlist unless a new source variable appears.",
+        )
+    if name == "NGC4157":
+        compact = branch_by_name.get("lowLoadCompactShelfCap", {})
+        protected = parse_float(compact.get("activeProtectedCount"), 0.0)
+        gain = parse_float(target.get("candidateGainVsV1826KmS"), 0.0)
+        if gain < 1.0 and protected >= 1:
+            return (
+                "current variables underpowered",
+                "The compact shelf cap gives less than 1 km/s while hitting protected lookalikes; current state/profile variables do not justify a new branch.",
+            )
+    if any(parse_float(target.get(f"{branch}Activation"), 0.0) >= 0.05 for branch in V18_NFW_OVERSHELF_BRANCHES):
+        return (
+            "case-local anatomy only",
+            "A branch can touch this case, but the gain/protection balance is not strong enough for a law extension.",
+        )
+    return (
+        "not separable",
+        "No current branch family isolates this case without broad lookalike exposure.",
+    )
+
+
+def write_v18_nfw_case_pair_audit_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_nfw_case_pair"
+    provenance_capsule = write_v18_nfw_provenance_boundary_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_PROVENANCE_BOUNDARY_OUT)
+    overshelf_capsule = write_v18_nfw_overshelf_candidate_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_OVERSHELF_OUT)
+    overshelf_rows = read_csv_rows(DEFAULT_OBSERVED_STATE_V18_NFW_OVERSHELF_OUT / "mts_v18_nfw_overshelf_candidate_case_ledger.csv")
+    branch_rows = read_csv_rows(DEFAULT_OBSERVED_STATE_V18_NFW_OVERSHELF_OUT / "mts_v18_nfw_overshelf_candidate_branch_ledger.csv")
+    boundary_rows = read_csv_rows(DEFAULT_OBSERVED_STATE_V18_NFW_PROVENANCE_BOUNDARY_OUT / "mts_v18_nfw_provenance_boundary_case_ledger.csv")
+    boundary_by_name = {row["galaxy"]: row for row in boundary_rows}
+    clean_rows = [row for row in overshelf_rows if row["set"] != "weak-systematics-excluded"]
+    target_rows = [row for row in overshelf_rows if row["galaxy"] in V18_NFW_CASE_PAIR_TARGETS]
+    target_by_name = {row["galaxy"]: row for row in target_rows}
+    scales = v18_nfw_case_pair_feature_scales(clean_rows)
+
+    pair_rows: list[dict] = []
+    if all(name in target_by_name for name in V18_NFW_CASE_PAIR_TARGETS):
+        left = target_by_name[V18_NFW_CASE_PAIR_TARGETS[0]]
+        right = target_by_name[V18_NFW_CASE_PAIR_TARGETS[1]]
+        for feature in V18_NFW_CASE_PAIR_FEATURES:
+            left_value = parse_float(left.get(feature))
+            right_value = parse_float(right.get(feature))
+            scale = scales.get(feature, 1.0)
+            pair_rows.append(
+                {
+                    "feature": feature,
+                    f"{left['galaxy']}Value": left_value,
+                    f"{right['galaxy']}Value": right_value,
+                    "absoluteDifference": abs(left_value - right_value) if math.isfinite(left_value) and math.isfinite(right_value) else math.nan,
+                    "normalizedDifference": abs(left_value - right_value) / scale if math.isfinite(left_value) and math.isfinite(right_value) and scale else math.nan,
+                    "scale": scale,
+                    "sharedEnoughForSingleGate": (abs(left_value - right_value) / scale) <= 0.35 if math.isfinite(left_value) and math.isfinite(right_value) and scale else False,
+                }
+            )
+        route_same = left.get("lockedRoute") == right.get("lockedRoute")
+        shape_same = left.get("shapeClass") == right.get("shapeClass")
+        pair_distance, pair_feature_count = v18_nfw_case_pair_feature_distance(left, right, scales)
+    else:
+        route_same = False
+        shape_same = False
+        pair_distance = math.nan
+        pair_feature_count = 0
+
+    nearest_rows: list[dict] = []
+    for target_name in V18_NFW_CASE_PAIR_TARGETS:
+        target = target_by_name.get(target_name)
+        if not target:
+            continue
+        distances: list[dict] = []
+        for row in clean_rows:
+            if row["galaxy"] == target_name:
+                continue
+            distance, feature_count = v18_nfw_case_pair_feature_distance(row, target, scales)
+            if not math.isfinite(distance):
+                continue
+            distances.append(
+                {
+                    "targetGalaxy": target_name,
+                    "neighborGalaxy": row["galaxy"],
+                    "neighborSet": row["set"],
+                    "neighborRoute": row["lockedRoute"],
+                    "sameRoute": row["lockedRoute"] == target["lockedRoute"],
+                    "stateDistance": distance,
+                    "featureCount": feature_count,
+                    "closerThanOtherTarget": distance < pair_distance if math.isfinite(pair_distance) else "",
+                    "v18_26Rmse": row.get("v18_26Rmse", ""),
+                    "candidateGainVsV1826KmS": row.get("candidateGainVsV1826KmS", ""),
+                    "protectedRegressionKmS": row.get("protectedRegressionKmS", ""),
+                    "branchHits": row.get("branchHits", ""),
+                    "lowLoadCompactShelfCapActivation": row.get("lowLoadCompactShelfCapActivation", ""),
+                    "bufferedMidOuterShelfSuppressionActivation": row.get("bufferedMidOuterShelfSuppressionActivation", ""),
+                    "lowLoadMidOuterShelfSuppressionActivation": row.get("lowLoadMidOuterShelfSuppressionActivation", ""),
+                    "boundaryClass": boundary_by_name.get(row["galaxy"], {}).get("boundaryClass", ""),
+                }
+            )
+        distances.sort(key=lambda row: (parse_float(row["stateDistance"]), row["neighborGalaxy"]))
+        nearest_rows.extend(distances[:15])
+
+    active_branch_rows: list[dict] = []
+    branch_by_name = {row["branch"]: row for row in branch_rows}
+    for target in target_rows:
+        for branch in V18_NFW_OVERSHELF_BRANCHES:
+            activation = parse_float(target.get(f"{branch}Activation"), 0.0)
+            if activation < 0.05:
+                continue
+            branch_row = branch_by_name.get(branch, {})
+            active_protected = [
+                row for row in clean_rows
+                if row["set"] == "clean-protected" and parse_float(row.get(f"{branch}Activation"), 0.0) >= 0.05
+            ]
+            protected_regs = [parse_float(row.get("protectedRegressionKmS"), 0.0) for row in active_protected]
+            active_branch_rows.append(
+                {
+                    "targetGalaxy": target["galaxy"],
+                    "branch": branch,
+                    "targetActivation": activation,
+                    "selectedBeta": branch_row.get("selectedBeta", ""),
+                    "targetGainVsV1826KmS": target.get("candidateGainVsV1826KmS", ""),
+                    "targetGainVsV1826Pct": target.get("candidateGainVsV1826Pct", ""),
+                    "activeCleanHighCount": branch_row.get("activeCleanHighCount", ""),
+                    "activeTargetCount": branch_row.get("activeTargetCount", ""),
+                    "activeProtectedCount": len(active_protected),
+                    "protectedMaxRegressionKmS": max(protected_regs or [0.0]),
+                    "nearestProtectedHits": "; ".join(row["galaxy"] for row in active_protected[:8]),
+                    "branchVerdict": "rejected/beta-zero" if parse_float(branch_row.get("selectedBeta"), 0.0) == 0.0 else "weak accepted sub-branch only",
+                }
+            )
+
+    target_summary_rows: list[dict] = []
+    for target_name in V18_NFW_CASE_PAIR_TARGETS:
+        target = target_by_name.get(target_name, {})
+        boundary = boundary_by_name.get(target_name, {})
+        target_nearest = [row for row in nearest_rows if row["targetGalaxy"] == target_name]
+        protected_closer = [
+            row for row in target_nearest
+            if row["neighborSet"] == "clean-protected" and parse_bool(row.get("closerThanOtherTarget"))
+        ]
+        verdict, next_action = v18_nfw_case_pair_verdict_for_target(target, branch_rows, target_nearest)
+        target_summary_rows.append(
+            {
+                "galaxy": target_name,
+                "lockedRoute": target.get("lockedRoute", ""),
+                "shapeClass": target.get("shapeClass", boundary.get("shapeClass", "")),
+                "qualityCode": target.get("qualityCode", boundary.get("qualityCode", "")),
+                "v18_26Rmse": target.get("v18_26Rmse", ""),
+                "nfwPriorRmse": boundary.get("nfwPriorRmse", ""),
+                "nfwGapKmS": boundary.get("v1826MinusNfwPriorKmS", ""),
+                "mondGlobalGapKmS": boundary.get("v1826MinusMondGlobalKmS", ""),
+                "v18_27CandidateGainKmS": target.get("candidateGainVsV1826KmS", ""),
+                "v18_27BranchHits": target.get("branchHits", ""),
+                "stateDistanceToOtherTarget": pair_distance,
+                "protectedNeighborsCloserThanOtherTarget": len(protected_closer),
+                "nearestProtectedNeighbors": "; ".join(row["neighborGalaxy"] for row in protected_closer[:8]),
+                "caseVerdict": verdict,
+                "nextAction": next_action,
+            }
+        )
+
+    shared_features = [row for row in pair_rows if parse_bool(row.get("sharedEnoughForSingleGate"))]
+    high_contrast_features = [
+        row for row in pair_rows
+        if parse_float(row.get("normalizedDifference"), 0.0) >= 0.75
+    ]
+    active_protected_risk = max([parse_float(row.get("protectedMaxRegressionKmS"), 0.0) for row in active_branch_rows] or [0.0])
+    passes = {
+        "v1826LockUnchanged": provenance_capsule["summary"]["v18_26HighAbove20"] == 0
+        and parse_float(provenance_capsule["summary"]["v18_26ProtectedRegressionKmS"], math.nan) == 0.0
+        and provenance_capsule["summary"]["weakSystematicsLeakage"] == 0,
+        "pairSameRoute": route_same,
+        "pairSameShapeClass": shape_same,
+        "pairStateDistanceLow": math.isfinite(pair_distance) and pair_distance <= 0.45,
+        "sharedFeatureCountAtLeastHalf": len(shared_features) >= max(1, len(pair_rows) // 2),
+        "v1827BranchUsefulOnBothTargets": all(parse_float(row.get("v18_27CandidateGainKmS"), 0.0) >= 1.0 for row in target_summary_rows),
+        "protectedRiskBelow1KmS": active_protected_risk < 1.0,
+    }
+    if all(passes.values()):
+        verdict = "case-pair shared mechanism candidate justified"
+    elif not route_same or not shape_same or len(high_contrast_features) >= 4:
+        verdict = "case-pair split; no shared branch"
+    elif not passes["v1827BranchUsefulOnBothTargets"]:
+        verdict = "current branch family underpowered"
+    else:
+        verdict = "case-pair inconclusive"
+
+    score_rows = [
+        {"metric": "verdict", "value": verdict},
+        {"metric": "targetCount", "value": len(target_summary_rows)},
+        {"metric": "pairStateDistance", "value": pair_distance},
+        {"metric": "pairFeatureCount", "value": pair_feature_count},
+        {"metric": "pairSameRoute", "value": route_same},
+        {"metric": "pairSameShapeClass", "value": shape_same},
+        {"metric": "sharedFeatureCount", "value": len(shared_features)},
+        {"metric": "highContrastFeatureCount", "value": len(high_contrast_features)},
+        {"metric": "activeProtectedRiskKmS", "value": active_protected_risk},
+        {"metric": "recommendedNextMode", "value": "external provenance / release hardening" if verdict == "case-pair split; no shared branch" else "narrow case-pair law candidate"},
+    ]
+
+    formula_guard = {
+        "candidateId": "v18-nfw-case-pair-audit",
+        "lawChanged": False,
+        "baseLaw": "locked v18.26 radial-transfer candidate",
+        "targets": list(V18_NFW_CASE_PAIR_TARGETS),
+        "verdict": verdict,
+        "forbiddenInputs": ["galaxy names in formula", "NFW parameters", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+        "branchRecommendation": "do not add a shared v18.29 branch" if verdict == "case-pair split; no shared branch" else "only proceed if a named mechanism can pass protected analog tests",
+    }
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_target_summary.csv", target_summary_rows)
+    write_csv(out_dir / f"{prefix}_feature_contrast.csv", pair_rows)
+    write_csv(out_dir / f"{prefix}_nearest_neighbors.csv", nearest_rows)
+    write_csv(out_dir / f"{prefix}_branch_risk.csv", active_branch_rows)
+    (out_dir / f"{prefix}_formula_guard.json").write_text(json.dumps(json_clean(formula_guard), indent=2, sort_keys=True), encoding="utf-8")
+
+    report = [
+        "# MTS v18.29 NFW Case-Pair Audit",
+        "",
+        "This is not a new law. It tests whether the only two large unresolved v18.26/NFW-prior gaps, NGC2403 and NGC4157, occupy one shared state/profile region that justifies a new branch.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Pair state distance: `{fmt(pair_distance)}` using `{pair_feature_count}` state/profile features.",
+        f"- Same locked route: `{route_same}`.",
+        f"- Same shape class: `{shape_same}`.",
+        f"- Shared low-contrast feature count: `{len(shared_features)}` / `{len(pair_rows)}`.",
+        f"- High-contrast feature count: `{len(high_contrast_features)}`.",
+        f"- v18.27 active protected max regression in touched branch families: `{fmt(active_protected_risk)}` km/s.",
+        "",
+        "## Target Outcomes",
+        "",
+        "| Galaxy | Route | Shape | v18.26 RMSE | NFW-prior RMSE | NFW gap | v18.27 gain | Branch | Verdict |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
+    ]
+    for row in target_summary_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | {row['shapeClass']} | {fmt(row['v18_26Rmse'])} | {fmt(row['nfwPriorRmse'])} | {fmt(row['nfwGapKmS'])} | {fmt(row['v18_27CandidateGainKmS'])} | {row['v18_27BranchHits']} | {row['caseVerdict']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Largest Pair Contrasts",
+            "",
+            "| Feature | NGC2403 | NGC4157 | Normalized difference |",
+            "| --- | ---: | ---: | ---: |",
+        ]
+    )
+    for row in sorted(pair_rows, key=lambda item: -parse_float(item.get("normalizedDifference"), 0.0))[:8]:
+        report.append(
+            f"| {row['feature']} | {fmt(row.get('NGC2403Value'))} | {fmt(row.get('NGC4157Value'))} | {fmt(row['normalizedDifference'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Branch Risk",
+            "",
+            "| Target | Branch | Activation | Beta | Target gain | Active protected | Protected max regression | Verdict |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for row in active_branch_rows:
+        report.append(
+            f"| {row['targetGalaxy']} | {row['branch']} | {fmt(row['targetActivation'])} | {fmt(row['selectedBeta'])} | {fmt(row['targetGainVsV1826KmS'])} | {row['activeProtectedCount']} | {fmt(row['protectedMaxRegressionKmS'])} | {row['branchVerdict']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Decision",
+            "",
+            "Do not add a shared v18.29 branch from this pair. NGC2403 and NGC4157 are both NFW-gap cases, but they are not the same state problem: route, gas/disk balance, density sampling, baryonic mass scale, and shelf branch behavior split them. The productive path is to keep v18.26 locked and use these two as named limitations/provenance targets rather than widening the transport law.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-v18-nfw-case-pair-audit-v1",
+        "verdict": verdict,
+        "summary": {
+            "targets": list(V18_NFW_CASE_PAIR_TARGETS),
+            "pairStateDistance": pair_distance,
+            "pairFeatureCount": pair_feature_count,
+            "pairSameRoute": route_same,
+            "pairSameShapeClass": shape_same,
+            "sharedFeatureCount": len(shared_features),
+            "highContrastFeatureCount": len(high_contrast_features),
+            "activeProtectedRiskKmS": active_protected_risk,
+            "v1826HighGainPct": provenance_capsule["summary"]["v18_26HighGainPct"],
+            "v1826CleanGainPct": provenance_capsule["summary"]["v18_26CleanGainPct"],
+            "v1826ProtectedRegressionKmS": provenance_capsule["summary"]["v18_26ProtectedRegressionKmS"],
+            "weakSystematicsLeakage": provenance_capsule["summary"]["weakSystematicsLeakage"],
+            "passes": passes,
+        },
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_target_summary.csv",
+            f"{prefix}_feature_contrast.csv",
+            f"{prefix}_nearest_neighbors.csv",
+            f"{prefix}_branch_risk.csv",
+            f"{prefix}_formula_guard.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18nfwcasepairaudit(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NFW_CASE_PAIR_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_nfw_case_pair_audit_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.29 NFW case-pair audit")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"distance={fmt(summary['pairStateDistance'])}",
+                f"same_route={summary['pairSameRoute']}",
+                f"same_shape={summary['pairSameShapeClass']}",
+                f"shared_features={summary['sharedFeatureCount']}",
+                f"high_contrast={summary['highContrastFeatureCount']}",
+                f"protected_risk={fmt(summary['activeProtectedRiskKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 NFW case-pair audit to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -84262,6 +84658,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwovershelfcandidate",
             "v18nfwprovenanceboundary",
             "observedstatev18nfwprovenanceboundary",
+            "v18nfwcasepairaudit",
+            "observedstatev18nfwcasepairaudit",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -84578,6 +84976,8 @@ def main() -> None:
         cmd_v18nfwovershelfcandidate(args)
     elif args.mode in {"v18nfwprovenanceboundary", "observedstatev18nfwprovenanceboundary"}:
         cmd_v18nfwprovenanceboundary(args)
+    elif args.mode in {"v18nfwcasepairaudit", "observedstatev18nfwcasepairaudit"}:
+        cmd_v18nfwcasepairaudit(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
