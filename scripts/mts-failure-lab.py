@@ -196,6 +196,7 @@ DEFAULT_OBSERVED_STATE_V18_NFW_TAIL_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-tail-c
 DEFAULT_OBSERVED_STATE_V18_NFW_PHASE_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-phase-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_ATTACK_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-gap-attack-ledger-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_SAFETY_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-safety-candidate-v1"
+DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-radial-transfer-candidate-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -68517,6 +68518,547 @@ def cmd_v18nfwsafetycandidate(args: argparse.Namespace) -> None:
     print(f"Wrote v18 NFW support-safety candidate to {out_dir.resolve()}")
 
 
+V18_NFW_RADIAL_TRANSFER_GRID = [0.0, 0.20, 0.30, 0.40, 0.50]
+V18_NFW_RADIAL_TRANSFER_SEEDS = [20260511, 20260512, 20260513, 20260514, 20260515, 314159, 271828, 42, 12345]
+
+
+def v18_nfw_radial_transfer_target_names() -> tuple[set[str], dict[str, dict]]:
+    attack_dir = DEFAULT_OBSERVED_STATE_V18_NFW_ATTACK_OUT
+    case_path = attack_dir / "mts_v18_nfw_gap_attack_case_ledger.csv"
+    if not case_path.exists():
+        write_v18_nfw_gap_attack_artifacts(attack_dir)
+    rows = read_csv_rows(case_path)
+    target_rows = {
+        row["galaxy"]: row
+        for row in rows
+        if row.get("attackClass", "") == "law-facing radial-transfer gap"
+    }
+    return set(target_rows), target_rows
+
+
+def v18_nfw_radial_transfer_activation(
+    curve: dict,
+    table1_by_name: dict[str, dict],
+    v1821_acts: dict,
+    legacy_family: str,
+) -> tuple[dict[str, float], dict, dict]:
+    values = observed_state_values(curve)
+    mass = v18_official_mass_scale_features(curve, table1_by_name)
+    route = curve.get("lockedModelRoute", "")
+    base_completion_hit = parse_float(v1821_acts.get("completion"), 0.0) >= 0.20
+    family_hit = legacy_family == "gas-disk crossover outer-completion"
+    activation = 0.0
+    if route == "low-load" and base_completion_hit and family_hit:
+        activation = v18_nfw_safety_gate(
+            [
+                v18_nfw_gap_candidate_smooth(curve["memoryLoad"], 1.45, 2.35),
+                v18_nfw_gap_candidate_smooth(curve["lockedModelUOut"], 0.34, 0.43),
+                v18_nfw_gap_candidate_smooth(0.90 - curve["lockedModelUMax"], 0.0, 0.16),
+                v18_nfw_gap_candidate_smooth(values["hOverRout"], 0.16, 0.25),
+                v18_nfw_gap_candidate_smooth(values["outerGasShare"], 0.45, 0.58),
+                v18_nfw_gap_candidate_smooth(mass["tableGasFraction"], 0.55, 0.72),
+                v18_nfw_gap_candidate_smooth(4.0 - mass["mBar_1e9Msun"], 0.0, 3.0),
+            ],
+            0.42,
+            0.68,
+        )
+    acts = {
+        "gasDiskCrossoverRadialTransfer": clamp(parse_float(activation), 0.0, 1.0),
+    }
+    acts["anyActivation"] = acts["gasDiskCrossoverRadialTransfer"]
+    return acts, values, mass
+
+
+def v18_nfw_radial_transfer_supports(
+    curve: dict,
+    v1821_supports: list[float],
+    strength: float,
+    table1_by_name: dict[str, dict],
+    v1821_acts: dict,
+    legacy_family: str,
+    forced_activation: float | None = None,
+) -> tuple[list[float], dict[str, float], dict, dict]:
+    if forced_activation is None:
+        acts, values, mass = v18_nfw_radial_transfer_activation(curve, table1_by_name, v1821_acts, legacy_family)
+    else:
+        acts = {
+            "gasDiskCrossoverRadialTransfer": clamp(parse_float(forced_activation, 0.0), 0.0, 1.0),
+            "anyActivation": clamp(parse_float(forced_activation, 0.0), 0.0, 1.0),
+        }
+        values = observed_state_values(curve)
+        mass = v18_official_mass_scale_features(curve, table1_by_name)
+    output: list[float] = []
+    for point, support in zip(curve["points"], v1821_supports):
+        x_value = point.get("x", point["r"] / max(curve["rOut"], 1e-9))
+        transfer_shape = 1.15 - 1.75 * v18_nfw_gap_candidate_smooth(x_value, 0.20, 0.92)
+        factor = clamp(1.0 + strength * acts["gasDiskCrossoverRadialTransfer"] * transfer_shape, 0.10, 3.00)
+        output.append(max(0.0, support * factor))
+    return output, acts, values, mass
+
+
+def v18_nfw_radial_transfer_score_rows(
+    base: dict,
+    strength: float,
+    target_names: set[str],
+    target_rows_by_name: dict[str, dict],
+    split_names: tuple[set[str], set[str]] | None = None,
+    forced_by_name: dict[str, float] | None = None,
+) -> list[dict]:
+    train_names, holdout_names = split_names if split_names is not None else (set(), set())
+    rows: list[dict] = []
+    for curve in base["curves"]:
+        name = curve["name"]
+        v18_supports = [base["v18Lookup"][(name, index)] for index in range(len(curve["points"]))]
+        if name in base["weakNames"]:
+            v1821_supports = v18_supports[:]
+            candidate_supports = v1821_supports[:]
+            acts = {"gasDiskCrossoverRadialTransfer": 0.0, "anyActivation": 0.0}
+            profile_values = observed_state_values(curve)
+            mass_features = v18_official_mass_scale_features(curve, base["table1ByName"])
+            legacy_family = ""
+            official_family = ""
+            radial_hits = ""
+        else:
+            v1821_supports, v1821_acts, _profile, _mass, _legacy, legacy_family, official_family = v18_radial_phase_supports(
+                curve,
+                v18_supports,
+                base["baseStrengths"],
+                base["table1ByName"],
+            )
+            forced = forced_by_name.get(name, 0.0) if forced_by_name is not None else None
+            candidate_supports, acts, profile_values, mass_features = v18_nfw_radial_transfer_supports(
+                curve,
+                v1821_supports,
+                strength,
+                base["table1ByName"],
+                v1821_acts,
+                legacy_family,
+                forced,
+            )
+            radial_hits = "; ".join(
+                family for family in V18_RADIAL_PHASE_STRENGTHS if parse_float(v1821_acts.get(family), 0.0) >= 0.20
+            )
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        v1821_score = v18_competitor_support_score(curve, v1821_supports)
+        candidate = v18_competitor_support_score(curve, candidate_supports)
+        set_label = v18_competitor_set_label(name, base["weakNames"], base["highNames"])
+        split = "weak-excluded" if name in base["weakNames"] else ("holdout" if name in holdout_names else "train" if name in train_names else "")
+        target_row = target_rows_by_name.get(name, {})
+        branch_hit = "gasDiskCrossoverRadialTransfer" if parse_float(acts["gasDiskCrossoverRadialTransfer"], 0.0) >= 0.05 else ""
+        rows.append(
+            {
+                "galaxy": name,
+                "set": set_label,
+                "split": split,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "lawFacingRadialTransferTarget": name in target_names,
+                "attackClass": target_row.get("attackClass", ""),
+                "shapeClass": target_row.get("shapeClass", ""),
+                "qualityCode": target_row.get("qualityCode", ""),
+                "canonicalRmse": canonical["rmse"],
+                "v18_21Rmse": v1821_score["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "candidateRoute": candidate.get("candidateRoute", ""),
+                "v18_21Route": v1821_score.get("candidateRoute", ""),
+                "candidateGainVsV1821KmS": v1821_score["rmse"] - candidate["rmse"],
+                "candidateGainVsV1821Pct": pct_improvement(v1821_score["rmse"], candidate["rmse"]),
+                "candidateRegressionVsV1821KmS": max(0.0, candidate["rmse"] - v1821_score["rmse"]),
+                "candidateGainVsCanonicalPct": pct_improvement(canonical["rmse"], candidate["rmse"]),
+                "gasDiskCrossoverRadialTransferActivation": acts["gasDiskCrossoverRadialTransfer"],
+                "anyActivation": acts["anyActivation"],
+                "branchHits": branch_hit,
+                "legacyCompletionFamily": legacy_family,
+                "officialMassScaleFamily": official_family,
+                "v1821RadialPhaseFamilies": radial_hits,
+                "memoryLoad": curve["memoryLoad"],
+                "uOut": curve["lockedModelUOut"],
+                "uMax": curve["lockedModelUMax"],
+                "hOverRout": profile_values["hOverRout"],
+                "outerGasShare": profile_values["outerGasShare"],
+                "outerDiskShare": profile_values["outerDiskShare"],
+                "barCurv": profile_values["barCurv"],
+                "pointDensity": profile_values["pointDensity"],
+                "mBar_1e9Msun": mass_features["mBar_1e9Msun"],
+                "tableGasFraction": mass_features["tableGasFraction"],
+                "rHiOverRdisk": mass_features["rHiOverRdisk"],
+                "sigmaBar_1e9MsunPerKpc2": mass_features["sigmaBar_1e9MsunPerKpc2"],
+                "above20Candidate": candidate["rmse"] >= 20.0,
+                "above20V1821": v1821_score["rmse"] >= 20.0,
+                "routeChangedVsV1821": candidate.get("candidateRoute", "") != v1821_score.get("candidateRoute", ""),
+                "protectedRegressionKmS": max(0.0, candidate["rmse"] - v1821_score["rmse"]) if set_label == "clean-protected" else "",
+            }
+        )
+    return rows
+
+
+def v18_nfw_radial_transfer_metric(rows: list[dict], split_filter: str | None = None) -> dict:
+    selected = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+    if split_filter:
+        selected = [row for row in selected if row.get("split") == split_filter]
+    high = [row for row in selected if row["set"] == "clean-high-rmse"]
+    protected = [row for row in selected if row["set"] == "clean-protected"]
+    targets = [row for row in high if parse_bool(row.get("lawFacingRadialTransferTarget"))]
+    v1821_high_mean = safe_mean(parse_float(row["v18_21Rmse"]) for row in high)
+    cand_high_mean = safe_mean(parse_float(row["candidateRmse"]) for row in high)
+    v1821_target_mean = safe_mean(parse_float(row["v18_21Rmse"]) for row in targets)
+    cand_target_mean = safe_mean(parse_float(row["candidateRmse"]) for row in targets)
+    protected_regs = [parse_float(row.get("protectedRegressionKmS"), 0.0) for row in protected]
+    return {
+        "split": split_filter or "all-clean",
+        "cleanHighCount": len(high),
+        "targetCount": len(targets),
+        "protectedCount": len(protected),
+        "v1821HighMeanRmse": v1821_high_mean,
+        "candidateHighMeanRmse": cand_high_mean,
+        "highGainVsV1821Pct": pct_improvement(v1821_high_mean, cand_high_mean),
+        "v1821TargetMeanRmse": v1821_target_mean,
+        "candidateTargetMeanRmse": cand_target_mean,
+        "targetGainVsV1821Pct": pct_improvement(v1821_target_mean, cand_target_mean),
+        "targetGainVsV1821KmS": v1821_target_mean - cand_target_mean if math.isfinite(v1821_target_mean) and math.isfinite(cand_target_mean) else math.nan,
+        "highAbove20Candidate": sum(1 for row in high if parse_bool(row["above20Candidate"])),
+        "protectedMaxRegressionKmS": max(protected_regs or [0.0]),
+        "protectedRegressionOver1Count": sum(1 for value in protected_regs if value > 1.0),
+        "weakSystematicsLeakage": sum(1 for row in rows if row["set"] == "weak-systematics-excluded" and parse_float(row["anyActivation"], 0.0) >= 0.05),
+        "activeHighCount": sum(1 for row in high if parse_float(row["anyActivation"], 0.0) >= 0.05),
+        "activeProtectedCount": sum(1 for row in protected if parse_float(row["anyActivation"], 0.0) >= 0.05),
+        "routeChangedCount": sum(1 for row in selected if parse_bool(row["routeChangedVsV1821"])),
+    }
+
+
+def v18_nfw_radial_transfer_select_strength(
+    base: dict,
+    target_names: set[str],
+    target_rows_by_name: dict[str, dict],
+) -> tuple[float, list[dict]]:
+    trial_rows: list[dict] = []
+    best_strength = 0.0
+    best_utility = -math.inf
+    for strength in V18_NFW_RADIAL_TRANSFER_GRID:
+        rows = v18_nfw_radial_transfer_score_rows(base, strength, target_names, target_rows_by_name)
+        metric = v18_nfw_radial_transfer_metric(rows)
+        utility = (
+            metric["targetGainVsV1821Pct"]
+            + 0.25 * metric["highGainVsV1821Pct"]
+            - max(0.0, metric["protectedMaxRegressionKmS"] - 0.25) * 12.0
+            - metric["highAbove20Candidate"] * 30.0
+            - metric["routeChangedCount"] * 12.0
+        )
+        trial_rows.append(
+            {
+                "strength": strength,
+                "highGainVsV1821Pct": metric["highGainVsV1821Pct"],
+                "targetGainVsV1821Pct": metric["targetGainVsV1821Pct"],
+                "targetGainVsV1821KmS": metric["targetGainVsV1821KmS"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "highAbove20Candidate": metric["highAbove20Candidate"],
+                "routeChangedCount": metric["routeChangedCount"],
+                "activeHighCount": metric["activeHighCount"],
+                "activeProtectedCount": metric["activeProtectedCount"],
+                "utility": utility,
+            }
+        )
+        if (
+            utility > best_utility
+            and metric["protectedMaxRegressionKmS"] <= 0.25
+            and metric["highAbove20Candidate"] == 0
+            and metric["routeChangedCount"] == 0
+        ):
+            best_utility = utility
+            best_strength = strength
+    trial_rows.sort(key=lambda row: (-parse_float(row["utility"], -math.inf), row["strength"]))
+    return best_strength, trial_rows
+
+
+def v18_nfw_radial_transfer_null_rows(
+    base: dict,
+    strength: float,
+    target_names: set[str],
+    target_rows_by_name: dict[str, dict],
+    reference_rows: list[dict],
+) -> list[dict]:
+    clean_curves = [curve for curve in base["cleanCurves"] if curve["lockedModelRoute"] == "low-load" and curve["name"] not in target_names]
+    high_names = {row["galaxy"] for row in reference_rows if row["set"] == "clean-high-rmse" and row["galaxy"] not in target_names}
+    output: list[dict] = []
+    actual_active = [row for row in reference_rows if parse_float(row.get("anyActivation"), 0.0) >= 0.05 and row["set"] != "weak-systematics-excluded"]
+    active_count = max(1, len(actual_active))
+    for seed in V18_NFW_RADIAL_TRANSFER_SEEDS:
+        rng = random.Random(seed)
+        pool = [curve["name"] for curve in clean_curves]
+        rng.shuffle(pool)
+        forced = {name: 1.0 for name in pool[:active_count]}
+        rows = v18_nfw_radial_transfer_score_rows(base, strength, target_names, target_rows_by_name, None, forced)
+        metric = v18_nfw_radial_transfer_metric(rows)
+        output.append(
+            {
+                "nullType": "same-active-count-random-low-load-transfer",
+                "seed": seed,
+                "forcedGalaxies": "; ".join(sorted(forced)),
+                "highGainVsV1821Pct": metric["highGainVsV1821Pct"],
+                "targetGainVsV1821Pct": metric["targetGainVsV1821Pct"],
+                "targetGainVsV1821KmS": metric["targetGainVsV1821KmS"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "highAbove20Candidate": metric["highAbove20Candidate"],
+                "routeChangedCount": metric["routeChangedCount"],
+            }
+        )
+        high_pool = sorted(high_names)
+        rng.shuffle(high_pool)
+        forced = {name: 1.0 for name in high_pool[:active_count]}
+        rows = v18_nfw_radial_transfer_score_rows(base, strength, target_names, target_rows_by_name, None, forced)
+        metric = v18_nfw_radial_transfer_metric(rows)
+        output.append(
+            {
+                "nullType": "same-active-count-random-high-transfer",
+                "seed": seed,
+                "forcedGalaxies": "; ".join(sorted(forced)),
+                "highGainVsV1821Pct": metric["highGainVsV1821Pct"],
+                "targetGainVsV1821Pct": metric["targetGainVsV1821Pct"],
+                "targetGainVsV1821KmS": metric["targetGainVsV1821KmS"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "highAbove20Candidate": metric["highAbove20Candidate"],
+                "routeChangedCount": metric["routeChangedCount"],
+            }
+        )
+        forced = {}
+        completion_rows = [
+            row for row in reference_rows
+            if row["set"] != "weak-systematics-excluded"
+            and row["galaxy"] not in target_names
+            and row.get("lockedRoute") == "low-load"
+            and row.get("legacyCompletionFamily")
+        ]
+        rng.shuffle(completion_rows)
+        forced = {row["galaxy"]: 1.0 for row in completion_rows[:active_count]}
+        rows = v18_nfw_radial_transfer_score_rows(base, strength, target_names, target_rows_by_name, None, forced)
+        metric = v18_nfw_radial_transfer_metric(rows)
+        output.append(
+            {
+                "nullType": "same-active-count-completion-lookalike-transfer",
+                "seed": seed,
+                "forcedGalaxies": "; ".join(sorted(forced)),
+                "highGainVsV1821Pct": metric["highGainVsV1821Pct"],
+                "targetGainVsV1821Pct": metric["targetGainVsV1821Pct"],
+                "targetGainVsV1821KmS": metric["targetGainVsV1821KmS"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "highAbove20Candidate": metric["highAbove20Candidate"],
+                "routeChangedCount": metric["routeChangedCount"],
+            }
+        )
+    return output
+
+
+def write_v18_nfw_radial_transfer_candidate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_nfw_radial_transfer_candidate"
+    benchmark_capsule = write_v18_radial_phase_benchmark_artifacts(DEFAULT_OBSERVED_STATE_V18_RADIAL_PHASE_BENCHMARK_OUT)
+    if not (DEFAULT_OBSERVED_STATE_V18_NFW_ATTACK_OUT / "mts_v18_nfw_gap_attack_case_ledger.csv").exists():
+        write_v18_nfw_gap_attack_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_ATTACK_OUT)
+    base = v18_radial_phase_base_context()
+    train_names, holdout_names = observed_state_split(base["cleanCurves"], SPLIT_SEED, HOLDOUT_FRACTION)
+    target_names, target_rows_by_name = v18_nfw_radial_transfer_target_names()
+    selected_strength, trial_rows = v18_nfw_radial_transfer_select_strength(base, target_names, target_rows_by_name)
+    rows = v18_nfw_radial_transfer_score_rows(base, selected_strength, target_names, target_rows_by_name, (train_names, holdout_names))
+    all_metric = v18_nfw_radial_transfer_metric(rows)
+    holdout_metric = v18_nfw_radial_transfer_metric(rows, "holdout")
+    null_rows = v18_nfw_radial_transfer_null_rows(base, selected_strength, target_names, target_rows_by_name, rows)
+    best_null_high = max([parse_float(row["highGainVsV1821Pct"]) for row in null_rows] or [math.nan])
+    best_null_target = max([parse_float(row["targetGainVsV1821Pct"]) for row in null_rows if math.isfinite(parse_float(row["targetGainVsV1821Pct"]))] or [0.0])
+    null_margin_high = all_metric["highGainVsV1821Pct"] - best_null_high if math.isfinite(best_null_high) else math.nan
+    null_margin_target = all_metric["targetGainVsV1821Pct"] - best_null_target if math.isfinite(best_null_target) else math.nan
+    high_rows = [row for row in rows if row["set"] == "clean-high-rmse"]
+    target_rows = [row for row in high_rows if parse_bool(row.get("lawFacingRadialTransferTarget"))]
+    protected_rows = [
+        row for row in rows
+        if row["set"] == "clean-protected"
+        and (parse_float(row["protectedRegressionKmS"], 0.0) > 0.0 or parse_float(row["anyActivation"], 0.0) >= 0.05)
+    ]
+    changed = [
+        row for row in high_rows
+        if abs(parse_float(row["candidateGainVsV1821KmS"], 0.0)) > 0.05
+    ]
+    changed.sort(key=lambda row: -parse_float(row["candidateGainVsV1821KmS"], 0.0))
+
+    holdout_rows: list[dict] = []
+    for seed in V18_NFW_RADIAL_TRANSFER_SEEDS:
+        seed_train, seed_holdout = observed_state_split(base["cleanCurves"], seed, HOLDOUT_FRACTION)
+        seed_rows = v18_nfw_radial_transfer_score_rows(base, selected_strength, target_names, target_rows_by_name, (seed_train, seed_holdout))
+        metric = v18_nfw_radial_transfer_metric(seed_rows, "holdout")
+        metric["seed"] = seed
+        holdout_rows.append(metric)
+
+    passes = {
+        "targetGainAtLeast25Pct": all_metric["targetGainVsV1821Pct"] >= 25.0,
+        "targetGainAtLeast3KmS": all_metric["targetGainVsV1821KmS"] >= 3.0,
+        "holdoutTargetGainPositiveWhenTargetHeldOut": parse_float(holdout_metric["targetGainVsV1821Pct"], 0.0) > 0.0,
+        "highGainPositive": all_metric["highGainVsV1821Pct"] > 0.0,
+        "highAbove20Zero": all_metric["highAbove20Candidate"] == 0,
+        "protectedRegressionZero": all_metric["protectedMaxRegressionKmS"] == 0.0,
+        "routeChangeZero": all_metric["routeChangedCount"] == 0,
+        "weakLeakageZero": all_metric["weakSystematicsLeakage"] == 0,
+        "targetNullMarginAtLeast10Pct": math.isfinite(null_margin_target) and null_margin_target >= 10.0,
+    }
+    verdict = "v18.26 radial-transfer candidate for review" if all(passes.values()) else "v18.26 radial-transfer candidate not promoted"
+
+    score_rows = [
+        {"metric": key, "value": value}
+        for key, value in {
+            "v1821AllMeanRmse": benchmark_capsule["summary"]["v1821AllMeanRmse"],
+            "v1821HighMeanRmse": benchmark_capsule["summary"]["v1821HighMeanRmse"],
+            "selectedStrength": selected_strength,
+            "candidateHighGainVsV1821Pct": all_metric["highGainVsV1821Pct"],
+            "candidateTargetGainVsV1821Pct": all_metric["targetGainVsV1821Pct"],
+            "candidateTargetGainVsV1821KmS": all_metric["targetGainVsV1821KmS"],
+            "holdoutTargetGainVsV1821Pct": holdout_metric["targetGainVsV1821Pct"],
+            "candidateProtectedMaxRegressionKmS": all_metric["protectedMaxRegressionKmS"],
+            "candidateHighAbove20": all_metric["highAbove20Candidate"],
+            "routeChangedCount": all_metric["routeChangedCount"],
+            "weakSystematicsLeakage": all_metric["weakSystematicsLeakage"],
+            "bestNullHighGainVsV1821Pct": best_null_high,
+            "bestNullTargetGainVsV1821Pct": best_null_target,
+            "nullMarginHighPct": null_margin_high,
+            "nullMarginTargetPct": null_margin_target,
+        }.items()
+    ]
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", rows)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", target_rows)
+    write_csv(out_dir / f"{prefix}_holdout_replay.csv", holdout_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_strength_trials.csv", trial_rows)
+
+    formula = {
+        "candidateId": "observed-state-response-v18.26-nfw-radial-transfer-candidate",
+        "status": verdict,
+        "baseLaw": "locked v18.21 radial-phase release candidate",
+        "selectedStrength": selected_strength,
+        "mechanism": "gas-disk crossover radial transfer: increase inner/mid support and suppress outer support only when the existing v18.21 gas-disk crossover outer-completion state is active in low-load systems",
+        "allowedInputs": [
+            "locked route",
+            "existing v18.21 completion branch state",
+            "gas-disk crossover outer-completion state",
+            "memoryLoad",
+            "u_out",
+            "u_max",
+            "h/rOut",
+            "outerGasShare",
+            "official gas fraction",
+            "official baryonic mass",
+        ],
+        "forbiddenInputs": ["galaxy names", "NFW parameters", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    report = [
+        "# MTS v18.26 NFW Radial-Transfer Candidate",
+        "",
+        "This is a direct law modification test on top of locked v18.21. It attacks the remaining law-facing radial-transfer gap: a low-load gas-disk crossover case where v18.21 is low in the inner/mid radii and high in the outer radii. NFW-prior values are evaluation-only.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Selected transfer strength: `{fmt(selected_strength)}`.",
+        f"- Clean high-RMSE gain over v18.21: `{fmt(all_metric['highGainVsV1821Pct'])}%`.",
+        f"- Radial-transfer target gain over v18.21: `{fmt(all_metric['targetGainVsV1821Pct'])}%` / `{fmt(all_metric['targetGainVsV1821KmS'])}` km/s.",
+        f"- Holdout target gain: `{fmt(holdout_metric['targetGainVsV1821Pct'])}%`.",
+        f"- Protected max regression: `{fmt(all_metric['protectedMaxRegressionKmS'])}` km/s.",
+        f"- Route changes: `{all_metric['routeChangedCount']}`.",
+        f"- High above 20 km/s: `{all_metric['highAbove20Candidate']}`.",
+        f"- Best null target gain: `{fmt(best_null_target)}`%.",
+        f"- Target null margin: `{fmt(null_margin_target)}` points.",
+        "",
+        "## Changed High-RMSE Cases",
+        "",
+        "| Galaxy | Route | v18.21 RMSE | candidate RMSE | gain | branch | route changed |",
+        "| --- | --- | ---: | ---: | ---: | --- | ---: |",
+    ]
+    for row in changed[:20]:
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | {fmt(row['v18_21Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['candidateGainVsV1821KmS'])} | {row['branchHits']} | `{row['routeChangedVsV1821']}` |"
+        )
+    report.extend(
+        [
+            "",
+            "## Acceptance Gates",
+            "",
+            "| Gate | Pass |",
+            "| --- | ---: |",
+        ]
+    )
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.extend(
+        [
+            "",
+            "## Guardrails",
+            "",
+            "- v18.21 remains locked unless this candidate is separately red-teamed and browser-hardened.",
+            "- No q, Gamma0, disk M/L, bulge M/L, galaxy-name, NFW-parameter, residual, or raw-RMSE lookup is introduced.",
+            "- Weak/systematics galaxies remain excluded from fitting and activation.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-v18-nfw-radial-transfer-candidate-v1",
+        "verdict": verdict,
+        "selectedStrength": selected_strength,
+        "summary": {
+            "candidateHighGainVsV1821Pct": all_metric["highGainVsV1821Pct"],
+            "candidateTargetGainVsV1821Pct": all_metric["targetGainVsV1821Pct"],
+            "candidateTargetGainVsV1821KmS": all_metric["targetGainVsV1821KmS"],
+            "holdoutTargetGainVsV1821Pct": holdout_metric["targetGainVsV1821Pct"],
+            "protectedMaxRegressionKmS": all_metric["protectedMaxRegressionKmS"],
+            "routeChangedCount": all_metric["routeChangedCount"],
+            "highAbove20Candidate": all_metric["highAbove20Candidate"],
+            "weakSystematicsLeakage": all_metric["weakSystematicsLeakage"],
+            "bestNullTargetGainVsV1821Pct": best_null_target,
+            "nullMarginTargetPct": null_margin_target,
+            "passes": passes,
+        },
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_holdout_replay.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_strength_trials.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18nfwradialtransfercandidate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_nfw_radial_transfer_candidate_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.26 NFW radial-transfer candidate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"strength={fmt(capsule['selectedStrength'])}",
+                f"high_gain_vs_v1821={fmt(summary['candidateHighGainVsV1821Pct'])}%",
+                f"target_gain_vs_v1821={fmt(summary['candidateTargetGainVsV1821Pct'])}%",
+                f"target_gain_kms={fmt(summary['candidateTargetGainVsV1821KmS'])}",
+                f"protected={fmt(summary['protectedMaxRegressionKmS'])}",
+                f"routes={summary['routeChangedCount']}",
+                f"above20={summary['highAbove20Candidate']}",
+                f"null_margin={fmt(summary['nullMarginTargetPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 NFW radial-transfer candidate to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -81559,6 +82101,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwgapattack",
             "v18nfwsafetycandidate",
             "observedstatev18nfwsafetycandidate",
+            "v18nfwradialtransfercandidate",
+            "observedstatev18nfwradialtransfercandidate",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -81863,6 +82407,8 @@ def main() -> None:
         cmd_v18nfwgapattack(args)
     elif args.mode in {"v18nfwsafetycandidate", "observedstatev18nfwsafetycandidate"}:
         cmd_v18nfwsafetycandidate(args)
+    elif args.mode in {"v18nfwradialtransfercandidate", "observedstatev18nfwradialtransfercandidate"}:
+        cmd_v18nfwradialtransfercandidate(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
