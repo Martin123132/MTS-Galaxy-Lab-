@@ -205,6 +205,7 @@ DEFAULT_OBSERVED_STATE_V18_NFW_PROVENANCE_BOUNDARY_OUT = OUTPUT_PACK_ROOT / "mts
 DEFAULT_OBSERVED_STATE_V18_NFW_CASE_PAIR_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-case-pair-audit-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_FRONTIER_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-frontier-lock-v1"
 DEFAULT_OBSERVED_STATE_V18_REVIEWER_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-reviewer-stress-v1"
+DEFAULT_OBSERVED_STATE_V18_ML_PROTOCOL_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-protocol-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -72217,6 +72218,342 @@ def cmd_v18reviewerstress(args: argparse.Namespace) -> None:
     print(f"Wrote v18 reviewer stress test to {out_dir.resolve()}")
 
 
+def v18_ml_protocol_variants() -> list[dict]:
+    variants: list[dict] = [
+        {
+            "variantId": "nominal",
+            "protocolTier": "nominal",
+            "stressFamily": "nominal",
+            "mlDisk": ML_DISK,
+            "mlBulge": ML_BULGE,
+            "diskFactor": 1.0,
+            "bulgeFactor": 1.0,
+            "vObsScale": 1.0,
+            "baryonVelocityScale": 1.0,
+        }
+    ]
+    for factor in [0.90, 0.95, 1.05, 1.10]:
+        variants.append(
+            {
+                "variantId": f"core_coherent_ml_{factor:.2f}",
+                "protocolTier": "core-plus-minus-10pct",
+                "stressFamily": "coherent-stellar-ml",
+                "mlDisk": ML_DISK * factor,
+                "mlBulge": ML_BULGE * factor,
+                "diskFactor": factor,
+                "bulgeFactor": factor,
+                "vObsScale": 1.0,
+                "baryonVelocityScale": 1.0,
+            }
+        )
+    for disk_factor in [0.90, 1.00, 1.10]:
+        for bulge_factor in [0.90, 1.00, 1.10]:
+            if disk_factor == 1.0 and bulge_factor == 1.0:
+                continue
+            variants.append(
+                {
+                    "variantId": f"core_independent_disk_{disk_factor:.2f}_bulge_{bulge_factor:.2f}",
+                    "protocolTier": "core-plus-minus-10pct",
+                    "stressFamily": "independent-disk-bulge-ml",
+                    "mlDisk": ML_DISK * disk_factor,
+                    "mlBulge": ML_BULGE * bulge_factor,
+                    "diskFactor": disk_factor,
+                    "bulgeFactor": bulge_factor,
+                    "vObsScale": 1.0,
+                    "baryonVelocityScale": 1.0,
+                }
+            )
+    for factor in [0.85, 1.15]:
+        variants.append(
+            {
+                "variantId": f"wide_coherent_ml_{factor:.2f}",
+                "protocolTier": "wide-plus-minus-15pct",
+                "stressFamily": "coherent-stellar-ml",
+                "mlDisk": ML_DISK * factor,
+                "mlBulge": ML_BULGE * factor,
+                "diskFactor": factor,
+                "bulgeFactor": factor,
+                "vObsScale": 1.0,
+                "baryonVelocityScale": 1.0,
+            }
+        )
+    for disk_factor in [0.85, 1.15]:
+        for bulge_factor in [0.85, 1.00, 1.15]:
+            variants.append(
+                {
+                    "variantId": f"wide_independent_disk_{disk_factor:.2f}_bulge_{bulge_factor:.2f}",
+                    "protocolTier": "wide-plus-minus-15pct",
+                    "stressFamily": "independent-disk-bulge-ml",
+                    "mlDisk": ML_DISK * disk_factor,
+                    "mlBulge": ML_BULGE * bulge_factor,
+                    "diskFactor": disk_factor,
+                    "bulgeFactor": bulge_factor,
+                    "vObsScale": 1.0,
+                    "baryonVelocityScale": 1.0,
+                }
+            )
+
+    unique: dict[str, dict] = {}
+    for variant in variants:
+        unique.setdefault(variant["variantId"], variant)
+    return list(unique.values())
+
+
+def v18_ml_protocol_group_summary(variant_rows: list[dict]) -> list[dict]:
+    groups: list[dict] = []
+    for tier in ["nominal", "core-plus-minus-10pct", "wide-plus-minus-15pct"]:
+        rows = [row for row in variant_rows if row["protocolTier"] == tier]
+        if not rows:
+            continue
+        high_gains = [parse_float(row["v18_26HighGainVsCanonicalPct"]) for row in rows]
+        clean_gains = [parse_float(row["v18_26CleanGainVsCanonicalPct"]) for row in rows]
+        groups.append(
+            {
+                "protocolTier": tier,
+                "variantCount": len(rows),
+                "minHighGainPct": min(high_gains),
+                "medianHighGainPct": safe_median(high_gains),
+                "minCleanGainPct": min(clean_gains),
+                "medianCleanGainPct": safe_median(clean_gains),
+                "maxHighAbove20": max(parse_float(row["highAbove20"], 0.0) for row in rows),
+                "maxProtectedRegressionVsV18_21KmS": max(parse_float(row["protectedMaxRegressionVsV18_21KmS"], 0.0) for row in rows),
+                "maxWeakLeakage": max(parse_float(row["weakSystematicsLeakage"], 0.0) for row in rows),
+                "worstHighGainVariant": min(rows, key=lambda row: parse_float(row["v18_26HighGainVsCanonicalPct"], math.inf))["variantId"],
+                "worstAbove20Variant": max(rows, key=lambda row: parse_float(row["highAbove20"], -math.inf))["variantId"],
+            }
+        )
+    return groups
+
+
+def write_v18_ml_protocol_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_ml_protocol"
+    reviewer_capsule = write_v18_reviewer_stress_artifacts(DEFAULT_OBSERVED_STATE_V18_REVIEWER_STRESS_OUT)
+    frontier_capsule = write_v18_nfw_frontier_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_FRONTIER_LOCK_OUT)
+    candidate_capsule = read_json_if_exists(
+        DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_OUT / "mts_v18_nfw_radial_transfer_candidate_capsule.json"
+    ) or write_v18_nfw_radial_transfer_candidate_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_OUT)
+    strength = parse_float(candidate_capsule.get("selectedStrength"), 0.40)
+    base = v18_radial_phase_base_context()
+    target_names, target_rows_by_name = v18_nfw_radial_transfer_target_names()
+
+    variant_rows: list[dict] = []
+    case_rows: list[dict] = []
+    high_failure_rows: list[dict] = []
+    protected_rows: list[dict] = []
+    for variant in v18_ml_protocol_variants():
+        variant_base = v18_reviewer_stress_variant_base(base, variant)
+        rows = v18_nfw_radial_transfer_score_rows(variant_base, strength, target_names, target_rows_by_name)
+        summary = v18_reviewer_stress_summary_for_rows(rows, variant)
+        summary["protocolTier"] = variant["protocolTier"]
+        summary["diskFactor"] = variant["diskFactor"]
+        summary["bulgeFactor"] = variant["bulgeFactor"]
+        variant_rows.append(summary)
+        for row in rows:
+            augmented = {
+                "variantId": variant["variantId"],
+                "protocolTier": variant["protocolTier"],
+                "stressFamily": variant["stressFamily"],
+                "diskFactor": variant["diskFactor"],
+                "bulgeFactor": variant["bulgeFactor"],
+                "mlDisk": variant["mlDisk"],
+                "mlBulge": variant["mlBulge"],
+                **row,
+                "candidateRegressionVsCanonicalKmS": max(0.0, parse_float(row["candidateRmse"]) - parse_float(row["canonicalRmse"])),
+            }
+            case_rows.append(augmented)
+            if row["set"] == "clean-high-rmse" and parse_bool(row["above20Candidate"]):
+                high_failure_rows.append(augmented)
+            if row["set"] == "clean-protected" and (
+                parse_float(row.get("protectedRegressionKmS"), 0.0) > 1e-9
+                or parse_float(augmented["candidateRegressionVsCanonicalKmS"], 0.0) > 1e-9
+                or parse_float(row.get("anyActivation"), 0.0) >= 0.05
+            ):
+                protected_rows.append(augmented)
+
+    group_rows = v18_ml_protocol_group_summary(variant_rows)
+    group_by_tier = {row["protocolTier"]: row for row in group_rows}
+    core = group_by_tier.get("core-plus-minus-10pct", {})
+    wide = group_by_tier.get("wide-plus-minus-15pct", {})
+    nominal = group_by_tier.get("nominal", {})
+    passes = {
+        "frontierLockPassed": frontier_capsule.get("verdict") == "v18.26 NFW frontier locked",
+        "reviewerStressRecordedFragility": reviewer_capsule.get("verdict") == "v18.26 reviewer stress fragile but useful",
+        "coreMedianHighGainAtLeast60Pct": parse_float(core.get("medianHighGainPct"), -math.inf) >= 60.0,
+        "coreMedianCleanGainAtLeast38Pct": parse_float(core.get("medianCleanGainPct"), -math.inf) >= 38.0,
+        "coreMinHighGainAtLeast45Pct": parse_float(core.get("minHighGainPct"), -math.inf) >= 45.0,
+        "coreMaxHighAbove20AtMost10": parse_float(core.get("maxHighAbove20"), math.inf) <= 10,
+        "coreProtectedRegressionZero": parse_float(core.get("maxProtectedRegressionVsV18_21KmS"), math.inf) == 0.0,
+        "wideMedianHighGainAtLeast50Pct": parse_float(wide.get("medianHighGainPct"), -math.inf) >= 50.0,
+        "wideProtectedRegressionBelow1": parse_float(wide.get("maxProtectedRegressionVsV18_21KmS"), math.inf) < 1.0,
+        "weakLeakageZero": max(parse_float(row["weakSystematicsLeakage"], 0.0) for row in variant_rows) == 0,
+        "lawUnchanged": True,
+    }
+    if all(passes.values()):
+        verdict = "v18.26 M/L protocol passed"
+    elif passes["frontierLockPassed"] and passes["coreProtectedRegressionZero"] and passes["weakLeakageZero"]:
+        verdict = "v18.26 M/L protocol defines calibration boundary"
+    else:
+        verdict = "v18.26 M/L protocol blocked"
+
+    high_failure_summary: list[dict] = []
+    for name in sorted({row["galaxy"] for row in high_failure_rows}):
+        rows = [row for row in high_failure_rows if row["galaxy"] == name]
+        high_failure_summary.append(
+            {
+                "galaxy": name,
+                "failureVariantCount": len(rows),
+                "tiers": "; ".join(sorted({row["protocolTier"] for row in rows})),
+                "worstRmse": max(parse_float(row["candidateRmse"]) for row in rows),
+                "worstVariant": max(rows, key=lambda row: parse_float(row["candidateRmse"]))["variantId"],
+                "lockedRoute": rows[0].get("lockedRoute", ""),
+                "branchHits": "; ".join(sorted({row.get("branchHits", "") for row in rows if row.get("branchHits", "")})),
+            }
+        )
+    high_failure_summary.sort(key=lambda row: (-parse_float(row["failureVariantCount"]), -parse_float(row["worstRmse"]), row["galaxy"]))
+
+    guard = {
+        "candidateId": "observed-state-response-v18.32-ml-protocol",
+        "verdict": verdict,
+        "lawChanged": False,
+        "baseLaw": "locked v18.26 radial-transfer candidate",
+        "purpose": "Define the M/L uncertainty envelope within which v18.26 should be judged, rather than treating extreme grid corners as formula failures.",
+        "coreProtocol": "disk and bulge stellar M/L independently varied by +/-10%, plus coherent +/-10%",
+        "wideProtocol": "coherent and independent +/-15% watchlist boundary",
+        "forbiddenInputs": ["galaxy names in formula", "raw residual lookup", "raw RMSE formula input", "NFW parameters", "weak/systematics training"],
+        "browserChanged": False,
+    }
+
+    score_rows = [
+        {"metric": "verdict", "value": verdict},
+        {"metric": "nominalHighGainPct", "value": nominal.get("medianHighGainPct", "")},
+        {"metric": "nominalCleanGainPct", "value": nominal.get("medianCleanGainPct", "")},
+        {"metric": "coreMedianHighGainPct", "value": core.get("medianHighGainPct", "")},
+        {"metric": "coreMinHighGainPct", "value": core.get("minHighGainPct", "")},
+        {"metric": "coreMaxHighAbove20", "value": core.get("maxHighAbove20", "")},
+        {"metric": "coreMedianCleanGainPct", "value": core.get("medianCleanGainPct", "")},
+        {"metric": "wideMedianHighGainPct", "value": wide.get("medianHighGainPct", "")},
+        {"metric": "wideMinHighGainPct", "value": wide.get("minHighGainPct", "")},
+        {"metric": "wideMaxHighAbove20", "value": wide.get("maxHighAbove20", "")},
+        {"metric": "protectedRegressionMax", "value": max(parse_float(row["protectedMaxRegressionVsV18_21KmS"], 0.0) for row in variant_rows)},
+        {"metric": "weakSystematicsLeakageMax", "value": max(parse_float(row["weakSystematicsLeakage"], 0.0) for row in variant_rows)},
+        {"metric": "highFailureGalaxyCount", "value": len(high_failure_summary)},
+    ]
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_variant_summary.csv", variant_rows)
+    write_csv(out_dir / f"{prefix}_group_summary.csv", group_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_high_failure_summary.csv", high_failure_summary)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    (out_dir / f"{prefix}_formula_guard.json").write_text(json.dumps(json_clean(guard), indent=2, sort_keys=True), encoding="utf-8")
+
+    report = [
+        "# MTS v18.32 M/L Protocol",
+        "",
+        "This is not a new law. It keeps v18.26 frozen and defines the stellar M/L uncertainty envelope a reviewer can use before calling the high-RMSE repair fragile.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Nominal high-RMSE gain: `{fmt(nominal.get('medianHighGainPct'))}%`.",
+        f"- Nominal clean gain: `{fmt(nominal.get('medianCleanGainPct'))}%`.",
+        f"- Core +/-10% median high-RMSE gain: `{fmt(core.get('medianHighGainPct'))}%`; minimum `{fmt(core.get('minHighGainPct'))}%`.",
+        f"- Core +/-10% median clean gain: `{fmt(core.get('medianCleanGainPct'))}%`; high above-20 max `{fmt(core.get('maxHighAbove20'))}`.",
+        f"- Wide +/-15% median high-RMSE gain: `{fmt(wide.get('medianHighGainPct'))}%`; minimum `{fmt(wide.get('minHighGainPct'))}%`.",
+        f"- Wide +/-15% high above-20 max: `{fmt(wide.get('maxHighAbove20'))}`.",
+        f"- Protected regression max: `{fmt(max(parse_float(row['protectedMaxRegressionVsV18_21KmS'], 0.0) for row in variant_rows))}` km/s.",
+        "",
+        "## Protocol Tiers",
+        "",
+        "| Tier | Variants | Min high gain | Median high gain | Min clean gain | Median clean gain | Max high >20 | Protected reg |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in group_rows:
+        report.append(
+            f"| {row['protocolTier']} | {row['variantCount']} | {fmt(row['minHighGainPct'])} | {fmt(row['medianHighGainPct'])} | {fmt(row['minCleanGainPct'])} | {fmt(row['medianCleanGainPct'])} | {fmt(row['maxHighAbove20'])} | {fmt(row['maxProtectedRegressionVsV18_21KmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Recurrent M/L Boundary Failures",
+            "",
+            "| Galaxy | Failure variants | Tiers | Worst RMSE | Worst variant | Route | Branch |",
+            "| --- | ---: | --- | ---: | --- | --- | --- |",
+        ]
+    )
+    for row in high_failure_summary[:25]:
+        report.append(
+            f"| {row['galaxy']} | {row['failureVariantCount']} | {row['tiers']} | {fmt(row['worstRmse'])} | {row['worstVariant']} | {row['lockedRoute']} | {row['branchHits']} |"
+        )
+    report.extend(["", "## Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.extend(
+        [
+            "",
+            "## Reviewer Use",
+            "",
+            "Use v18.26 as a fixed-M/L framework candidate at the SPARC-standard nominal values. Under M/L review, cite the core +/-10% envelope as the fair robustness band. The wider +/-15% envelope is a boundary watchlist, not a new formula tuning permission. Extreme full-grid corners from v18.31 remain useful stress evidence but should not be presented as the normal physical prior.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-v18-ml-protocol-v1",
+        "verdict": verdict,
+        "summary": {
+            "nominalHighGainPct": nominal.get("medianHighGainPct", math.nan),
+            "nominalCleanGainPct": nominal.get("medianCleanGainPct", math.nan),
+            "coreMedianHighGainPct": core.get("medianHighGainPct", math.nan),
+            "coreMinHighGainPct": core.get("minHighGainPct", math.nan),
+            "coreMedianCleanGainPct": core.get("medianCleanGainPct", math.nan),
+            "coreMaxHighAbove20": core.get("maxHighAbove20", math.nan),
+            "wideMedianHighGainPct": wide.get("medianHighGainPct", math.nan),
+            "wideMinHighGainPct": wide.get("minHighGainPct", math.nan),
+            "wideMaxHighAbove20": wide.get("maxHighAbove20", math.nan),
+            "protectedRegressionMax": max(parse_float(row["protectedMaxRegressionVsV18_21KmS"], 0.0) for row in variant_rows),
+            "weakSystematicsLeakageMax": max(parse_float(row["weakSystematicsLeakage"], 0.0) for row in variant_rows),
+            "highFailureGalaxyCount": len(high_failure_summary),
+            "passes": passes,
+        },
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_variant_summary.csv",
+            f"{prefix}_group_summary.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_high_failure_summary.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_formula_guard.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18mlprotocol(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_ML_PROTOCOL_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_ml_protocol_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.32 M/L protocol")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"core_high={fmt(summary['coreMedianHighGainPct'])}%",
+                f"core_min={fmt(summary['coreMinHighGainPct'])}%",
+                f"core_above20={fmt(summary['coreMaxHighAbove20'])}",
+                f"wide_high={fmt(summary['wideMedianHighGainPct'])}%",
+                f"protected={fmt(summary['protectedRegressionMax'])}",
+                f"fail_cases={summary['highFailureGalaxyCount']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 M/L protocol to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -85277,6 +85614,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwfrontierlock",
             "v18reviewerstress",
             "observedstatev18reviewerstress",
+            "v18mlprotocol",
+            "observedstatev18mlprotocol",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -85599,6 +85938,8 @@ def main() -> None:
         cmd_v18nfwfrontierlock(args)
     elif args.mode in {"v18reviewerstress", "observedstatev18reviewerstress"}:
         cmd_v18reviewerstress(args)
+    elif args.mode in {"v18mlprotocol", "observedstatev18mlprotocol"}:
+        cmd_v18mlprotocol(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
