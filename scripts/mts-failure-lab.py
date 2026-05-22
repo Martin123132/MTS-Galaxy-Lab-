@@ -199,12 +199,14 @@ DEFAULT_OBSERVED_STATE_V18_NFW_SAFETY_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-safe
 DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-radial-transfer-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-radial-transfer-redteam-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_MERGE_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-radial-transfer-merge-v1"
+DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_BROWSER_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-radial-transfer-browser-lock-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
 V18_FAMILY_SURFACE_ARTIFACT_PATH = ROOT / "data" / "v18-07-family-surface-candidate.js"
 V18_SURFACE_SMOOTH_ARTIFACT_PATH = ROOT / "data" / "v18-09-surface-persistence-candidate.js"
 V18_RADIAL_PHASE_ARTIFACT_PATH = ROOT / "data" / "v18-21-radial-phase-candidate.js"
+V18_NFW_RADIAL_TRANSFER_ARTIFACT_PATH = ROOT / "data" / "v18-26-radial-transfer-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -69709,6 +69711,370 @@ def cmd_v18nfwradialtransfermerge(args: argparse.Namespace) -> None:
     print(f"Wrote v18.26 radial-transfer merge benchmark to {out_dir.resolve()}")
 
 
+def write_v18_nfw_radial_transfer_browser_lock_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_nfw_radial_transfer_browser_lock"
+    candidate_capsule = write_v18_nfw_radial_transfer_candidate_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_OUT)
+    redteam_capsule = write_v18_nfw_radial_transfer_redteam_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_REDTEAM_OUT)
+    merge_capsule = write_v18_nfw_radial_transfer_merge_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_MERGE_OUT)
+    strength = parse_float(candidate_capsule.get("selectedStrength"), 0.40)
+    base = v18_radial_phase_base_context()
+    train_names, holdout_names = observed_state_split(base["cleanCurves"], SPLIT_SEED, HOLDOUT_FRACTION)
+    target_names, target_rows_by_name = v18_nfw_radial_transfer_target_names()
+    rows = v18_nfw_radial_transfer_score_rows(base, strength, target_names, target_rows_by_name, (train_names, holdout_names))
+    metric = v18_nfw_radial_transfer_metric(rows)
+    holdout_metric = v18_nfw_radial_transfer_metric(rows, "holdout")
+    null_rows = v18_nfw_radial_transfer_null_rows(base, strength, target_names, target_rows_by_name, rows)
+    best_null_target = max([parse_float(row["targetGainVsV1821Pct"]) for row in null_rows if math.isfinite(parse_float(row["targetGainVsV1821Pct"]))] or [0.0])
+    null_margin_target = metric["targetGainVsV1821Pct"] - best_null_target if math.isfinite(best_null_target) else math.nan
+
+    artifact_curves: dict[str, dict] = {}
+    case_rows: list[dict] = []
+    parity_rows: list[dict] = []
+    row_by_name = {row["galaxy"]: row for row in rows}
+
+    for curve in base["curves"]:
+        name = curve["name"]
+        set_name = v18_competitor_set_label(name, base["weakNames"], base["highNames"])
+        v18_supports = [base["v18Lookup"][(name, index)] for index in range(len(curve["points"]))]
+        if name in base["weakNames"]:
+            v1821_supports = v18_supports[:]
+            candidate_supports = v1821_supports[:]
+            acts = {"gasDiskCrossoverRadialTransfer": 0.0, "anyActivation": 0.0}
+            legacy_family = ""
+            official_family = ""
+            radial_hits = []
+        else:
+            v1821_supports, v1821_acts, _profile_values, _mass_features, _legacy_features, legacy_family, official_family = v18_radial_phase_supports(
+                curve,
+                v18_supports,
+                base["baseStrengths"],
+                base["table1ByName"],
+            )
+            candidate_supports, acts, _values, _mass_values = v18_nfw_radial_transfer_supports(
+                curve,
+                v1821_supports,
+                strength,
+                base["table1ByName"],
+                v1821_acts,
+                legacy_family,
+            )
+            radial_hits = [family for family in V18_RADIAL_PHASE_STRENGTHS if parse_float(v1821_acts.get(family), 0.0) >= 0.20]
+
+        baseline = score_curve(curve)
+        v1821_score = v18_competitor_support_score(curve, v1821_supports)
+        candidate = v18_competitor_support_score(curve, candidate_supports)
+        artifact_score = observed_state_score_curve_from_supports(curve, candidate_supports)
+        rmse_diff = artifact_score["rmse"] - candidate["rmse"]
+        route_match = artifact_score["candidateRoute"] == candidate["candidateRoute"]
+        parity_claimed = name not in base["weakNames"]
+        parity_pass = (not parity_claimed) or (abs(rmse_diff) <= 1e-9 and route_match)
+        candidate_row = row_by_name.get(name, {})
+        split = candidate_row.get("split", "weak-excluded" if name in base["weakNames"] else "")
+        branch_hits = "gasDiskCrossoverRadialTransfer" if parse_float(acts.get("gasDiskCrossoverRadialTransfer"), 0.0) >= 0.05 else ""
+        protected_regression = max(0.0, candidate["rmse"] - v1821_score["rmse"]) if set_name == "clean-protected" else 0.0
+        entry = {
+            "candidateId": "observed-state-response-v18.26-nfw-radial-transfer-release-candidate",
+            "releaseCandidate": "MTS v18.26 radial-transfer candidate",
+            "supportSource": "python v18.26 exact support cache",
+            "support2": [float(value) for value in candidate_supports],
+            "set": set_name,
+            "split": split,
+            "lockedRoute": curve.get("lockedModelRoute", ""),
+            "observedRoute": curve.get("route", ""),
+            "baselineRmse": baseline["rmse"],
+            "v1821Rmse": v1821_score["rmse"],
+            "v1826Rmse": candidate["rmse"],
+            "v1826ArtifactRmse": artifact_score["rmse"],
+            "v1826RmseDiffVsPython": rmse_diff,
+            "v1821CandidateRoute": v1821_score["candidateRoute"],
+            "v1826CandidateRoute": candidate["candidateRoute"],
+            "v1826ArtifactRoute": artifact_score["candidateRoute"],
+            "candidateRoute": candidate["candidateRoute"],
+            "branchHits": branch_hits,
+            "radialPhaseFamilies": "; ".join(radial_hits),
+            "legacyCompletionFamily": legacy_family,
+            "officialMassScaleFamily": official_family,
+            "gasDiskCrossoverRadialTransferActivation": acts.get("gasDiskCrossoverRadialTransfer", 0.0),
+            "anyActivation": acts.get("anyActivation", 0.0),
+            "reviewGate": "weak/systematics excluded" if name in base["weakNames"] else "clean framework-facing",
+            "browserParityPass": parity_pass,
+        }
+        artifact_curves[name] = entry
+        case_rows.append(
+            {
+                "galaxy": name,
+                "set": set_name,
+                "split": split,
+                "baselineRmse": baseline["rmse"],
+                "v1821Rmse": v1821_score["rmse"],
+                "v1826Rmse": candidate["rmse"],
+                "gainVsV1821KmS": v1821_score["rmse"] - candidate["rmse"],
+                "gainVsV1821Pct": pct_improvement(v1821_score["rmse"], candidate["rmse"]),
+                "protectedRegressionVsV1821KmS": protected_regression if set_name == "clean-protected" else "",
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "v1821Route": v1821_score["candidateRoute"],
+                "v1826Route": candidate["candidateRoute"],
+                "branchHits": branch_hits,
+                "radialPhaseFamilies": entry["radialPhaseFamilies"],
+                "stillAbove20": candidate["rmse"] >= 20.0 if set_name == "clean-high-rmse" else "",
+                "weakSystematicsExcluded": name in base["weakNames"],
+                "routeChangedVsV1821": candidate["candidateRoute"] != v1821_score["candidateRoute"],
+            }
+        )
+        parity_rows.append(
+            {
+                "galaxy": name,
+                "set": set_name,
+                "supportSource": entry["supportSource"],
+                "pythonV1826Rmse": candidate["rmse"],
+                "artifactRmse": artifact_score["rmse"],
+                "artifactMinusPythonRmse": rmse_diff,
+                "pythonRoute": candidate["candidateRoute"],
+                "artifactRoute": artifact_score["candidateRoute"],
+                "routeMatch": route_match,
+                "parityClaimed": parity_claimed,
+                "parityPass": parity_pass,
+            }
+        )
+
+    clean_rows = [row for row in case_rows if row["set"] != "weak-systematics-excluded"]
+    high_rows = [row for row in case_rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [row for row in case_rows if row["set"] == "clean-protected"]
+    holdout_rows = [row for row in clean_rows if row["split"] == "holdout"]
+    holdout_high_rows = [row for row in high_rows if row["split"] == "holdout"]
+    protected_regressions = [parse_float(row.get("protectedRegressionVsV1821KmS"), 0.0) for row in protected_rows]
+    protected_worse_count = sum(1 for value in protected_regressions if value > 1e-9)
+    clean_parity_rows = [row for row in parity_rows if row["parityClaimed"]]
+    clean_parity_mismatch_count = sum(1 for row in clean_parity_rows if not row["parityPass"])
+    route_mismatch_count = sum(1 for row in clean_parity_rows if not parse_bool(row["routeMatch"]))
+    max_rmse_diff = max([abs(parse_float(row["artifactMinusPythonRmse"], 0.0)) for row in clean_parity_rows] or [0.0])
+    candidate_high_gain = pct_improvement(
+        safe_mean(row["baselineRmse"] for row in high_rows),
+        safe_mean(row["v1826Rmse"] for row in high_rows),
+    )
+    candidate_clean_gain = pct_improvement(
+        safe_mean(row["baselineRmse"] for row in clean_rows),
+        safe_mean(row["v1826Rmse"] for row in clean_rows),
+    )
+    holdout_high_gain = pct_improvement(
+        safe_mean(row["baselineRmse"] for row in holdout_high_rows),
+        safe_mean(row["v1826Rmse"] for row in holdout_high_rows),
+    )
+    holdout_clean_gain = pct_improvement(
+        safe_mean(row["baselineRmse"] for row in holdout_rows),
+        safe_mean(row["v1826Rmse"] for row in holdout_rows),
+    )
+    high_above20 = sum(1 for row in high_rows if parse_bool(row["stillAbove20"]))
+    weak_leakage = metric["weakSystematicsLeakage"]
+    release_ready = (
+        candidate_capsule["verdict"] == "v18.26 radial-transfer candidate for review"
+        and redteam_capsule["verdict"] == "v18.26 exact gate survives red-team; do not broaden"
+        and merge_capsule["verdict"] == "v18.26 merged release candidate for review"
+        and clean_parity_mismatch_count == 0
+        and route_mismatch_count == 0
+        and high_above20 == 0
+        and max(protected_regressions or [0.0]) == 0.0
+        and weak_leakage == 0
+        and math.isfinite(null_margin_target)
+        and null_margin_target >= 10.0
+    )
+    verdict = "v18.26 browser cache lock passed" if release_ready else "v18.26 browser cache lock blocked"
+    summary = {
+        "candidateId": "observed-state-response-v18.26-nfw-radial-transfer-browser-lock",
+        "verdict": verdict,
+        "artifactPath": str(V18_NFW_RADIAL_TRANSFER_ARTIFACT_PATH),
+        "artifactCurveCount": len(artifact_curves),
+        "cleanCurveCount": len(clean_rows),
+        "weakSystematicsExcludedCount": len(base["weakNames"]),
+        "allGalaxyLockedMtsMeanRmse": safe_mean(score_curve(curve)["rmse"] for curve in base["curves"]),
+        "cleanSetLockedMtsMeanRmse": safe_mean(row["baselineRmse"] for row in clean_rows),
+        "v1826AllMeanRmse": safe_mean(row["v1826Rmse"] for row in clean_rows + [row for row in case_rows if row["set"] == "weak-systematics-excluded"]),
+        "v1826HighGainPct": candidate_high_gain,
+        "v1826CleanGainPct": candidate_clean_gain,
+        "v1826HoldoutHighGainPct": holdout_high_gain,
+        "v1826HoldoutCleanGainPct": holdout_clean_gain,
+        "v1826HighGainVsV1821Pct": metric["highGainVsV1821Pct"],
+        "v1826TargetGainVsV1821Pct": metric["targetGainVsV1821Pct"],
+        "v1826TargetGainVsV1821KmS": metric["targetGainVsV1821KmS"],
+        "v1826HoldoutTargetGainVsV1821Pct": holdout_metric["targetGainVsV1821Pct"],
+        "v1826HighAbove20": high_above20,
+        "v1826ProtectedMaxRegressionVsV1821KmS": max(protected_regressions or [0.0]),
+        "v1826ProtectedWorseCountVsV1821": protected_worse_count,
+        "weakSystematicsLeakage": weak_leakage,
+        "browserCacheParityMismatchCount": clean_parity_mismatch_count,
+        "browserRouteMismatchCount": route_mismatch_count,
+        "maxCleanArtifactMinusPythonRmseAbs": max_rmse_diff,
+        "bestNullTargetGainPct": best_null_target,
+        "nullMarginTargetPct": null_margin_target,
+        "candidateVerdict": candidate_capsule["verdict"],
+        "redteamVerdict": redteam_capsule["verdict"],
+        "mergeVerdict": merge_capsule["verdict"],
+        "nativeFormulaCanReplaceCache": False,
+    }
+
+    artifact_payload = {
+        "metadata": {
+            "candidateId": "observed-state-response-v18.26-nfw-radial-transfer-release-candidate",
+            "displayName": "MTS v18.26 radial-transfer candidate",
+            "source": "scripts/mts-failure-lab.py v18nfwradialtransferbrowserlock",
+            "supportCacheBasis": "v18.26 exact support arrays generated from the Python-tested radial-transfer candidate",
+            "releaseCandidateBasis": "v18.26 red-team and merge benchmark passed with one narrow gas-disk crossover radial-transfer hit and zero protected regression",
+            "curveCount": len(artifact_curves),
+            "cleanCurveCount": len(clean_rows),
+            "weakSystematicsExcludedCount": len(base["weakNames"]),
+            "verdict": verdict,
+            "reviewGate": {
+                "candidateId": "observed-state-response-v18.26-nfw-radial-transfer-release-candidate",
+                "verdict": verdict,
+                "nominalHighGainPct": candidate_high_gain,
+                "nominalCleanGainPct": candidate_clean_gain,
+                "holdoutHighGainPct": holdout_high_gain,
+                "holdoutCleanGainPct": holdout_clean_gain,
+                "highGainVsV1821Pct": metric["highGainVsV1821Pct"],
+                "targetGainVsV1821Pct": metric["targetGainVsV1821Pct"],
+                "stressAbove20": high_above20,
+                "nullMarginKmS": null_margin_target,
+                "releaseBranchShuffleNullMarginPct": null_margin_target,
+                "activeProtectedWorseCount": protected_worse_count,
+                "protectedMaxRegressionKmS": max(protected_regressions or [0.0]),
+            },
+            "releaseLockV1826": {
+                "candidateId": "observed-state-response-v18.26-nfw-radial-transfer-browser-lock",
+                "verdict": verdict,
+                "artifactCandidateId": "observed-state-response-v18.26-nfw-radial-transfer-release-candidate",
+                "artifactDisplayName": "MTS v18.26 radial-transfer candidate",
+                "allGalaxyLockedMtsMeanRmse": summary["allGalaxyLockedMtsMeanRmse"],
+                "cleanSetLockedMtsMeanRmse": summary["cleanSetLockedMtsMeanRmse"],
+                "cleanHighGainPct": candidate_high_gain,
+                "cleanGainPct": candidate_clean_gain,
+                "cleanHighAbove20AfterCandidate": high_above20,
+                "maxProtectedRegressionKmS": max(protected_regressions or [0.0]),
+                "protectedRegressionCount": protected_worse_count,
+                "weakSystematicsLeakage": weak_leakage,
+                "weakSystematicsExcludedCount": len(base["weakNames"]),
+                "browserCacheParityMismatchCount": clean_parity_mismatch_count,
+                "browserRouteMismatchCount": route_mismatch_count,
+                "nativeFormulaCanReplaceCache": False,
+                "nativeFormulaParityMismatchCount": 0,
+                "nativeFormulaRouteMismatchCount": 0,
+                "exactSupportCacheRemainsSourceOfTruth": True,
+                "releaseBranchShuffleNullMarginPct": null_margin_target,
+                "targetNullMarginPct": null_margin_target,
+                "canonicalMtsChanged": False,
+                "forbiddenFormulaInputsUsed": False,
+            },
+            "nativeFormulaV1826": {
+                "canReplaceCache": False,
+                "reason": "v18.26 is browser-locked to the exact tested support cache; no native compression has been attempted",
+                "browserCacheParityMismatchCount": clean_parity_mismatch_count,
+                "nativeFormulaParityMismatchCount": 0,
+                "nativeFormulaRouteMismatchCount": 0,
+                "cleanHighAbove20AfterCandidate": high_above20,
+                "maxProtectedRegressionKmS": max(protected_regressions or [0.0]),
+                "protectedRegressionCount": protected_worse_count,
+                "weakSystematicsLeakage": weak_leakage,
+            },
+            "radialTransferRedTeamV1826": redteam_capsule["summary"],
+            "radialTransferMergeV1826": merge_capsule["summary"],
+            "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "NFW parameter lookup", "weak/systematics training"],
+        },
+        "curves": artifact_curves,
+    }
+
+    out_artifact = out_dir / "mts_v18_nfw_radial_transfer_browser_artifact.js"
+    write_window_json_assignment(out_artifact, "MTS_V18_26_RADIAL_TRANSFER_CANDIDATE", artifact_payload)
+    write_window_json_assignment(V18_NFW_RADIAL_TRANSFER_ARTIFACT_PATH, "MTS_V18_26_RADIAL_TRANSFER_CANDIDATE", artifact_payload)
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_browser_parity.csv", parity_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(
+        json.dumps(
+            json_clean(
+                {
+                    "candidateId": "observed-state-response-v18.26-nfw-radial-transfer-release-candidate",
+                    "baseCandidate": "MTS v18.21 radial-phase release candidate",
+                    "browserSourceOfTruth": "exact support cache",
+                    "artifactPath": str(V18_NFW_RADIAL_TRANSFER_ARTIFACT_PATH),
+                    "nativeFormulaCanReplaceCache": False,
+                    "canonicalConstantsChanged": False,
+                    "selectedStrength": strength,
+                    "mechanism": "narrow gas-disk crossover radial transfer on top of v18.21",
+                    "forbiddenInputsUsed": False,
+                }
+            ),
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    report = [
+        "# MTS v18.26 Radial-Transfer Browser Cache Lock",
+        "",
+        "This is browser integration for the already red-team-tested v18.26 candidate. It does not tune a new law and it does not replace v18.21 as the default release path.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Browser artifact: `{V18_NFW_RADIAL_TRANSFER_ARTIFACT_PATH}`.",
+        f"- Clean high-RMSE gain vs canonical: `{fmt(candidate_high_gain)}%`.",
+        f"- Clean-set gain vs canonical: `{fmt(candidate_clean_gain)}%`.",
+        f"- High-RMSE gain over v18.21: `{fmt(metric['highGainVsV1821Pct'])}%`.",
+        f"- Radial-transfer target gain over v18.21: `{fmt(metric['targetGainVsV1821Pct'])}%` / `{fmt(metric['targetGainVsV1821KmS'])}` km/s.",
+        f"- Protected max regression vs v18.21: `{fmt(max(protected_regressions or [0.0]))}` km/s.",
+        f"- Weak/systematics leakage: `{weak_leakage}`.",
+        f"- Browser cache parity mismatches: `{clean_parity_mismatch_count}`.",
+        f"- Browser route mismatches: `{route_mismatch_count}`.",
+        f"- Target null margin: `{fmt(null_margin_target)}` points.",
+        "",
+        "## Browser Semantics",
+        "",
+        "- The preset label is `MTS v18.26 radial-transfer candidate (exact cache gated)`.",
+        "- Runtime must say `exact cache locked`; v18.26 is not native-expression backed.",
+        "- v18.21 remains available as its own release candidate preset.",
+        "- q, Gamma0, disk M/L, and bulge M/L remain unchanged.",
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-nfw-radial-transfer-browser-lock-v1",
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_browser_parity.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+            "mts_v18_nfw_radial_transfer_browser_artifact.js",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18nfwradialtransferbrowserlock(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_BROWSER_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_nfw_radial_transfer_browser_lock_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.26 radial-transfer browser cache lock")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high_gain={fmt(summary['v1826HighGainPct'])}%",
+                f"gain_vs_v1821={fmt(summary['v1826HighGainVsV1821Pct'])}%",
+                f"target_gain={fmt(summary['v1826TargetGainVsV1821Pct'])}%",
+                f"protected={fmt(summary['v1826ProtectedMaxRegressionVsV1821KmS'])}",
+                f"cache_mismatch={summary['browserCacheParityMismatchCount']}",
+            ]
+        )
+    )
+    print(f"Wrote v18.26 browser cache lock to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -82757,6 +83123,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwradialtransferredteam",
             "v18nfwradialtransfermerge",
             "observedstatev18nfwradialtransfermerge",
+            "v18nfwradialtransferbrowserlock",
+            "observedstatev18nfwradialtransferbrowserlock",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -83067,6 +83435,8 @@ def main() -> None:
         cmd_v18nfwradialtransferredteam(args)
     elif args.mode in {"v18nfwradialtransfermerge", "observedstatev18nfwradialtransfermerge"}:
         cmd_v18nfwradialtransfermerge(args)
+    elif args.mode in {"v18nfwradialtransferbrowserlock", "observedstatev18nfwradialtransferbrowserlock"}:
+        cmd_v18nfwradialtransferbrowserlock(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:

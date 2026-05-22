@@ -14,9 +14,12 @@
 
   var V17STATE_EXACT_TOKEN = "__MTS_V17_97_RADIAL_REPAIR_STATE_RESPONSE__";
   var V18REVIEW_TOKEN = "__MTS_V18_21_RADIAL_PHASE_CANDIDATE__";
+  var V18_RADIAL_TRANSFER_TOKEN = "__MTS_V18_26_RADIAL_TRANSFER_CANDIDATE__";
   var V18_LEGACY_REVIEW_TOKEN = "__MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE__";
   var V18_RELEASE_DISPLAY_NAME = "MTS v18.21 radial-phase release candidate (exact cache gated)";
+  var V18_RADIAL_TRANSFER_DISPLAY_NAME = "MTS v18.26 radial-transfer candidate (exact cache gated)";
   var V18_RELEASE_ARTIFACT = window.MTS_V18_21_RADIAL_PHASE_CANDIDATE || window.MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE || window.MTS_V18_07_FAMILY_SURFACE_CANDIDATE || window.MTS_V18_05_RELEASE_CANDIDATE || window.MTS_V18_01_REVIEW_CANDIDATE;
+  var V18_RADIAL_TRANSFER_ARTIFACT = window.MTS_V18_26_RADIAL_TRANSFER_CANDIDATE || null;
   var V18_REVIEW_GATE_FALLBACK = {
     candidateId: "observed-state-response-v18.10-native-gated-release",
     verdict: "v18.10 release-facing candidate passes",
@@ -71,6 +74,7 @@
     mts: "gamma0 * leff * (1 - exp(-pow(r / leff, q)))",
     v17state: V17STATE_EXACT_TOKEN,
     v18review: V18REVIEW_TOKEN,
+    v18radialtransfer: V18_RADIAL_TRANSFER_TOKEN,
     baryon: "0",
     soft: "gamma0 * leff * (1 - exp(-r / leff))",
     outer: "gamma0 * leff * pow(max(0, x), 0.75) * (1 - exp(-memory / 2))",
@@ -81,6 +85,7 @@
     mts: "MTS baseline",
     v17state: "MTS v17.97 radial-repair state response",
     v18review: V18_RELEASE_DISPLAY_NAME,
+    v18radialtransfer: V18_RADIAL_TRANSFER_DISPLAY_NAME,
     baryon: "Baryon only",
     soft: "Soft radial support",
     outer: "Outer gate support",
@@ -1860,11 +1865,11 @@
   function compileFrameworkExpression(expression) {
     var source = String(expression || "").trim();
     if (!source) throw new Error("Framework formula is empty.");
-    if (source === V18REVIEW_TOKEN || source === V18_LEGACY_REVIEW_TOKEN) {
-      var artifact = V18_RELEASE_ARTIFACT || null;
+    if (source === V18REVIEW_TOKEN || source === V18_LEGACY_REVIEW_TOKEN || source === V18_RADIAL_TRANSFER_TOKEN) {
+      var artifact = v18ArtifactForSource(source) || null;
       var metadata = artifact && artifact.metadata ? artifact.metadata : {};
-      var nativeMeta = metadata.nativeFormulaV1821 || metadata.nativeFormulaV1809 || {};
-      var releaseLock = metadata.releaseLockV1821 || metadata.releaseLockV1809 || V18_RELEASE_LOCK_FALLBACK || {};
+      var nativeMeta = v18NativeMetaForSource(source, metadata);
+      var releaseLock = v18ReleaseLockForSource(source, metadata);
       var nativeExpression = String(nativeMeta.expression || "").trim();
       var canUseNative = nativeMeta.canReplaceCache === true &&
         nativeExpression &&
@@ -1938,10 +1943,31 @@
     return CONST.gamma0 * leff * (1 - Math.exp(-Math.pow(point.r / leff, q)));
   }
 
+  function v18ArtifactForSource(source) {
+    if (source === V18_RADIAL_TRANSFER_TOKEN) return V18_RADIAL_TRANSFER_ARTIFACT || null;
+    return V18_RELEASE_ARTIFACT || null;
+  }
+
+  function v18DisplayNameForSource(source) {
+    return source === V18_RADIAL_TRANSFER_TOKEN ? V18_RADIAL_TRANSFER_DISPLAY_NAME : V18_RELEASE_DISPLAY_NAME;
+  }
+
+  function v18NativeMetaForSource(source, metadata) {
+    metadata = metadata || {};
+    if (source === V18_RADIAL_TRANSFER_TOKEN) return metadata.nativeFormulaV1826 || {};
+    return metadata.nativeFormulaV1821 || metadata.nativeFormulaV1809 || {};
+  }
+
+  function v18ReleaseLockForSource(source, metadata) {
+    metadata = metadata || {};
+    if (source === V18_RADIAL_TRANSFER_TOKEN) return metadata.releaseLockV1826 || {};
+    return metadata.releaseLockV1821 || metadata.releaseLockV1809 || V18_RELEASE_LOCK_FALLBACK || {};
+  }
+
   function v17ExactCacheEntry(curve, compiled) {
     if (!curve || !curve.name) return null;
     if (compiled && compiled.reviewGate) {
-      var v18 = V18_RELEASE_ARTIFACT;
+      var v18 = v18ArtifactForSource(compiled.source);
       if (v18 && v18.curves && v18.curves[curve.name]) return v18.curves[curve.name];
     }
     var cache = window.MTS_V17_97_SUPPORT_CACHE || window.MTS_V17_96_SUPPORT_CACHE || window.MTS_V17_95_SUPPORT_CACHE || window.MTS_V17_94_SUPPORT_CACHE || window.MTS_V17_93_SUPPORT_CACHE || window.MTS_V17_92_SUPPORT_CACHE || window.MTS_V17_91_SUPPORT_CACHE || window.MTS_V17_90_SUPPORT_CACHE || window.MTS_V17_89_SUPPORT_CACHE || window.MTS_V17_88_SUPPORT_CACHE || window.MTS_V17_87_SUPPORT_CACHE || window.MTS_V17_86_SUPPORT_CACHE || window.MTS_V17_85_SUPPORT_CACHE;
@@ -1950,11 +1976,11 @@
   }
 
   function exactCacheDisplayName(compiled) {
-    return compiled && compiled.reviewGate ? V18_RELEASE_DISPLAY_NAME : "v17.97 exact cache";
+    return compiled && compiled.reviewGate ? v18DisplayNameForSource(compiled.source) : "v17.97 exact cache";
   }
 
   function isV18ReviewActive() {
-    return !!(state.framework.compiled && (state.framework.compiled.source === V18REVIEW_TOKEN || state.framework.compiled.source === V18_LEGACY_REVIEW_TOKEN));
+    return !!(state.framework.compiled && (state.framework.compiled.source === V18REVIEW_TOKEN || state.framework.compiled.source === V18_LEGACY_REVIEW_TOKEN || state.framework.compiled.source === V18_RADIAL_TRANSFER_TOKEN));
   }
 
   function frameworkProfileBand(curve, xMin, xMax) {
@@ -4005,18 +4031,20 @@
   function updateV18ReviewPanel() {
     if (!$("v18ReviewStatus")) return;
     var active = isV18ReviewActive();
-    var artifact = V18_RELEASE_ARTIFACT || null;
+    var activeSource = state.framework.compiled ? state.framework.compiled.source : V18REVIEW_TOKEN;
+    var activeDisplay = v18DisplayNameForSource(activeSource);
+    var artifact = v18ArtifactForSource(activeSource) || null;
     var gate = (artifact && artifact.metadata && artifact.metadata.reviewGate) || V18_REVIEW_GATE;
-    var releaseLock = (artifact && artifact.metadata && (artifact.metadata.releaseLockV1821 || artifact.metadata.releaseLockV1809)) || V18_RELEASE_LOCK_FALLBACK;
+    var releaseLock = (artifact && artifact.metadata && v18ReleaseLockForSource(activeSource, artifact.metadata)) || V18_RELEASE_LOCK_FALLBACK;
     var branchPrune = artifact && artifact.metadata && artifact.metadata.branchPrune;
     var familyAudit = artifact && artifact.metadata && artifact.metadata.familyAudit;
     var branchIdentity = artifact && artifact.metadata && artifact.metadata.branchIdentity;
     var branchSafety = artifact && artifact.metadata && artifact.metadata.branchSafetyV1803;
     var edgeHarden = artifact && artifact.metadata && artifact.metadata.edgeHardenV1804;
     var releaseStress = artifact && artifact.metadata && artifact.metadata.releaseStressV1805;
-    var radialRedteam = artifact && artifact.metadata && artifact.metadata.radialPhaseRedTeamV1822;
+    var radialRedteam = artifact && artifact.metadata && (artifact.metadata.radialTransferRedTeamV1826 || artifact.metadata.radialPhaseRedTeamV1822);
     var artifactCount = artifact && artifact.metadata ? artifact.metadata.curveCount : 0;
-    var nativeMeta = artifact && artifact.metadata ? (artifact.metadata.nativeFormulaV1821 || artifact.metadata.nativeFormulaV1809 || {}) : {};
+    var nativeMeta = artifact && artifact.metadata ? v18NativeMetaForSource(activeSource, artifact.metadata) : {};
     var cacheMismatch = releaseLock.browserCacheParityMismatchCount == null ? 0 : releaseLock.browserCacheParityMismatchCount;
     var nativeMismatch = nativeMeta.nativeFormulaParityMismatchCount == null
       ? (releaseLock.nativeFormulaParityMismatchCount == null ? 7 : releaseLock.nativeFormulaParityMismatchCount)
@@ -4050,8 +4078,8 @@
     if ($("v18ReviewReleaseNull")) $("v18ReviewReleaseNull").textContent = releaseStress ? fmt(releaseStress.medianBranchShuffleNullMarginPct, 2) + " pts" : "--";
     if ($("v18ReviewNote")) {
       $("v18ReviewNote").textContent = active
-        ? "Active preset uses " + V18_RELEASE_DISPLAY_NAME + " via " + (nativeReady ? "native expression" : "exact support cache with " + artifactCount + " cached curves") + ". Release-lock status: " + releaseLock.verdict + ". Native mismatches are " + String(nativeMismatch) + "; cache mismatches are " + String(cacheMismatch) + ". Red-team: " + (radialRedteam ? radialRedteam.verdict + " with " + fmt(radialRedteam.nullMarginPriorityPct, 2) + " point priority-null margin" : "not run") + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "v18.21 cache-gated") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "v18.21 cache-gated") + ". The lock keeps all clean high-RMSE cases below 20 km/s with protected max regression below 1 km/s."
-        : "Select " + V18_RELEASE_DISPLAY_NAME + " in the Test Rig to inspect the release candidate. Runtime uses the exact cache until a separate v18.21 native parity pass exists.";
+        ? "Active preset uses " + activeDisplay + " via " + (nativeReady ? "native expression" : "exact support cache with " + artifactCount + " cached curves") + ". Release-lock status: " + releaseLock.verdict + ". Native mismatches are " + String(nativeMismatch) + "; cache mismatches are " + String(cacheMismatch) + ". Red-team: " + (radialRedteam ? radialRedteam.verdict + " with " + fmt(radialRedteam.nullMarginPriorityPct || radialRedteam.nullMarginTargetPct, 2) + " point null margin" : "not run") + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "cache-gated") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "cache-gated") + ". The lock keeps all clean high-RMSE cases below 20 km/s with protected max regression under the release guard."
+        : "Select " + V18_RELEASE_DISPLAY_NAME + " or " + V18_RADIAL_TRANSFER_DISPLAY_NAME + " in the Test Rig to inspect a cache-gated release candidate.";
     }
   }
 
