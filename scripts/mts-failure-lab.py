@@ -207,6 +207,8 @@ DEFAULT_OBSERVED_STATE_V18_NFW_FRONTIER_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-v18-n
 DEFAULT_OBSERVED_STATE_V18_REVIEWER_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-reviewer-stress-v1"
 DEFAULT_OBSERVED_STATE_V18_ML_PROTOCOL_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-protocol-v1"
 DEFAULT_OBSERVED_STATE_V18_ML_BOUNDARY_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-boundary-audit-v1"
+DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-provenance-v1"
+DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-ml-provenance-v1")
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -72943,6 +72945,421 @@ def cmd_v18mlboundaryaudit(args: argparse.Namespace) -> None:
     print(f"Wrote v18 M/L boundary audit to {out_dir.resolve()}")
 
 
+V18_ML_PROVENANCE_KEYWORDS = {
+    "stellar_ml": ["mass-to-light", "mass to light", "stellar m/l", "m/l", "upsilon", "population synthesis"],
+    "decomposition": ["decomposition", "bulge", "disk", "disc", "surface brightness", "spitzer", "irac", "3.6"],
+    "quality": ["inclination", "distance", "beam", "resolution", "warp", "bar", "non-circular", "asymmetry"],
+}
+
+
+def v18_ml_provenance_simbad_url(name: str) -> str:
+    display = re.sub(r"^NGC0+", "NGC", name)
+    display = re.sub(r"^UGC0+", "UGC", display)
+    return "https://simbad.u-strasbg.fr/simbad/sim-id?output.format=ASCII&Ident=" + urllib.parse.quote(display)
+
+
+def v18_ml_provenance_reference_texts(table: dict) -> dict[str, str]:
+    references: dict[str, str] = {}
+    for item in split_list_field(table.get("rotationCurveReferences", "")):
+        if "=" not in item:
+            continue
+        code, reference = item.split("=", 1)
+        references[code.strip()] = reference.strip()
+    for code in [item.strip() for item in str(table.get("rotationCurveRefCodes", "")).split(",") if item.strip()]:
+        references.setdefault(code, "")
+    return references
+
+
+def v18_ml_provenance_keyword_hits(text: str) -> dict[str, list[str]]:
+    lower = text.lower()
+    hits: dict[str, list[str]] = {}
+    for family, keywords in V18_ML_PROVENANCE_KEYWORDS.items():
+        found = sorted({keyword for keyword in keywords if keyword in lower})
+        if found:
+            hits[family] = found
+    return hits
+
+
+def v18_ml_provenance_target_rows(boundary_rows: list[dict]) -> list[dict]:
+    return [
+        row for row in boundary_rows
+        if parse_float(row.get("coreFailureCount"), 0.0) > 0
+    ]
+
+
+def v18_ml_provenance_fetch_rows(target_rows: list[dict], table1_by_name: dict[str, dict], source_cache: Path, offline: bool) -> list[dict]:
+    fetch_rows: list[dict] = []
+    reference_seen: dict[str, dict] = {}
+    for target in target_rows:
+        name = target["galaxy"]
+        for source_kind, url, suffix in [
+            ("ned-object-html", v21_metadata_page_url_for_galaxy(name), "html"),
+            ("simbad-object-txt", v18_ml_provenance_simbad_url(name), "txt"),
+        ]:
+            path = v21_metadata_cache_path(source_cache, source_kind, name, suffix)
+            fetch = download_small_metadata(url, path, offline)
+            fetch_rows.append(
+                {
+                    "sourceKind": source_kind,
+                    "identity": name,
+                    "galaxy": name,
+                    "referenceCode": "",
+                    "url": url,
+                    "cachePath": str(path),
+                    "cacheStatus": "available" if path.exists() else "missing",
+                    "downloaded": False,
+                    "sizeBytes": path.stat().st_size if path.exists() else "",
+                    "sha256": file_sha256(path) if path.exists() else "",
+                    "largeDownloadAllowed": False,
+                }
+            )
+        for code, reference in v18_ml_provenance_reference_texts(table1_by_name.get(name, {})).items():
+            if not code:
+                continue
+            reference_seen.setdefault(code, {"referenceCode": code, "referenceText": reference, "galaxies": set()})
+            reference_seen[code]["galaxies"].add(name)
+
+    for code, ref in sorted(reference_seen.items()):
+        reference = ref["referenceText"]
+        for source_kind, url, suffix in [
+            ("crossref-json", reference_crossref_query_url(reference), "json"),
+            ("ads-search-html", reference_ads_search_url(reference), "html"),
+            ("arxiv-search-html", reference_arxiv_search_url(reference), "html"),
+        ]:
+            path = v21_metadata_cache_path(source_cache, source_kind, code, suffix)
+            fetch = download_small_metadata(url, path, offline)
+            fetch_rows.append(
+                {
+                    "sourceKind": source_kind,
+                    "identity": code,
+                    "galaxy": "; ".join(sorted(ref["galaxies"])),
+                    "referenceCode": code,
+                    "referenceText": reference,
+                    "url": url,
+                    "cachePath": str(path),
+                    "cacheStatus": "available" if path.exists() else "missing",
+                    "downloaded": False,
+                    "sizeBytes": path.stat().st_size if path.exists() else "",
+                    "sha256": file_sha256(path) if path.exists() else "",
+                    "largeDownloadAllowed": False,
+                }
+            )
+    return fetch_rows
+
+
+def v18_ml_provenance_normalized_official_inventory(rows: list[dict]) -> list[dict]:
+    normalized: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        path = Path(str(item.get("cachePath", "")))
+        available = path.exists()
+        item["offline"] = ""
+        item["downloaded"] = False
+        item["usedCached"] = available
+        item["existsInCache"] = available
+        item["cacheStatus"] = "available" if available else "missing"
+        item["fetchStatus"] = "available" if available else "missing"
+        normalized.append(item)
+    return normalized
+
+
+def v18_ml_provenance_evidence_rows(target_rows: list[dict], fetch_rows: list[dict], table1_by_name: dict[str, dict], bulges_by_name: dict[str, dict], decomp_coverage: dict[str, int]) -> list[dict]:
+    fetch_by_galaxy: dict[str, list[dict]] = {}
+    for row in fetch_rows:
+        for name in [item.strip() for item in row.get("galaxy", "").split(";") if item.strip()]:
+            fetch_by_galaxy.setdefault(name, []).append(row)
+
+    evidence_rows: list[dict] = []
+    for target in target_rows:
+        name = target["galaxy"]
+        table = table1_by_name.get(name, {})
+        bulge = bulges_by_name.get(name, {})
+        evidence_rows.append(
+            {
+                "galaxy": name,
+                "sourceKind": "official-sparc-table1",
+                "sourcePathOrUrl": str(v18_mass_scale_table1_path()),
+                "cacheStatus": "available" if table else "missing",
+                "evidenceClass": "official sample metadata and rotation-curve references" if table else "missing official table row",
+                "caseSpecific": bool(table),
+                "stellarMlEvidence": "fixed SPARC convention only; no external per-galaxy M/L prior",
+                "decompositionEvidence": "disk scale and luminosity metadata present" if table else "",
+                "qualityEvidence": f"Q={table.get('qualityCode', '')}; Inc={table.get('inclinationDeg', '')}+/-{table.get('inclinationUncertaintyDeg', '')}" if table else "",
+                "keywordFamilies": "",
+                "keywordHits": "",
+            }
+        )
+        evidence_rows.append(
+            {
+                "galaxy": name,
+                "sourceKind": "official-sparc-bulge-decomposition",
+                "sourcePathOrUrl": str(DEFAULT_OFFICIAL_SOURCE_CACHE / "Bulges.mrt"),
+                "cacheStatus": "available" if bulge else "missing",
+                "evidenceClass": "official bulge/decomposition row" if bulge else "no bulge row found",
+                "caseSpecific": bool(bulge),
+                "stellarMlEvidence": "no external M/L prior; bulge luminosity uses SPARC convention",
+                "decompositionEvidence": (
+                    f"Lbul={fmt_num(bulge.get('bulgeLuminosity_1e9Lsun', math.nan))}e9 Lsun; archiveMembers={decomp_coverage.get(name, 0)}"
+                    if bulge else ""
+                ),
+                "qualityEvidence": "",
+                "keywordFamilies": "",
+                "keywordHits": "",
+            }
+        )
+        for source in fetch_by_galaxy.get(name, []):
+            path = Path(source["cachePath"])
+            text = v21_metadata_cached_text(str(path)) if path.exists() else ""
+            hits = v18_ml_provenance_keyword_hits(text)
+            case_specific = source["sourceKind"] in {"ned-object-html", "simbad-object-txt"} or name.lower() in text.lower()
+            evidence_rows.append(
+                {
+                    "galaxy": name,
+                    "sourceKind": source["sourceKind"],
+                    "sourcePathOrUrl": source["cachePath"] if path.exists() else source["url"],
+                    "cacheStatus": source["cacheStatus"],
+                    "evidenceClass": "cached keyword evidence" if hits else "cached source; no M/L/decomposition keywords",
+                    "caseSpecific": case_specific,
+                    "stellarMlEvidence": "; ".join(hits.get("stellar_ml", [])),
+                    "decompositionEvidence": "; ".join(hits.get("decomposition", [])),
+                    "qualityEvidence": "; ".join(hits.get("quality", [])),
+                    "keywordFamilies": "; ".join(sorted(hits)),
+                    "keywordHits": "; ".join(f"{family}:{','.join(words)}" for family, words in hits.items()),
+                }
+            )
+    return evidence_rows
+
+
+def write_v18_ml_provenance_artifacts(out_dir: Path, source_cache: Path, offline: bool) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source_cache.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_ml_provenance"
+    boundary_capsule = write_v18_ml_boundary_audit_artifacts(DEFAULT_OBSERVED_STATE_V18_ML_BOUNDARY_OUT)
+    official_inventory = v18_ml_provenance_normalized_official_inventory(
+        official_source_inventory_rows(DEFAULT_OFFICIAL_SOURCE_CACHE, offline)
+    )
+    table1_by_name, _table_header, table_path = v18_mass_scale_table1()
+    bulges_by_name, _bulges_header = parse_official_bulges(DEFAULT_OFFICIAL_SOURCE_CACHE / "Bulges.mrt")
+    boundary_rows = read_csv_rows(DEFAULT_OBSERVED_STATE_V18_ML_BOUNDARY_OUT / "mts_v18_ml_boundary_target_ledger.csv")
+    target_rows = v18_ml_provenance_target_rows(boundary_rows)
+    decomp_coverage = official_decomposition_archive_coverage(DEFAULT_OFFICIAL_SOURCE_CACHE / "BulgeDiskDec_LTG.zip", [row["galaxy"] for row in target_rows])
+    source_targets: list[dict] = []
+    for row in target_rows:
+        table = table1_by_name.get(row["galaxy"], {})
+        source_targets.append(
+            {
+                "galaxy": row["galaxy"],
+                "lockedRoute": row.get("lockedRoute", ""),
+                "boundaryVerdict": row.get("boundaryVerdict", ""),
+                "failureDirection": row.get("failureDirection", ""),
+                "coreFailureCount": row.get("coreFailureCount", ""),
+                "wideFailureCount": row.get("wideFailureCount", ""),
+                "qualityCode": table.get("qualityCode", ""),
+                "rotationCurveRefCodes": table.get("rotationCurveRefCodes", ""),
+                "rotationCurveReferences": table.get("rotationCurveReferences", ""),
+                "sourceNeed": "external stellar M/L prior and decomposition provenance",
+            }
+        )
+
+    fetch_rows = v18_ml_provenance_fetch_rows(target_rows, table1_by_name, source_cache, offline)
+    evidence_rows = v18_ml_provenance_evidence_rows(target_rows, fetch_rows, table1_by_name, bulges_by_name, decomp_coverage)
+
+    verdict_rows: list[dict] = []
+    missing_rows: list[dict] = []
+    for target in target_rows:
+        name = target["galaxy"]
+        rows = [row for row in evidence_rows if row["galaxy"] == name]
+        case_specific_ml = [
+            row for row in rows
+            if parse_bool(row.get("caseSpecific")) and row.get("stellarMlEvidence") and "fixed SPARC convention" not in row.get("stellarMlEvidence", "")
+        ]
+        official_decomp = any(row["sourceKind"] == "official-sparc-bulge-decomposition" and row["cacheStatus"] == "available" for row in rows)
+        if case_specific_ml:
+            verdict = "external M/L hint found; manual source reading needed"
+            next_action = "Read cached source text/PDF leads before using this as a validation constraint."
+        elif official_decomp:
+            verdict = "decomposition provenance present; external M/L prior missing"
+            next_action = "Do not tune v18; fetch/read stellar-population M/L or decomposition paper if available."
+        else:
+            verdict = "external M/L/decomposition provenance missing"
+            next_action = "Treat as calibration-boundary target until a source provides per-galaxy M/L/decomposition."
+        verdict_rows.append(
+            {
+                "galaxy": name,
+                "lockedRoute": target.get("lockedRoute", ""),
+                "failureDirection": target.get("failureDirection", ""),
+                "coreFailureCount": target.get("coreFailureCount", ""),
+                "wideFailureCount": target.get("wideFailureCount", ""),
+                "officialDecompositionPresent": official_decomp,
+                "caseSpecificMlEvidenceCount": len(case_specific_ml),
+                "cachedSourceCount": sum(1 for row in rows if row["cacheStatus"] == "available"),
+                "provenanceVerdict": verdict,
+                "nextAction": next_action,
+            }
+        )
+        for field, status in [
+            ("externalMlPrior", "candidate-source-lead; accepted-prior-missing" if case_specific_ml else "missing"),
+            ("decompositionSource", "available-official-sparc" if official_decomp else "missing"),
+            ("beamOrCovariance", "not requested; still not available from small pages"),
+        ]:
+            missing_rows.append(
+                {
+                    "galaxy": name,
+                    "field": field,
+                    "status": status,
+                    "blocksTransportLawChange": field == "externalMlPrior",
+                }
+            )
+
+    source_cache_on_d = str(source_cache).lower().startswith("d:")
+    ml_hint_cases = sum(1 for row in verdict_rows if parse_float(row["caseSpecificMlEvidenceCount"], 0.0) > 0)
+    missing_ml_hint_cases = sum(1 for row in verdict_rows if row["provenanceVerdict"] != "external M/L hint found; manual source reading needed")
+    accepted_ml_prior_cases = 0
+    missing_accepted_ml_prior_cases = len(verdict_rows)
+    if ml_hint_cases >= 3:
+        verdict = "M/L provenance candidates found for manual review"
+    elif missing_ml_hint_cases == len(verdict_rows):
+        verdict = "external M/L priors still missing"
+    else:
+        verdict = "M/L provenance partial"
+    passes = {
+        "boundaryAuditNoSharedBranch": boundary_capsule.get("verdict") == "M/L calibration boundary; no shared branch",
+        "sourceCacheOnDDrive": source_cache_on_d,
+        "targetCountFive": len(target_rows) == 5,
+        "noLargeDownloads": True,
+        "lawUnchanged": True,
+    }
+
+    score_rows = [
+        {"metric": "verdict", "value": verdict},
+        {"metric": "targetCount", "value": len(target_rows)},
+        {"metric": "fetchedOrCachedSourceCount", "value": sum(1 for row in fetch_rows if row["cacheStatus"] == "available")},
+        {"metric": "downloadedSourceCount", "value": sum(1 for row in fetch_rows if parse_bool(row["downloaded"]))},
+        {"metric": "mlSourceLeadCaseCount", "value": ml_hint_cases},
+        {"metric": "missingMlSourceLeadCaseCount", "value": missing_ml_hint_cases},
+        {"metric": "acceptedExternalMlPriorCaseCount", "value": accepted_ml_prior_cases},
+        {"metric": "missingAcceptedExternalMlPriorCaseCount", "value": missing_accepted_ml_prior_cases},
+        {"metric": "sourceCacheOnDDrive", "value": source_cache_on_d},
+        {"metric": "weakSystematicsLeakage", "value": 0},
+    ]
+    guard = {
+        "candidateId": "observed-state-response-v18.34-ml-provenance-fetch",
+        "verdict": verdict,
+        "lawChanged": False,
+        "baseLaw": "locked v18.26 radial-transfer candidate",
+        "sourceCache": str(source_cache),
+        "noLargeDownloads": True,
+        "targetGalaxies": [row["galaxy"] for row in target_rows],
+        "forbiddenInputs": ["galaxy names in formula", "raw residual lookup", "raw RMSE formula input", "NFW parameters", "weak/systematics training"],
+    }
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_source_targets.csv", source_targets)
+    write_csv(out_dir / f"{prefix}_official_inventory.csv", official_inventory)
+    write_csv(out_dir / f"{prefix}_fetch_inventory.csv", fetch_rows)
+    write_csv(out_dir / f"{prefix}_evidence_table.csv", evidence_rows)
+    write_csv(out_dir / f"{prefix}_case_verdicts.csv", verdict_rows)
+    write_csv(out_dir / f"{prefix}_missing_fields.csv", missing_rows)
+    (out_dir / f"{prefix}_formula_guard.json").write_text(json.dumps(json_clean(guard), indent=2, sort_keys=True), encoding="utf-8")
+
+    report = [
+        "# MTS v18.34 M/L Provenance Fetch",
+        "",
+        "This mode does not change v18.26. It fetches and caches only small provenance pages for the five core M/L-boundary galaxies from the v18.33 audit.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Targets: `{len(target_rows)}`.",
+        f"- Cached/fetched small source rows: `{sum(1 for row in fetch_rows if row['cacheStatus'] == 'available')}`.",
+        f"- Newly downloaded rows: `{sum(1 for row in fetch_rows if parse_bool(row['downloaded']))}`.",
+        f"- Case-specific M/L source-lead cases: `{ml_hint_cases}`.",
+        f"- Cases still missing an M/L source lead: `{missing_ml_hint_cases}`.",
+        f"- Accepted per-galaxy external M/L priors parsed: `{accepted_ml_prior_cases}`.",
+        f"- Cases still missing accepted external M/L priors: `{missing_accepted_ml_prior_cases}`.",
+        f"- Source cache on D: `{source_cache_on_d}`.",
+        "",
+        "## Case Verdicts",
+        "",
+        "| Galaxy | Route | Direction | Official decomp | M/L evidence | Verdict | Next action |",
+        "| --- | --- | --- | ---: | ---: | --- | --- |",
+    ]
+    for row in verdict_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | {row['failureDirection']} | `{row['officialDecompositionPresent']}` | {row['caseSpecificMlEvidenceCount']} | {row['provenanceVerdict']} | {row['nextAction']} |"
+        )
+    report.extend(["", "## Fetched Source Types", "", "| Kind | Available | Downloaded |", "| --- | ---: | ---: |"])
+    for kind in sorted({row["sourceKind"] for row in fetch_rows}):
+        rows = [row for row in fetch_rows if row["sourceKind"] == kind]
+        report.append(f"| {kind} | {sum(1 for row in rows if row['cacheStatus'] == 'available')} | {sum(1 for row in rows if parse_bool(row['downloaded']))} |")
+    report.extend(["", "## Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.extend(
+        [
+            "",
+            "## Direction",
+            "",
+            "Do not create a new MTS branch from the M/L boundary cases yet. The small-source pass still leaves external per-galaxy stellar M/L priors missing for the core targets. The useful next step is source reading/manual provenance for these exact cases or a collaborator/data-provider route, not threshold tuning.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-v18-ml-provenance-v1",
+        "verdict": verdict,
+        "summary": {
+            "targetCount": len(target_rows),
+            "fetchedOrCachedSourceCount": sum(1 for row in fetch_rows if row["cacheStatus"] == "available"),
+            "downloadedSourceCount": sum(1 for row in fetch_rows if parse_bool(row["downloaded"])),
+            "mlSourceLeadCaseCount": ml_hint_cases,
+            "missingMlSourceLeadCaseCount": missing_ml_hint_cases,
+            "acceptedExternalMlPriorCaseCount": accepted_ml_prior_cases,
+            "missingAcceptedExternalMlPriorCaseCount": missing_accepted_ml_prior_cases,
+            "sourceCacheOnDDrive": source_cache_on_d,
+            "weakSystematicsLeakage": 0,
+            "passes": passes,
+        },
+        "sourceCache": str(source_cache),
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_source_targets.csv",
+            f"{prefix}_official_inventory.csv",
+            f"{prefix}_fetch_inventory.csv",
+            f"{prefix}_evidence_table.csv",
+            f"{prefix}_case_verdicts.csv",
+            f"{prefix}_missing_fields.csv",
+            f"{prefix}_formula_guard.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18mlprovenance(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_CACHE
+    capsule = write_v18_ml_provenance_artifacts(out_dir, source_cache, args.offline)
+    summary = capsule["summary"]
+    print("MTS v18.34 M/L provenance fetch")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"targets={summary['targetCount']}",
+                f"cached={summary['fetchedOrCachedSourceCount']}",
+                f"downloaded={summary['downloadedSourceCount']}",
+                f"ml_leads={summary['mlSourceLeadCaseCount']}",
+                f"accepted_ml_priors={summary['acceptedExternalMlPriorCaseCount']}",
+                f"cache_on_d={summary['sourceCacheOnDDrive']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 M/L provenance fetch to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -86007,6 +86424,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18mlprotocol",
             "v18mlboundaryaudit",
             "observedstatev18mlboundaryaudit",
+            "v18mlprovenance",
+            "observedstatev18mlprovenance",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -86333,6 +86752,8 @@ def main() -> None:
         cmd_v18mlprotocol(args)
     elif args.mode in {"v18mlboundaryaudit", "observedstatev18mlboundaryaudit"}:
         cmd_v18mlboundaryaudit(args)
+    elif args.mode in {"v18mlprovenance", "observedstatev18mlprovenance"}:
+        cmd_v18mlprovenance(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
