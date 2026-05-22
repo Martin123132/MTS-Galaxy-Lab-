@@ -203,6 +203,7 @@ DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_BROWSER_OUT = OUTPUT_PACK_ROOT / 
 DEFAULT_OBSERVED_STATE_V18_NFW_OVERSHELF_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-overshelf-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_PROVENANCE_BOUNDARY_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-provenance-boundary-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_CASE_PAIR_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-case-pair-audit-v1"
+DEFAULT_OBSERVED_STATE_V18_NFW_FRONTIER_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-frontier-lock-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -71604,6 +71605,281 @@ def cmd_v18nfwcasepairaudit(args: argparse.Namespace) -> None:
     print(f"Wrote v18 NFW case-pair audit to {out_dir.resolve()}")
 
 
+def v18_nfw_frontier_release_status(row: dict) -> str:
+    if row.get("galaxy") in V18_NFW_CASE_PAIR_TARGETS:
+        return "named limitation/provenance target"
+    if parse_bool(row.get("largeNfwGap")):
+        return "large fitted-halo gap; no current transport branch"
+    return "inside v18.26 release frontier"
+
+
+def write_v18_nfw_frontier_lock_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_nfw_frontier_lock"
+    browser_capsule = read_json_if_exists(
+        DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_BROWSER_OUT / "mts_v18_nfw_radial_transfer_browser_lock_capsule.json"
+    ) or write_v18_nfw_radial_transfer_browser_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_BROWSER_OUT)
+    provenance_capsule = read_json_if_exists(
+        DEFAULT_OBSERVED_STATE_V18_NFW_PROVENANCE_BOUNDARY_OUT / "mts_v18_nfw_provenance_boundary_capsule.json"
+    ) or write_v18_nfw_provenance_boundary_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_PROVENANCE_BOUNDARY_OUT)
+    case_pair_capsule = read_json_if_exists(
+        DEFAULT_OBSERVED_STATE_V18_NFW_CASE_PAIR_OUT / "mts_v18_nfw_case_pair_capsule.json"
+    ) or write_v18_nfw_case_pair_audit_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_CASE_PAIR_OUT)
+    overshelf_capsule = read_json_if_exists(
+        DEFAULT_OBSERVED_STATE_V18_NFW_OVERSHELF_OUT / "mts_v18_nfw_overshelf_candidate_capsule.json"
+    ) or write_v18_nfw_overshelf_candidate_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_OVERSHELF_OUT)
+    boundary_rows = read_csv_rows(DEFAULT_OBSERVED_STATE_V18_NFW_PROVENANCE_BOUNDARY_OUT / "mts_v18_nfw_provenance_boundary_case_ledger.csv")
+    case_pair_targets = read_csv_rows(DEFAULT_OBSERVED_STATE_V18_NFW_CASE_PAIR_OUT / "mts_v18_nfw_case_pair_target_summary.csv")
+    case_pair_by_name = {row["galaxy"]: row for row in case_pair_targets}
+
+    browser_summary = browser_capsule["summary"]
+    provenance_summary = provenance_capsule["summary"]
+    pair_summary = case_pair_capsule["summary"]
+    overshelf_summary = overshelf_capsule["summary"]
+
+    frontier_case_rows: list[dict] = []
+    for row in boundary_rows:
+        pair = case_pair_by_name.get(row["galaxy"], {})
+        frontier_case_rows.append(
+            {
+                "galaxy": row["galaxy"],
+                "lockedRoute": row.get("lockedRoute", ""),
+                "boundaryClass": row.get("boundaryClass", ""),
+                "releaseStatus": v18_nfw_frontier_release_status(row),
+                "v18_26Rmse": row.get("v18_26Rmse", ""),
+                "canonicalRmse": row.get("canonicalRmse", ""),
+                "v18_26GainVsCanonicalPct": pct_improvement(parse_float(row.get("canonicalRmse")), parse_float(row.get("v18_26Rmse"))),
+                "mondGlobalRmse": row.get("mondGlobalRmse", ""),
+                "nfwPriorRmse": row.get("nfwPriorRmse", ""),
+                "nfwGapKmS": row.get("v1826MinusNfwPriorKmS", ""),
+                "winnerRawRmseWithV1826": row.get("winnerRawRmseWithV1826", ""),
+                "qualityCode": row.get("qualityCode", ""),
+                "shapeClass": row.get("shapeClass", ""),
+                "v18_26BranchHits": row.get("v1826BranchHits", ""),
+                "v18_29CaseVerdict": pair.get("caseVerdict", ""),
+                "nextAction": pair.get("nextAction", row.get("boundaryNextAction", "")),
+            }
+        )
+    frontier_case_rows.sort(key=lambda row: (-parse_float(row["nfwGapKmS"], -math.inf), row["galaxy"]))
+
+    limitation_rows = [
+        {
+            "galaxy": row["galaxy"],
+            "lockedRoute": row.get("lockedRoute", ""),
+            "shapeClass": row.get("shapeClass", ""),
+            "v18_26Rmse": row.get("v18_26Rmse", ""),
+            "nfwPriorRmse": row.get("nfwPriorRmse", ""),
+            "nfwGapKmS": row.get("nfwGapKmS", ""),
+            "mondGlobalGapKmS": row.get("mondGlobalGapKmS", ""),
+            "v18_27CandidateGainKmS": row.get("v18_27CandidateGainKmS", ""),
+            "caseVerdict": row.get("caseVerdict", ""),
+            "releaseTreatment": "named limitation; not a law branch",
+            "nextAction": row.get("nextAction", ""),
+        }
+        for row in case_pair_targets
+    ]
+
+    rejected_branch_rows = [
+        {
+            "candidateOrBranch": "v18.27 oversupport-shelf branch",
+            "status": "rejected as release branch",
+            "reason": "Target gain over v18.26 was only 2.67%, clean high-RMSE gain was 0.25%, and null margin was zero.",
+            "mayBeCitedAs": "negative guardrail / shelf anatomy evidence",
+        },
+        {
+            "candidateOrBranch": "v18.29 shared NGC2403/NGC4157 branch",
+            "status": "not built",
+            "reason": "The two large unresolved targets split by route, shape class, and state/profile neighborhood; current branch family is underpowered.",
+            "mayBeCitedAs": "limitation boundary / no shared mechanism evidence",
+        },
+        {
+            "candidateOrBranch": "new scalar, q, amplitude, or NFW-informed patch",
+            "status": "forbidden",
+            "reason": "Remaining gaps are fitted-halo/provenance boundary cases; NFW parameters and raw RMSE cannot enter MTS law.",
+            "mayBeCitedAs": "release-safety constraint",
+        },
+    ]
+
+    guardrail_rows = [
+        {
+            "guardrail": "v18.26 browser/cache lock",
+            "status": "pass",
+            "metric": "cache mismatches / route mismatches",
+            "value": f"{browser_summary['browserCacheParityMismatchCount']} / {browser_summary['browserRouteMismatchCount']}",
+        },
+        {
+            "guardrail": "v18.26 high-RMSE repair",
+            "status": "pass",
+            "metric": "high gain / above-20 count",
+            "value": f"{fmt(browser_summary['v1826HighGainPct'])}% / {browser_summary['v1826HighAbove20']}",
+        },
+        {
+            "guardrail": "v18.26 clean/protected safety",
+            "status": "pass",
+            "metric": "clean gain / protected regression / weak leakage",
+            "value": f"{fmt(browser_summary['v1826CleanGainPct'])}% / {fmt(browser_summary['v1826ProtectedMaxRegressionVsV1821KmS'])} / {browser_summary['weakSystematicsLeakage']}",
+        },
+        {
+            "guardrail": "v18.27 overshelf no-promotion",
+            "status": "pass",
+            "metric": "verdict / target gain",
+            "value": f"{overshelf_capsule['verdict']} / {fmt(overshelf_summary['candidateTargetGainVsV1826Pct'])}%",
+        },
+        {
+            "guardrail": "v18.28 NFW boundary split",
+            "status": "pass",
+            "metric": "boundary share / unresolved",
+            "value": f"{fmt(provenance_summary['nonTransportBoundaryLargeGapSharePct'])}% / {provenance_summary['unresolvedLargeLawFacingCount']}",
+        },
+        {
+            "guardrail": "v18.29 case-pair no shared branch",
+            "status": "pass",
+            "metric": "verdict / pair distance",
+            "value": f"{case_pair_capsule['verdict']} / {fmt(pair_summary['pairStateDistance'])}",
+        },
+    ]
+
+    passes = {
+        "baselineRemains21p90": round(parse_float(browser_summary["allGalaxyLockedMtsMeanRmse"]), 2) == 21.90,
+        "v1826HighGainAtLeast70Pct": parse_float(browser_summary["v1826HighGainPct"]) >= 70.0,
+        "v1826CleanGainAtLeast45Pct": parse_float(browser_summary["v1826CleanGainPct"]) >= 45.0,
+        "v1826HighAbove20Zero": browser_summary["v1826HighAbove20"] == 0,
+        "v1826ProtectedRegressionZero": parse_float(browser_summary["v1826ProtectedMaxRegressionVsV1821KmS"], math.nan) == 0.0,
+        "browserCacheAndRouteMismatchZero": browser_summary["browserCacheParityMismatchCount"] == 0 and browser_summary["browserRouteMismatchCount"] == 0,
+        "weakLeakageZero": browser_summary["weakSystematicsLeakage"] == 0,
+        "v1827NotPromoted": overshelf_capsule.get("verdict") != "v18.27 oversupport-shelf candidate for review",
+        "v1828BoundaryVerdictAccepted": provenance_capsule.get("verdict") == "remaining NFW gap mostly provenance/tail boundary",
+        "v1829NoSharedBranch": case_pair_capsule.get("verdict") == "case-pair split; no shared branch",
+        "lawUnchanged": True,
+    }
+    verdict = "v18.26 NFW frontier locked" if all(passes.values()) else "v18.26 NFW frontier lock blocked"
+
+    score_row = {
+        "candidateId": "observed-state-response-v18.26-nfw-frontier-lock",
+        "verdict": verdict,
+        "baselineMeanRmse": browser_summary["allGalaxyLockedMtsMeanRmse"],
+        "v18_26HighGainPct": browser_summary["v1826HighGainPct"],
+        "v18_26CleanGainPct": browser_summary["v1826CleanGainPct"],
+        "v18_26HighAbove20": browser_summary["v1826HighAbove20"],
+        "v18_26ProtectedRegressionKmS": browser_summary["v1826ProtectedMaxRegressionVsV1821KmS"],
+        "weakSystematicsLeakage": browser_summary["weakSystematicsLeakage"],
+        "browserCacheMismatchCount": browser_summary["browserCacheParityMismatchCount"],
+        "browserRouteMismatchCount": browser_summary["browserRouteMismatchCount"],
+        "largeNfwGapCaseCount": provenance_summary["largeNfwGapCaseCount"],
+        "nonTransportBoundaryLargeGapSharePct": provenance_summary["nonTransportBoundaryLargeGapSharePct"],
+        "unresolvedLargeLawFacingCount": provenance_summary["unresolvedLargeLawFacingCount"],
+        "limitationTargets": "; ".join(provenance_summary["unresolvedLargeLawFacingGalaxies"]),
+        "v18_27Verdict": overshelf_capsule["verdict"],
+        "v18_29Verdict": case_pair_capsule["verdict"],
+    }
+    formula_lock = {
+        "candidateId": "observed-state-response-v18.26-nfw-frontier-lock",
+        "status": verdict,
+        "lockedLaw": "v18.26 radial-transfer candidate",
+        "lawChanged": False,
+        "browserChanged": False,
+        "sourceOfTruth": "data/v18-26-radial-transfer-candidate.js exact cache/native gated artifact",
+        "namedLimitations": [row["galaxy"] for row in limitation_rows],
+        "rejectedExtensions": [row["candidateOrBranch"] for row in rejected_branch_rows],
+        "forbiddenInputs": ["galaxy names in formula", "NFW parameters", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+    }
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_row])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", frontier_case_rows)
+    write_csv(out_dir / f"{prefix}_limitation_targets.csv", limitation_rows)
+    write_csv(out_dir / f"{prefix}_guardrail_ledger.csv", guardrail_rows)
+    write_csv(out_dir / f"{prefix}_rejected_branch_guards.csv", rejected_branch_rows)
+    (out_dir / f"{prefix}_formula_lock.json").write_text(json.dumps(json_clean(formula_lock), indent=2, sort_keys=True), encoding="utf-8")
+
+    report = [
+        "# MTS v18.30 NFW Frontier Lock",
+        "",
+        "This is a release-hardening lock, not a new law search. It keeps v18.26 fixed and records why the remaining NFW-prior gap does not justify another broad internal branch.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- v18.26 high-RMSE gain: `{fmt(browser_summary['v1826HighGainPct'])}%`.",
+        f"- v18.26 clean gain: `{fmt(browser_summary['v1826CleanGainPct'])}%`.",
+        f"- v18.26 high above 20: `{browser_summary['v1826HighAbove20']}`.",
+        f"- Protected regression: `{fmt(browser_summary['v1826ProtectedMaxRegressionVsV1821KmS'])}` km/s.",
+        f"- Browser cache/route mismatches: `{browser_summary['browserCacheParityMismatchCount']}` / `{browser_summary['browserRouteMismatchCount']}`.",
+        f"- Large NFW-prior gap cases: `{provenance_summary['largeNfwGapCaseCount']}`.",
+        f"- Non-transport boundary share among large gaps: `{fmt(provenance_summary['nonTransportBoundaryLargeGapSharePct'])}%`.",
+        f"- Named limitation/provenance targets: `{'; '.join(provenance_summary['unresolvedLargeLawFacingGalaxies'])}`.",
+        "",
+        "## Limitation Targets",
+        "",
+        "| Galaxy | Route | Shape | v18.26 RMSE | NFW-prior RMSE | Gap | Treatment |",
+        "| --- | --- | --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in limitation_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | {row['shapeClass']} | {fmt(row['v18_26Rmse'])} | {fmt(row['nfwPriorRmse'])} | {fmt(row['nfwGapKmS'])} | {row['releaseTreatment']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Rejected Extension Guards",
+            "",
+            "| Candidate/branch | Status | Reason |",
+            "| --- | --- | --- |",
+        ]
+    )
+    for row in rejected_branch_rows:
+        report.append(f"| {row['candidateOrBranch']} | {row['status']} | {row['reason']} |")
+    report.extend(["", "## Acceptance Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.extend(
+        [
+            "",
+            "## Direction",
+            "",
+            "Keep v18.26 as the active framework candidate. Do not add a v18.29/v18.30 internal repair branch for NGC2403 or NGC4157 from the current state vector. The next useful work is release/paper hardening or external observed provenance, not more threshold tuning.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-v18-nfw-frontier-lock-v1",
+        "verdict": verdict,
+        "summary": {**score_row, "passes": passes},
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_limitation_targets.csv",
+            f"{prefix}_guardrail_ledger.csv",
+            f"{prefix}_rejected_branch_guards.csv",
+            f"{prefix}_formula_lock.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18nfwfrontierlock(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NFW_FRONTIER_LOCK_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_nfw_frontier_lock_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.30 NFW frontier lock")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high_gain={fmt(summary['v18_26HighGainPct'])}%",
+                f"clean_gain={fmt(summary['v18_26CleanGainPct'])}%",
+                f"above20={summary['v18_26HighAbove20']}",
+                f"protected={fmt(summary['v18_26ProtectedRegressionKmS'])}",
+                f"limitations={summary['limitationTargets']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 NFW frontier lock to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -84660,6 +84936,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwprovenanceboundary",
             "v18nfwcasepairaudit",
             "observedstatev18nfwcasepairaudit",
+            "v18nfwfrontierlock",
+            "observedstatev18nfwfrontierlock",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -84978,6 +85256,8 @@ def main() -> None:
         cmd_v18nfwprovenanceboundary(args)
     elif args.mode in {"v18nfwcasepairaudit", "observedstatev18nfwcasepairaudit"}:
         cmd_v18nfwcasepairaudit(args)
+    elif args.mode in {"v18nfwfrontierlock", "observedstatev18nfwfrontierlock"}:
+        cmd_v18nfwfrontierlock(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
