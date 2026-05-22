@@ -204,6 +204,7 @@ DEFAULT_OBSERVED_STATE_V18_NFW_OVERSHELF_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-o
 DEFAULT_OBSERVED_STATE_V18_NFW_PROVENANCE_BOUNDARY_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-provenance-boundary-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_CASE_PAIR_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-case-pair-audit-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_FRONTIER_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-frontier-lock-v1"
+DEFAULT_OBSERVED_STATE_V18_REVIEWER_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-reviewer-stress-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -71880,6 +71881,342 @@ def cmd_v18nfwfrontierlock(args: argparse.Namespace) -> None:
     print(f"Wrote v18 NFW frontier lock to {out_dir.resolve()}")
 
 
+V18_REVIEWER_STRESS_LIMITATION_TARGETS = ("NGC2403", "NGC4157")
+
+
+def v18_reviewer_stress_variants() -> list[dict]:
+    variants: list[dict] = [
+        {
+            "variantId": "nominal",
+            "stressFamily": "nominal",
+            "mlDisk": ML_DISK,
+            "mlBulge": ML_BULGE,
+            "vObsScale": 1.0,
+            "baryonVelocityScale": 1.0,
+        }
+    ]
+    for ml_disk in ML_DISK_STRESS_GRID:
+        for ml_bulge in ML_BULGE_STRESS_GRID:
+            variants.append(
+                {
+                    "variantId": f"ml_disk_{ml_disk:.2f}_bulge_{ml_bulge:.2f}",
+                    "stressFamily": "disk-bulge-ml",
+                    "mlDisk": ml_disk,
+                    "mlBulge": ml_bulge,
+                    "vObsScale": 1.0,
+                    "baryonVelocityScale": 1.0,
+                }
+            )
+    for vobs_scale in VOBS_SCALE_STRESS_GRID:
+        variants.append(
+            {
+                "variantId": f"vobs_scale_{vobs_scale:.3f}",
+                "stressFamily": "observed-velocity-scale",
+                "mlDisk": ML_DISK,
+                "mlBulge": ML_BULGE,
+                "vObsScale": vobs_scale,
+                "baryonVelocityScale": 1.0,
+            }
+        )
+    for baryon_scale in BARYON_VELOCITY_SCALE_STRESS_GRID:
+        variants.append(
+            {
+                "variantId": f"baryon_velocity_scale_{baryon_scale:.3f}",
+                "stressFamily": "baryon-velocity-scale",
+                "mlDisk": ML_DISK,
+                "mlBulge": ML_BULGE,
+                "vObsScale": 1.0,
+                "baryonVelocityScale": baryon_scale,
+            }
+        )
+
+    unique: dict[str, dict] = {}
+    for variant in variants:
+        unique.setdefault(variant["variantId"], variant)
+    return list(unique.values())
+
+
+def v18_reviewer_stress_variant_base(base: dict, variant: dict) -> dict:
+    curves = [
+        transformed_curve(
+            curve,
+            ml_disk=parse_float(variant["mlDisk"], ML_DISK),
+            ml_bulge=parse_float(variant["mlBulge"], ML_BULGE),
+            vobs_scale=parse_float(variant["vObsScale"], 1.0),
+            baryon_velocity_scale=parse_float(variant["baryonVelocityScale"], 1.0),
+        )
+        for curve in base["curves"]
+    ]
+    expression = observed_state_app_expression(base["context"]["fit"], base["context"]["ampCap"])
+    v18_lookup = observed_state_browser_formula_supports(curves, expression)
+    weak_names = set(base["weakNames"])
+    return {
+        **base,
+        "curves": curves,
+        "cleanCurves": [curve for curve in curves if curve["name"] not in weak_names],
+        "v18Lookup": v18_lookup,
+    }
+
+
+def v18_reviewer_stress_summary_for_rows(rows: list[dict], variant: dict) -> dict:
+    clean = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+    high = [row for row in rows if row["set"] == "clean-high-rmse"]
+    protected = [row for row in rows if row["set"] == "clean-protected"]
+    protected_regs_v1821 = [parse_float(row.get("protectedRegressionKmS"), 0.0) for row in protected]
+    protected_regs_canonical = [
+        max(0.0, parse_float(row["candidateRmse"]) - parse_float(row["canonicalRmse"]))
+        for row in protected
+    ]
+    return {
+        "variantId": variant["variantId"],
+        "stressFamily": variant["stressFamily"],
+        "mlDisk": variant["mlDisk"],
+        "mlBulge": variant["mlBulge"],
+        "vObsScale": variant["vObsScale"],
+        "baryonVelocityScale": variant["baryonVelocityScale"],
+        "cleanCount": len(clean),
+        "highCount": len(high),
+        "protectedCount": len(protected),
+        "canonicalHighMeanRmse": safe_mean(parse_float(row["canonicalRmse"]) for row in high),
+        "v18_26HighMeanRmse": safe_mean(parse_float(row["candidateRmse"]) for row in high),
+        "v18_26HighGainVsCanonicalPct": pct_improvement(
+            safe_mean(parse_float(row["canonicalRmse"]) for row in high),
+            safe_mean(parse_float(row["candidateRmse"]) for row in high),
+        ),
+        "canonicalCleanMeanRmse": safe_mean(parse_float(row["canonicalRmse"]) for row in clean),
+        "v18_26CleanMeanRmse": safe_mean(parse_float(row["candidateRmse"]) for row in clean),
+        "v18_26CleanGainVsCanonicalPct": pct_improvement(
+            safe_mean(parse_float(row["canonicalRmse"]) for row in clean),
+            safe_mean(parse_float(row["candidateRmse"]) for row in clean),
+        ),
+        "v18_21HighMeanRmse": safe_mean(parse_float(row["v18_21Rmse"]) for row in high),
+        "v18_26HighGainVsV18_21Pct": pct_improvement(
+            safe_mean(parse_float(row["v18_21Rmse"]) for row in high),
+            safe_mean(parse_float(row["candidateRmse"]) for row in high),
+        ),
+        "highAbove20": sum(1 for row in high if parse_bool(row["above20Candidate"])),
+        "routeChangedVsV18_21Count": sum(1 for row in clean if parse_bool(row["routeChangedVsV1821"])),
+        "protectedMaxRegressionVsV18_21KmS": max(protected_regs_v1821 or [0.0]),
+        "protectedMaxRegressionVsCanonicalKmS": max(protected_regs_canonical or [0.0]),
+        "protectedWorseVsV18_21Count": sum(1 for value in protected_regs_v1821 if value > 1e-9),
+        "protectedWorseVsCanonicalCount": sum(1 for value in protected_regs_canonical if value > 1e-9),
+        "weakSystematicsLeakage": sum(
+            1
+            for row in rows
+            if row["set"] == "weak-systematics-excluded" and parse_float(row.get("anyActivation"), 0.0) >= 0.05
+        ),
+        "NGC2403Rmse": next((row["candidateRmse"] for row in rows if row["galaxy"] == "NGC2403"), math.nan),
+        "NGC4157Rmse": next((row["candidateRmse"] for row in rows if row["galaxy"] == "NGC4157"), math.nan),
+    }
+
+
+def write_v18_reviewer_stress_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_reviewer_stress"
+    frontier_capsule = write_v18_nfw_frontier_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_FRONTIER_LOCK_OUT)
+    candidate_capsule = read_json_if_exists(
+        DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_OUT / "mts_v18_nfw_radial_transfer_candidate_capsule.json"
+    ) or write_v18_nfw_radial_transfer_candidate_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_OUT)
+    strength = parse_float(candidate_capsule.get("selectedStrength"), 0.40)
+    base = v18_radial_phase_base_context()
+    target_names, target_rows_by_name = v18_nfw_radial_transfer_target_names()
+
+    variant_rows: list[dict] = []
+    case_rows: list[dict] = []
+    limitation_rows: list[dict] = []
+    protected_rows: list[dict] = []
+    for variant in v18_reviewer_stress_variants():
+        variant_base = v18_reviewer_stress_variant_base(base, variant)
+        rows = v18_nfw_radial_transfer_score_rows(variant_base, strength, target_names, target_rows_by_name)
+        summary = v18_reviewer_stress_summary_for_rows(rows, variant)
+        variant_rows.append(summary)
+        for row in rows:
+            augmented = {
+                "variantId": variant["variantId"],
+                "stressFamily": variant["stressFamily"],
+                "mlDisk": variant["mlDisk"],
+                "mlBulge": variant["mlBulge"],
+                "vObsScale": variant["vObsScale"],
+                "baryonVelocityScale": variant["baryonVelocityScale"],
+                **row,
+                "candidateRegressionVsCanonicalKmS": max(0.0, parse_float(row["candidateRmse"]) - parse_float(row["canonicalRmse"])),
+            }
+            case_rows.append(augmented)
+            if row["galaxy"] in V18_REVIEWER_STRESS_LIMITATION_TARGETS:
+                limitation_rows.append(augmented)
+            if row["set"] == "clean-protected" and (
+                parse_float(row.get("protectedRegressionKmS"), 0.0) > 1e-9
+                or parse_float(augmented.get("candidateRegressionVsCanonicalKmS"), 0.0) > 1e-9
+                or parse_float(row.get("anyActivation"), 0.0) >= 0.05
+            ):
+                protected_rows.append(augmented)
+
+    nominal = next((row for row in variant_rows if row["variantId"] == "nominal"), variant_rows[0])
+    worst_high = min(variant_rows, key=lambda row: parse_float(row["v18_26HighGainVsCanonicalPct"], math.inf))
+    worst_clean = min(variant_rows, key=lambda row: parse_float(row["v18_26CleanGainVsCanonicalPct"], math.inf))
+    worst_above20 = max(variant_rows, key=lambda row: parse_float(row["highAbove20"], -math.inf))
+    worst_protected = max(variant_rows, key=lambda row: parse_float(row["protectedMaxRegressionVsV18_21KmS"], -math.inf))
+    median_high_gain = statistics.median(
+        parse_float(row["v18_26HighGainVsCanonicalPct"]) for row in variant_rows if math.isfinite(parse_float(row["v18_26HighGainVsCanonicalPct"]))
+    )
+    median_clean_gain = statistics.median(
+        parse_float(row["v18_26CleanGainVsCanonicalPct"]) for row in variant_rows if math.isfinite(parse_float(row["v18_26CleanGainVsCanonicalPct"]))
+    )
+    passes = {
+        "frontierLockPassed": frontier_capsule.get("verdict") == "v18.26 NFW frontier locked",
+        "nominalHighGainMatchesLock": abs(parse_float(nominal["v18_26HighGainVsCanonicalPct"]) - 70.84242428018686) < 0.05,
+        "nominalCleanGainMatchesLock": abs(parse_float(nominal["v18_26CleanGainVsCanonicalPct"]) - 45.67529471692322) < 0.05,
+        "medianHighGainAtLeast60Pct": median_high_gain >= 60.0,
+        "medianCleanGainAtLeast38Pct": median_clean_gain >= 38.0,
+        "allVariantsHighGainAtLeast45Pct": parse_float(worst_high["v18_26HighGainVsCanonicalPct"], -math.inf) >= 45.0,
+        "allVariantsCleanGainAtLeast25Pct": parse_float(worst_clean["v18_26CleanGainVsCanonicalPct"], -math.inf) >= 25.0,
+        "worstHighAbove20AtMost3": parse_float(worst_above20["highAbove20"], math.inf) <= 3,
+        "worstProtectedRegressionVsV1821Below5": parse_float(worst_protected["protectedMaxRegressionVsV18_21KmS"], math.inf) < 5.0,
+        "weakLeakageZero": max(parse_float(row["weakSystematicsLeakage"], 0.0) for row in variant_rows) == 0,
+        "lawUnchanged": True,
+    }
+    if all(passes.values()):
+        verdict = "v18.26 reviewer stress passed"
+    elif passes["frontierLockPassed"] and passes["weakLeakageZero"] and median_high_gain >= 50.0:
+        verdict = "v18.26 reviewer stress fragile but useful"
+    else:
+        verdict = "v18.26 reviewer stress blocked"
+
+    guard = {
+        "candidateId": "observed-state-response-v18.31-reviewer-stress",
+        "verdict": verdict,
+        "lawChanged": False,
+        "baseLaw": "locked v18.26 radial-transfer candidate",
+        "selectedStrength": strength,
+        "stressFamilies": sorted({row["stressFamily"] for row in variant_rows}),
+        "forbiddenInputs": ["galaxy names in formula", "NFW parameters", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+        "browserChanged": False,
+    }
+
+    score_rows = [
+        {"metric": "verdict", "value": verdict},
+        {"metric": "variantCount", "value": len(variant_rows)},
+        {"metric": "nominalHighGainPct", "value": nominal["v18_26HighGainVsCanonicalPct"]},
+        {"metric": "nominalCleanGainPct", "value": nominal["v18_26CleanGainVsCanonicalPct"]},
+        {"metric": "medianHighGainPct", "value": median_high_gain},
+        {"metric": "medianCleanGainPct", "value": median_clean_gain},
+        {"metric": "worstHighGainPct", "value": worst_high["v18_26HighGainVsCanonicalPct"]},
+        {"metric": "worstHighGainVariant", "value": worst_high["variantId"]},
+        {"metric": "worstCleanGainPct", "value": worst_clean["v18_26CleanGainVsCanonicalPct"]},
+        {"metric": "worstCleanGainVariant", "value": worst_clean["variantId"]},
+        {"metric": "worstHighAbove20", "value": worst_above20["highAbove20"]},
+        {"metric": "worstHighAbove20Variant", "value": worst_above20["variantId"]},
+        {"metric": "worstProtectedRegressionVsV1821KmS", "value": worst_protected["protectedMaxRegressionVsV18_21KmS"]},
+        {"metric": "worstProtectedRegressionVariant", "value": worst_protected["variantId"]},
+        {"metric": "weakSystematicsLeakageMax", "value": max(parse_float(row["weakSystematicsLeakage"], 0.0) for row in variant_rows)},
+    ]
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_variant_summary.csv", variant_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_limitation_targets.csv", limitation_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    (out_dir / f"{prefix}_formula_guard.json").write_text(json.dumps(json_clean(guard), indent=2, sort_keys=True), encoding="utf-8")
+
+    report = [
+        "# MTS v18.31 Reviewer Stress Test",
+        "",
+        "This mode does not change the law. It keeps locked v18.26 fixed and perturbs the inputs a reviewer is likely to question: disk/bulge M/L, observed velocity scale, and baryonic velocity scale.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Variants tested: `{len(variant_rows)}`.",
+        f"- Nominal high-RMSE gain: `{fmt(nominal['v18_26HighGainVsCanonicalPct'])}%`.",
+        f"- Nominal clean gain: `{fmt(nominal['v18_26CleanGainVsCanonicalPct'])}%`.",
+        f"- Median stressed high-RMSE gain: `{fmt(median_high_gain)}%`.",
+        f"- Median stressed clean gain: `{fmt(median_clean_gain)}%`.",
+        f"- Worst high-RMSE gain: `{fmt(worst_high['v18_26HighGainVsCanonicalPct'])}%` in `{worst_high['variantId']}`.",
+        f"- Worst clean gain: `{fmt(worst_clean['v18_26CleanGainVsCanonicalPct'])}%` in `{worst_clean['variantId']}`.",
+        f"- Worst high above-20 count: `{worst_above20['highAbove20']}` in `{worst_above20['variantId']}`.",
+        f"- Worst protected regression vs v18.21: `{fmt(worst_protected['protectedMaxRegressionVsV18_21KmS'])}` km/s in `{worst_protected['variantId']}`.",
+        "",
+        "## Stress Variants",
+        "",
+        "| Variant | Family | M/L disk | M/L bulge | Vobs scale | baryon V scale | high gain | clean gain | high >20 | protected reg |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in variant_rows:
+        report.append(
+            f"| {row['variantId']} | {row['stressFamily']} | {fmt(row['mlDisk'])} | {fmt(row['mlBulge'])} | {fmt(row['vObsScale'])} | {fmt(row['baryonVelocityScale'])} | {fmt(row['v18_26HighGainVsCanonicalPct'])} | {fmt(row['v18_26CleanGainVsCanonicalPct'])} | {row['highAbove20']} | {fmt(row['protectedMaxRegressionVsV18_21KmS'])} |"
+        )
+    report.extend(["", "## Limitation Targets", "", "| Variant | NGC2403 RMSE | NGC4157 RMSE |", "| --- | ---: | ---: |"])
+    for row in variant_rows:
+        report.append(f"| {row['variantId']} | {fmt(row['NGC2403Rmse'])} | {fmt(row['NGC4157Rmse'])} |")
+    report.extend(["", "## Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "A pass here does not promote a new branch. It means the existing v18.26 repair is not only a single nominal calibration artifact. If this mode is fragile, the next work should be observational provenance and external validation rather than another internal threshold branch.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-v18-reviewer-stress-v1",
+        "verdict": verdict,
+        "summary": {
+            "variantCount": len(variant_rows),
+            "nominalHighGainPct": nominal["v18_26HighGainVsCanonicalPct"],
+            "nominalCleanGainPct": nominal["v18_26CleanGainVsCanonicalPct"],
+            "medianHighGainPct": median_high_gain,
+            "medianCleanGainPct": median_clean_gain,
+            "worstHighGainPct": worst_high["v18_26HighGainVsCanonicalPct"],
+            "worstHighGainVariant": worst_high["variantId"],
+            "worstCleanGainPct": worst_clean["v18_26CleanGainVsCanonicalPct"],
+            "worstCleanGainVariant": worst_clean["variantId"],
+            "worstHighAbove20": worst_above20["highAbove20"],
+            "worstHighAbove20Variant": worst_above20["variantId"],
+            "worstProtectedRegressionVsV1821KmS": worst_protected["protectedMaxRegressionVsV18_21KmS"],
+            "worstProtectedRegressionVariant": worst_protected["variantId"],
+            "weakSystematicsLeakageMax": max(parse_float(row["weakSystematicsLeakage"], 0.0) for row in variant_rows),
+            "passes": passes,
+        },
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_variant_summary.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_limitation_targets.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_formula_guard.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18reviewerstress(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_REVIEWER_STRESS_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_reviewer_stress_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.31 reviewer stress test")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"variants={summary['variantCount']}",
+                f"median_high={fmt(summary['medianHighGainPct'])}%",
+                f"median_clean={fmt(summary['medianCleanGainPct'])}%",
+                f"worst_high={fmt(summary['worstHighGainPct'])}%:{summary['worstHighGainVariant']}",
+                f"above20={summary['worstHighAbove20']}",
+                f"protected={fmt(summary['worstProtectedRegressionVsV1821KmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 reviewer stress test to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -84938,6 +85275,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwcasepairaudit",
             "v18nfwfrontierlock",
             "observedstatev18nfwfrontierlock",
+            "v18reviewerstress",
+            "observedstatev18reviewerstress",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -85258,6 +85597,8 @@ def main() -> None:
         cmd_v18nfwcasepairaudit(args)
     elif args.mode in {"v18nfwfrontierlock", "observedstatev18nfwfrontierlock"}:
         cmd_v18nfwfrontierlock(args)
+    elif args.mode in {"v18reviewerstress", "observedstatev18reviewerstress"}:
+        cmd_v18reviewerstress(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
