@@ -197,6 +197,7 @@ DEFAULT_OBSERVED_STATE_V18_NFW_PHASE_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-phase
 DEFAULT_OBSERVED_STATE_V18_NFW_ATTACK_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-gap-attack-ledger-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_SAFETY_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-safety-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-radial-transfer-candidate-v1"
+DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-radial-transfer-redteam-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -69059,6 +69060,318 @@ def cmd_v18nfwradialtransfercandidate(args: argparse.Namespace) -> None:
     print(f"Wrote v18 NFW radial-transfer candidate to {out_dir.resolve()}")
 
 
+def v18_nfw_radial_transfer_state_only_activation(curve: dict, table1_by_name: dict[str, dict]) -> float:
+    values = observed_state_values(curve)
+    mass = v18_official_mass_scale_features(curve, table1_by_name)
+    if curve.get("lockedModelRoute", "") != "low-load":
+        return 0.0
+    return v18_nfw_safety_gate(
+        [
+            v18_nfw_gap_candidate_smooth(curve["memoryLoad"], 1.45, 2.35),
+            v18_nfw_gap_candidate_smooth(curve["lockedModelUOut"], 0.34, 0.43),
+            v18_nfw_gap_candidate_smooth(0.90 - curve["lockedModelUMax"], 0.0, 0.16),
+            v18_nfw_gap_candidate_smooth(values["hOverRout"], 0.16, 0.25),
+            v18_nfw_gap_candidate_smooth(values["outerGasShare"], 0.45, 0.58),
+            v18_nfw_gap_candidate_smooth(mass["tableGasFraction"], 0.55, 0.72),
+            v18_nfw_gap_candidate_smooth(4.0 - mass["mBar_1e9Msun"], 0.0, 3.0),
+        ],
+        0.42,
+        0.68,
+    )
+
+
+def v18_nfw_radial_transfer_feature_distance(row: dict, reference: dict) -> float:
+    scales = {
+        "memoryLoad": 1.0,
+        "uOut": 0.08,
+        "uMax": 0.16,
+        "hOverRout": 0.08,
+        "outerGasShare": 0.14,
+        "tableGasFraction": 0.18,
+        "mBar_1e9Msun": 3.5,
+    }
+    total = 0.0
+    for key, scale in scales.items():
+        total += abs(parse_float(row.get(key), math.nan) - parse_float(reference.get(key), math.nan)) / scale
+    return total
+
+
+def v18_nfw_radial_transfer_gate_stress_rows(
+    base: dict,
+    strength: float,
+    target_names: set[str],
+    target_rows_by_name: dict[str, dict],
+    nominal_rows: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    reference = next((row for row in nominal_rows if row["galaxy"] in target_names), {})
+    clean_low = [
+        row for row in nominal_rows
+        if row["set"] != "weak-systematics-excluded" and row["lockedRoute"] == "low-load" and row["galaxy"] not in target_names
+    ]
+    analog_rows: list[dict] = []
+    for row in clean_low:
+        analog_rows.append(
+            {
+                "galaxy": row["galaxy"],
+                "set": row["set"],
+                "v18_21Rmse": row["v18_21Rmse"],
+                "legacyCompletionFamily": row["legacyCompletionFamily"],
+                "stateOnlyActivation": "",
+                "distanceToUGC07399": v18_nfw_radial_transfer_feature_distance(row, reference),
+                "memoryLoad": row["memoryLoad"],
+                "uOut": row["uOut"],
+                "uMax": row["uMax"],
+                "hOverRout": row["hOverRout"],
+                "outerGasShare": row["outerGasShare"],
+                "mBar_1e9Msun": row["mBar_1e9Msun"],
+                "tableGasFraction": row["tableGasFraction"],
+            }
+        )
+    analog_rows.sort(key=lambda row: (parse_float(row["distanceToUGC07399"], math.inf), row["galaxy"]))
+    nearest_analogs = [row["galaxy"] for row in analog_rows[:10]]
+
+    state_only_forced: dict[str, float] = {}
+    completion_any_forced: dict[str, float] = {}
+    nearest_forced: dict[str, float] = {}
+    exact_forced: dict[str, float] = {}
+    for curve in base["cleanCurves"]:
+        name = curve["name"]
+        exact_forced[name] = 1.0 if name in target_names else 0.0
+        state_only_forced[name] = v18_nfw_radial_transfer_state_only_activation(curve, base["table1ByName"])
+        if name in nearest_analogs:
+            nearest_forced[name] = 1.0
+        else:
+            nearest_forced[name] = 0.0
+        v18_supports = [base["v18Lookup"][(name, index)] for index in range(len(curve["points"]))]
+        _supports, acts, _profile, _mass, _legacy, legacy_family, _official_family = v18_radial_phase_supports(
+            curve,
+            v18_supports,
+            base["baseStrengths"],
+            base["table1ByName"],
+        )
+        completion_any_forced[name] = (
+            1.0
+            if curve.get("lockedModelRoute") == "low-load"
+            and parse_float(acts.get("completion"), 0.0) >= 0.20
+            and legacy_family
+            else 0.0
+        )
+    for row in analog_rows:
+        row["stateOnlyActivation"] = state_only_forced.get(row["galaxy"], 0.0)
+        row["nearestAnalogStressHit"] = row["galaxy"] in nearest_analogs
+        row["completionAnyStressHit"] = completion_any_forced.get(row["galaxy"], 0.0) >= 0.05
+
+    stress_rows: list[dict] = []
+    nominal_metric = v18_nfw_radial_transfer_metric(nominal_rows)
+    nominal_changed = [
+        row for row in nominal_rows
+        if row["set"] != "weak-systematics-excluded" and abs(parse_float(row["candidateGainVsV1821KmS"], 0.0)) > 0.05
+    ]
+    stress_rows.append(
+        {
+            "scenario": "exact-gate-nominal",
+            "activeCleanCount": sum(1 for row in nominal_rows if row["set"] != "weak-systematics-excluded" and parse_float(row["anyActivation"], 0.0) >= 0.05),
+            "changedCleanCount": len(nominal_changed),
+            "highGainVsV1821Pct": nominal_metric["highGainVsV1821Pct"],
+            "targetGainVsV1821Pct": nominal_metric["targetGainVsV1821Pct"],
+            "targetGainVsV1821KmS": nominal_metric["targetGainVsV1821KmS"],
+            "protectedMaxRegressionKmS": nominal_metric["protectedMaxRegressionKmS"],
+            "worstHighRegressionKmS": max([parse_float(row["candidateRegressionVsV1821KmS"], 0.0) for row in nominal_rows if row["set"] == "clean-high-rmse"] or [0.0]),
+            "highAbove20Candidate": nominal_metric["highAbove20Candidate"],
+            "routeChangedCount": nominal_metric["routeChangedCount"],
+            "topChanged": "; ".join(
+                f"{row['galaxy']}:{fmt(row['candidateGainVsV1821KmS'])}"
+                for row in sorted(nominal_changed, key=lambda item: -abs(parse_float(item["candidateGainVsV1821KmS"], 0.0)))[:8]
+            ),
+        }
+    )
+    scenarios = [
+        ("state-only-no-completion-family-gate", state_only_forced),
+        ("any-low-load-completion-family-gate", completion_any_forced),
+        ("nearest-ten-low-load-lookalikes-forced", nearest_forced),
+    ]
+    for scenario, forced in scenarios:
+        rows = v18_nfw_radial_transfer_score_rows(base, strength, target_names, target_rows_by_name, None, forced)
+        metric = v18_nfw_radial_transfer_metric(rows)
+        changed = [
+            row for row in rows
+            if row["set"] != "weak-systematics-excluded" and abs(parse_float(row["candidateGainVsV1821KmS"], 0.0)) > 0.05
+        ]
+        protected_regs = [parse_float(row.get("protectedRegressionKmS"), 0.0) for row in rows if row["set"] == "clean-protected"]
+        worst_protected = max(protected_regs or [0.0])
+        worst_high_reg = max([parse_float(row["candidateRegressionVsV1821KmS"], 0.0) for row in rows if row["set"] == "clean-high-rmse"] or [0.0])
+        stress_rows.append(
+            {
+                "scenario": scenario,
+                "activeCleanCount": sum(1 for value in forced.values() if parse_float(value, 0.0) >= 0.05),
+                "changedCleanCount": len(changed),
+                "highGainVsV1821Pct": metric["highGainVsV1821Pct"],
+                "targetGainVsV1821Pct": metric["targetGainVsV1821Pct"],
+                "targetGainVsV1821KmS": metric["targetGainVsV1821KmS"],
+                "protectedMaxRegressionKmS": worst_protected,
+                "worstHighRegressionKmS": worst_high_reg,
+                "highAbove20Candidate": metric["highAbove20Candidate"],
+                "routeChangedCount": metric["routeChangedCount"],
+                "topChanged": "; ".join(
+                    f"{row['galaxy']}:{fmt(row['candidateGainVsV1821KmS'])}"
+                    for row in sorted(changed, key=lambda item: -abs(parse_float(item["candidateGainVsV1821KmS"], 0.0)))[:8]
+                ),
+            }
+        )
+    return stress_rows, analog_rows
+
+
+def write_v18_nfw_radial_transfer_redteam_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_nfw_radial_transfer_redteam"
+    candidate_dir = DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_OUT
+    if not (candidate_dir / "mts_v18_nfw_radial_transfer_candidate_formula.json").exists():
+        write_v18_nfw_radial_transfer_candidate_artifacts(candidate_dir)
+    candidate_capsule = json.loads((candidate_dir / "mts_v18_nfw_radial_transfer_candidate_capsule.json").read_text(encoding="utf-8"))
+    strength = parse_float(candidate_capsule.get("selectedStrength"), 0.40)
+    base = v18_radial_phase_base_context()
+    target_names, target_rows_by_name = v18_nfw_radial_transfer_target_names()
+    nominal_rows = v18_nfw_radial_transfer_score_rows(base, strength, target_names, target_rows_by_name)
+    nominal_metric = v18_nfw_radial_transfer_metric(nominal_rows)
+    stress_rows, analog_rows = v18_nfw_radial_transfer_gate_stress_rows(base, strength, target_names, target_rows_by_name, nominal_rows)
+    null_rows = v18_nfw_radial_transfer_null_rows(base, strength, target_names, target_rows_by_name, nominal_rows)
+    best_null_target = max([parse_float(row["targetGainVsV1821Pct"]) for row in null_rows if math.isfinite(parse_float(row["targetGainVsV1821Pct"]))] or [0.0])
+    null_margin_target = nominal_metric["targetGainVsV1821Pct"] - best_null_target if math.isfinite(best_null_target) else math.nan
+    target_rows = [row for row in nominal_rows if parse_bool(row.get("lawFacingRadialTransferTarget"))]
+    protected_rows = [
+        row for row in nominal_rows
+        if row["set"] == "clean-protected"
+        and (parse_float(row["protectedRegressionKmS"], 0.0) > 0.0 or parse_float(row["anyActivation"], 0.0) >= 0.05)
+    ]
+    score_rows = [
+        {"metric": "selectedStrength", "value": strength},
+        {"metric": "nominalHighGainVsV1821Pct", "value": nominal_metric["highGainVsV1821Pct"]},
+        {"metric": "nominalTargetGainVsV1821Pct", "value": nominal_metric["targetGainVsV1821Pct"]},
+        {"metric": "nominalTargetGainVsV1821KmS", "value": nominal_metric["targetGainVsV1821KmS"]},
+        {"metric": "nominalProtectedMaxRegressionKmS", "value": nominal_metric["protectedMaxRegressionKmS"]},
+        {"metric": "nominalRouteChangedCount", "value": nominal_metric["routeChangedCount"]},
+        {"metric": "nominalHighAbove20Candidate", "value": nominal_metric["highAbove20Candidate"]},
+        {"metric": "bestNullTargetGainVsV1821Pct", "value": best_null_target},
+        {"metric": "nullMarginTargetPct", "value": null_margin_target},
+    ]
+    exact = next(row for row in stress_rows if row["scenario"] == "exact-gate-nominal")
+    escaped = [row for row in stress_rows if row["scenario"] != "exact-gate-nominal"]
+    worst_escape_protected = max(parse_float(row["protectedMaxRegressionKmS"], 0.0) for row in escaped)
+    worst_escape_high = max(parse_float(row["worstHighRegressionKmS"], 0.0) for row in escaped)
+    passes = {
+        "exactTargetGainAtLeast25Pct": nominal_metric["targetGainVsV1821Pct"] >= 25.0,
+        "exactProtectedRegressionZero": nominal_metric["protectedMaxRegressionKmS"] == 0.0,
+        "exactRouteChangedZero": nominal_metric["routeChangedCount"] == 0,
+        "exactHighAbove20Zero": nominal_metric["highAbove20Candidate"] == 0,
+        "exactBeatsTargetNullBy10Pct": math.isfinite(null_margin_target) and null_margin_target >= 10.0,
+        "relaxedGatesShowRealHarm": worst_escape_protected >= 3.0 or worst_escape_high >= 3.0,
+    }
+    verdict = "v18.26 exact gate survives red-team; do not broaden" if all(passes.values()) else "v18.26 red-team blocked"
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_nominal_case_ledger.csv", nominal_rows)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", target_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_gate_stress.csv", stress_rows)
+    write_csv(out_dir / f"{prefix}_analog_ledger.csv", analog_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+
+    report = [
+        "# MTS v18.26 Radial-Transfer Red-Team",
+        "",
+        "This mode tries to break the v18.26 gas-disk crossover radial-transfer branch. The exact candidate is tested separately from deliberately unsafe relaxed gates.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Exact target gain: `{fmt(nominal_metric['targetGainVsV1821Pct'])}%` / `{fmt(nominal_metric['targetGainVsV1821KmS'])}` km/s.",
+        f"- Exact protected max regression: `{fmt(nominal_metric['protectedMaxRegressionKmS'])}` km/s.",
+        f"- Exact route changes: `{nominal_metric['routeChangedCount']}`.",
+        f"- Exact high above 20: `{nominal_metric['highAbove20Candidate']}`.",
+        f"- Best null target gain: `{fmt(best_null_target)}%`.",
+        f"- Target null margin: `{fmt(null_margin_target)}` points.",
+        f"- Worst relaxed-gate protected regression: `{fmt(worst_escape_protected)}` km/s.",
+        f"- Worst relaxed-gate high regression: `{fmt(worst_escape_high)}` km/s.",
+        "",
+        "## Gate Stress",
+        "",
+        "| Scenario | Active | Target gain | Protected max regression | Worst high regression | Route changes | Top changed |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for row in stress_rows:
+        report.append(
+            f"| {row['scenario']} | {row['activeCleanCount']} | {fmt(row['targetGainVsV1821Pct'])}% | {fmt(row['protectedMaxRegressionKmS'])} | {fmt(row['worstHighRegressionKmS'])} | {row['routeChangedCount']} | {row['topChanged']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "The branch is only safe as the exact gas-disk crossover radial-transfer gate. Relaxing it into a general low-load transfer or generic completion-family rule hits protected and already-good analogues, which is why v18.26 should be treated as a narrow review candidate rather than folded broadly into v18.21.",
+            "",
+            "## Acceptance Gates",
+            "",
+            "| Gate | Pass |",
+            "| --- | ---: |",
+        ]
+    )
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-v18-nfw-radial-transfer-redteam-v1",
+        "verdict": verdict,
+        "summary": {
+            "selectedStrength": strength,
+            "nominalTargetGainVsV1821Pct": nominal_metric["targetGainVsV1821Pct"],
+            "nominalTargetGainVsV1821KmS": nominal_metric["targetGainVsV1821KmS"],
+            "nominalProtectedMaxRegressionKmS": nominal_metric["protectedMaxRegressionKmS"],
+            "nominalRouteChangedCount": nominal_metric["routeChangedCount"],
+            "bestNullTargetGainVsV1821Pct": best_null_target,
+            "nullMarginTargetPct": null_margin_target,
+            "worstRelaxedGateProtectedRegressionKmS": worst_escape_protected,
+            "worstRelaxedGateHighRegressionKmS": worst_escape_high,
+            "passes": passes,
+        },
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_nominal_case_ledger.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_gate_stress.csv",
+            f"{prefix}_analog_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18nfwradialtransferredteam(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_REDTEAM_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_nfw_radial_transfer_redteam_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.26 NFW radial-transfer red-team")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"target_gain={fmt(summary['nominalTargetGainVsV1821Pct'])}%",
+                f"target_kms={fmt(summary['nominalTargetGainVsV1821KmS'])}",
+                f"protected={fmt(summary['nominalProtectedMaxRegressionKmS'])}",
+                f"routes={summary['nominalRouteChangedCount']}",
+                f"null_margin={fmt(summary['nullMarginTargetPct'])}",
+                f"relaxed_protected={fmt(summary['worstRelaxedGateProtectedRegressionKmS'])}",
+                f"relaxed_high={fmt(summary['worstRelaxedGateHighRegressionKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 NFW radial-transfer red-team to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -82103,6 +82416,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwsafetycandidate",
             "v18nfwradialtransfercandidate",
             "observedstatev18nfwradialtransfercandidate",
+            "v18nfwradialtransferredteam",
+            "observedstatev18nfwradialtransferredteam",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -82409,6 +82724,8 @@ def main() -> None:
         cmd_v18nfwsafetycandidate(args)
     elif args.mode in {"v18nfwradialtransfercandidate", "observedstatev18nfwradialtransfercandidate"}:
         cmd_v18nfwradialtransfercandidate(args)
+    elif args.mode in {"v18nfwradialtransferredteam", "observedstatev18nfwradialtransferredteam"}:
+        cmd_v18nfwradialtransferredteam(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
