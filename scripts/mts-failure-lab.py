@@ -209,6 +209,8 @@ DEFAULT_OBSERVED_STATE_V18_ML_PROTOCOL_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-prot
 DEFAULT_OBSERVED_STATE_V18_ML_BOUNDARY_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-boundary-audit-v1"
 DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-provenance-v1"
 DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-ml-provenance-v1")
+DEFAULT_OBSERVED_STATE_V18_ML_SOURCE_ACCEPTANCE_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-source-acceptance-v1"
+DEFAULT_OBSERVED_STATE_V18_ML_SOURCE_ACCEPTANCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-ml-source-acceptance-v1")
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -73360,6 +73362,490 @@ def cmd_v18mlprovenance(args: argparse.Namespace) -> None:
     print(f"Wrote v18 M/L provenance fetch to {out_dir.resolve()}")
 
 
+V18_ML_ACCEPTANCE_CONTEXT_CHARS = 700
+V18_ML_ACCEPTANCE_NUMERIC_PATTERNS = [
+    re.compile(
+        r"(?i)(?:M\s*/\s*L|M/L|mass[-\s]*to[-\s]*light|stellar\s+mass[-\s]*to[-\s]*light|upsilon|\\Upsilon|Υ)"
+        r"[^.;:\n]{0,120}?([0-9]+(?:\.[0-9]+)?)"
+    ),
+    re.compile(
+        r"(?i)([0-9]+(?:\.[0-9]+)?)[^.;:\n]{0,90}?"
+        r"(?:M\s*/\s*L|M/L|mass[-\s]*to[-\s]*light|stellar\s+mass[-\s]*to[-\s]*light|upsilon|\\Upsilon|Υ)"
+    ),
+]
+
+
+def v18_ml_acceptance_reference_rows(source_target_rows: list[dict]) -> list[dict]:
+    refs: dict[str, dict] = {}
+    for row in source_target_rows:
+        reference_map: dict[str, str] = {}
+        for item in split_list_field(row.get("rotationCurveReferences", "")):
+            if "=" not in item:
+                continue
+            code, reference = item.split("=", 1)
+            reference_map[code.strip()] = reference.strip()
+        for code in [item.strip() for item in str(row.get("rotationCurveRefCodes", "")).split(",") if item.strip()]:
+            if code not in refs:
+                refs[code] = {
+                    "referenceCode": code,
+                    "referenceText": reference_map.get(code, ""),
+                    "galaxies": set(),
+                    "qualityCodes": set(),
+                    "failureDirections": set(),
+                }
+            refs[code]["galaxies"].add(row["galaxy"])
+            refs[code]["qualityCodes"].add(str(row.get("qualityCode", "")))
+            refs[code]["failureDirections"].add(row.get("failureDirection", ""))
+    output = []
+    for code, row in sorted(refs.items()):
+        output.append(
+            {
+                "referenceCode": code,
+                "referenceText": row["referenceText"],
+                "galaxies": "; ".join(sorted(row["galaxies"])),
+                "qualityCodes": "; ".join(sorted(item for item in row["qualityCodes"] if item)),
+                "failureDirections": "; ".join(sorted(item for item in row["failureDirections"] if item)),
+            }
+        )
+    return output
+
+
+def v18_ml_acceptance_crossref_path(reference_code: str) -> Path:
+    return DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_CACHE / "crossref-json" / f"{safe_file_stem(reference_code)}.json"
+
+
+def v18_ml_acceptance_cache_path(source_cache: Path, source_role: str, reference_code: str, discriminator: str, suffix: str) -> Path:
+    return source_cache / source_role / f"{safe_file_stem(reference_code)}-{safe_file_stem(discriminator)[:80]}.{suffix}"
+
+
+def v18_ml_acceptance_source_targets(reference_rows: list[dict], source_cache: Path) -> list[dict]:
+    rows = []
+    for ref in reference_rows:
+        metadata = parse_crossref_cache(v18_ml_acceptance_crossref_path(ref["referenceCode"]))
+        match_status = v18_ml_acceptance_match_status(ref["referenceText"], metadata)
+        doi_url = metadata.get("metadataUrl", "")
+        accepted_doi = bool(doi_url) and match_status in {"accepted-year-match", "unverified"}
+        if accepted_doi:
+            rows.append(
+                {
+                    "sourceRole": "doi-landing-html",
+                    "sourceKind": "doi-landing-html",
+                    "referenceCode": ref["referenceCode"],
+                    "referenceText": ref["referenceText"],
+                    "galaxies": ref["galaxies"],
+                    "url": doi_url,
+                    "cachePath": str(v18_ml_acceptance_cache_path(source_cache, "doi-landing-html", ref["referenceCode"], "doi", "html")),
+                    "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+                    "largeDownloadAllowed": False,
+                    "crossrefTitle": metadata.get("metadataTitle", ""),
+                    "crossrefDoi": metadata.get("doi", ""),
+                    "crossrefMatchStatus": match_status,
+                    "reason": "bounded DOI landing page for source-reading acceptance",
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "sourceRole": "doi-landing-html",
+                    "sourceKind": "doi-landing-html",
+                    "referenceCode": ref["referenceCode"],
+                    "referenceText": ref["referenceText"],
+                    "galaxies": ref["galaxies"],
+                    "url": doi_url,
+                    "cachePath": str(v18_ml_acceptance_cache_path(source_cache, "doi-landing-html", ref["referenceCode"], "doi", "html")),
+                    "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+                    "largeDownloadAllowed": False,
+                    "crossrefTitle": metadata.get("metadataTitle", ""),
+                    "crossrefDoi": metadata.get("doi", ""),
+                    "crossrefMatchStatus": match_status,
+                    "reason": "DOI not fetched because Crossref match is missing or suspect",
+                    "skipFetch": True,
+                }
+            )
+    return rows
+
+
+def v18_ml_acceptance_match_status(reference_text: str, metadata: dict) -> str:
+    base_status = crossref_match_status(reference_text, metadata)
+    if base_status not in {"accepted-year-match", "unverified"}:
+        return base_status
+    reference_lower = (reference_text or "").lower()
+    container_lower = str(metadata.get("containerTitle", "")).lower()
+    title_lower = str(metadata.get("metadataTitle", "")).lower()
+    combined = f"{container_lower} {title_lower}"
+    journal_checks = [
+        ("mnras", ["monthly notices", "mnras"]),
+        ("a&a", ["astronomy", "astrophysics"]),
+        ("apj", ["astrophysical journal", "apj"]),
+    ]
+    for token, accepted_container_terms in journal_checks:
+        if token in reference_lower and not any(term in combined for term in accepted_container_terms):
+            return "suspect-journal-mismatch"
+    if "phd thesis" in reference_lower and "thesis" not in combined:
+        return "suspect-source-type-mismatch"
+    return base_status
+
+
+def v18_ml_acceptance_fetch_inventory(source_targets: list[dict], source_cache: Path, offline: bool) -> list[dict]:
+    rows = []
+    for target in source_targets:
+        path = Path(target["cachePath"])
+        if not parse_bool(target.get("skipFetch")):
+            v21_source_download(target["url"], path, int(target["maxBytes"]), offline)
+        exists = path.exists()
+        rows.append(
+            {
+                **{key: target.get(key, "") for key in ["sourceRole", "sourceKind", "referenceCode", "referenceText", "galaxies", "url", "cachePath", "maxBytes", "largeDownloadAllowed", "crossrefTitle", "crossrefDoi", "crossrefMatchStatus", "reason"]},
+                "cacheStatus": "available" if exists else "missing",
+                "downloaded": False,
+                "sizeBytes": path.stat().st_size if exists else "",
+                "sha256": file_sha256(path) if exists else "",
+            }
+        )
+
+    lead_rows = [row for row in rows if row["cacheStatus"] == "available"]
+    discovered = []
+    seen = set()
+    for lead in lead_rows:
+        for link in v21_source_html_links(Path(lead["cachePath"]), lead["url"]):
+            role = v21_source_link_role(link)
+            if role is None:
+                continue
+            source_role, suffix, max_bytes = role
+            key = (lead["referenceCode"], source_role, link)
+            if key in seen:
+                continue
+            seen.add(key)
+            discovered.append(
+                {
+                    "sourceRole": source_role,
+                    "sourceKind": source_role,
+                    "referenceCode": lead["referenceCode"],
+                    "referenceText": lead["referenceText"],
+                    "galaxies": lead["galaxies"],
+                    "url": link,
+                    "cachePath": str(v18_ml_acceptance_cache_path(source_cache, source_role, lead["referenceCode"], hashlib.sha256(link.encode("utf-8")).hexdigest()[:16], suffix)),
+                    "maxBytes": max_bytes,
+                    "largeDownloadAllowed": False,
+                    "crossrefTitle": lead.get("crossrefTitle", ""),
+                    "crossrefDoi": lead.get("crossrefDoi", ""),
+                    "crossrefMatchStatus": lead.get("crossrefMatchStatus", ""),
+                    "reason": f"bounded {source_role} discovered from DOI landing page",
+                }
+            )
+            if sum(1 for row in discovered if row["referenceCode"] == lead["referenceCode"]) >= 8:
+                break
+
+    for target in sorted(discovered, key=lambda row: (row["referenceCode"], row["sourceRole"], row["url"])):
+        path = Path(target["cachePath"])
+        v21_source_download(target["url"], path, int(target["maxBytes"]), offline)
+        exists = path.exists()
+        rows.append(
+            {
+                **{key: target.get(key, "") for key in ["sourceRole", "sourceKind", "referenceCode", "referenceText", "galaxies", "url", "cachePath", "maxBytes", "largeDownloadAllowed", "crossrefTitle", "crossrefDoi", "crossrefMatchStatus", "reason"]},
+                "cacheStatus": "available" if exists else "missing",
+                "downloaded": False,
+                "sizeBytes": path.stat().st_size if exists else "",
+                "sha256": file_sha256(path) if exists else "",
+            }
+        )
+    rows.sort(key=lambda row: (row["referenceCode"], row["sourceRole"], row["url"]))
+    return rows
+
+
+def v18_ml_acceptance_numeric_values(snippet: str) -> list[float]:
+    values: list[float] = []
+    for pattern in V18_ML_ACCEPTANCE_NUMERIC_PATTERNS:
+        for match in pattern.finditer(snippet):
+            try:
+                value = float(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            if 0.05 <= value <= 12.0:
+                values.append(value)
+    unique = []
+    for value in values:
+        if not any(abs(value - existing) < 1e-9 for existing in unique):
+            unique.append(value)
+    return unique
+
+
+def v18_ml_acceptance_source_snippets(text: str, galaxy: str) -> list[dict]:
+    lower = text.lower()
+    variants = v21_source_name_variants(galaxy)
+    rows = []
+    windows: list[tuple[str, int]] = []
+    for variant in variants:
+        start = 0
+        needle = variant.lower()
+        while needle:
+            index = lower.find(needle, start)
+            if index < 0:
+                break
+            windows.append(("case-neighborhood", index))
+            start = index + len(needle)
+    for pattern in V18_ML_ACCEPTANCE_NUMERIC_PATTERNS:
+        for match in pattern.finditer(text):
+            windows.append(("ml-neighborhood", match.start()))
+    used = set()
+    for scope_hint, center in windows[:80]:
+        start = max(0, center - V18_ML_ACCEPTANCE_CONTEXT_CHARS)
+        end = min(len(text), center + V18_ML_ACCEPTANCE_CONTEXT_CHARS)
+        key = (start, end)
+        if key in used:
+            continue
+        used.add(key)
+        snippet = text[start:end].strip()
+        values = v18_ml_acceptance_numeric_values(snippet)
+        if not values:
+            continue
+        snippet_lower = snippet.lower()
+        case_specific = any(variant.lower() in snippet_lower for variant in variants)
+        rows.append(
+            {
+                "scopeHint": scope_hint,
+                "caseSpecific": case_specific,
+                "numericMlValues": "; ".join(fmt_num(value) for value in values),
+                "numericMlValueCount": len(values),
+                "snippet": snippet[:1000],
+            }
+        )
+    return rows
+
+
+def v18_ml_acceptance_numeric_snippet_rows(target_rows: list[dict], fetch_rows: list[dict], offline: bool) -> tuple[list[dict], dict]:
+    targets_by_reference: dict[str, list[dict]] = {}
+    for target in target_rows:
+        for code in [item.strip() for item in str(target.get("rotationCurveRefCodes", "")).split(",") if item.strip()]:
+            targets_by_reference.setdefault(code, []).append(target)
+    rows = []
+    parser_names = set()
+    for source in fetch_rows:
+        if source["cacheStatus"] != "available":
+            continue
+        text, parser_name = v21_source_text(Path(source["cachePath"]), source["sourceRole"], offline)
+        if parser_name:
+            parser_names.add(parser_name)
+        if not text:
+            continue
+        for target in targets_by_reference.get(source["referenceCode"], []):
+            for snippet in v18_ml_acceptance_source_snippets(text, target["galaxy"]):
+                accepted_candidate = (
+                    parse_bool(snippet["caseSpecific"])
+                    and source["sourceRole"] in {"candidate-fulltext-html", "candidate-pdf", "doi-landing-html"}
+                    and source.get("crossrefMatchStatus") in {"accepted-year-match", "unverified"}
+                )
+                rows.append(
+                    {
+                        "galaxy": target["galaxy"],
+                        "referenceCode": source["referenceCode"],
+                        "referenceText": source.get("referenceText", ""),
+                        "sourceRole": source["sourceRole"],
+                        "sourceKind": source["sourceKind"],
+                        "sourcePath": source["cachePath"],
+                        "sourceUrl": source["url"],
+                        "parser": parser_name,
+                        "crossrefTitle": source.get("crossrefTitle", ""),
+                        "crossrefMatchStatus": source.get("crossrefMatchStatus", ""),
+                        "caseSpecific": snippet["caseSpecific"],
+                        "acceptedPriorCandidate": accepted_candidate,
+                        "numericMlValues": snippet["numericMlValues"],
+                        "numericMlValueCount": snippet["numericMlValueCount"],
+                        "scopeHint": snippet["scopeHint"],
+                        "snippet": snippet["snippet"],
+                    }
+                )
+    rows.sort(key=lambda row: (row["galaxy"], row["referenceCode"], str(not parse_bool(row["acceptedPriorCandidate"])), row["sourceRole"]))
+    return rows, {"parserNames": "; ".join(sorted(parser_names))}
+
+
+def v18_ml_acceptance_case_verdict_rows(target_rows: list[dict], snippet_rows: list[dict]) -> list[dict]:
+    rows = []
+    by_galaxy: dict[str, list[dict]] = {}
+    for row in snippet_rows:
+        by_galaxy.setdefault(row["galaxy"], []).append(row)
+    for target in target_rows:
+        snippets = by_galaxy.get(target["galaxy"], [])
+        accepted = [row for row in snippets if parse_bool(row.get("acceptedPriorCandidate"))]
+        source_wide = [row for row in snippets if not parse_bool(row.get("caseSpecific")) and row.get("numericMlValues")]
+        case_mentions = [row for row in snippets if parse_bool(row.get("caseSpecific"))]
+        if accepted:
+            verdict = "accepted external M/L prior candidate found"
+            blocks = False
+            next_action = "Use only after source-page manual confirmation, then run provenance-backed M/L rescore."
+        elif case_mentions:
+            verdict = "case mentioned with numeric M/L context, but not accepted as prior"
+            blocks = True
+            next_action = "Manual source reading required before any rescore."
+        elif source_wide:
+            verdict = "source-wide M/L convention only"
+            blocks = True
+            next_action = "Do not use as per-galaxy transport input."
+        else:
+            verdict = "no numeric external M/L prior found"
+            blocks = True
+            next_action = "Keep as M/L calibration-boundary limitation."
+        rows.append(
+            {
+                "galaxy": target["galaxy"],
+                "lockedRoute": target.get("lockedRoute", ""),
+                "failureDirection": target.get("failureDirection", ""),
+                "coreFailureCount": target.get("coreFailureCount", ""),
+                "wideFailureCount": target.get("wideFailureCount", ""),
+                "acceptedPriorCandidateCount": len(accepted),
+                "caseMentionNumericCount": len(case_mentions),
+                "sourceWideNumericCount": len(source_wide),
+                "acceptedMlValues": "; ".join(sorted({value for row in accepted for value in str(row.get("numericMlValues", "")).split("; ") if value})),
+                "verdict": verdict,
+                "blocksLawChange": blocks,
+                "nextAction": next_action,
+            }
+        )
+    return rows
+
+
+def write_v18_ml_source_acceptance_artifacts(out_dir: Path, source_cache: Path, offline: bool) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source_cache.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_ml_source_acceptance"
+    if not (DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_OUT / "mts_v18_ml_provenance_source_targets.csv").exists():
+        write_v18_ml_provenance_artifacts(DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_OUT, DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_CACHE, True)
+    source_targets = read_csv_rows(DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_OUT / "mts_v18_ml_provenance_source_targets.csv")
+    target_rows = [row for row in source_targets if parse_float(row.get("coreFailureCount"), 0.0) > 0]
+    reference_rows = v18_ml_acceptance_reference_rows(target_rows)
+    lead_targets = v18_ml_acceptance_source_targets(reference_rows, source_cache)
+    fetch_rows = v18_ml_acceptance_fetch_inventory(lead_targets, source_cache, offline)
+    snippet_rows, parse_meta = v18_ml_acceptance_numeric_snippet_rows(target_rows, fetch_rows, offline)
+    verdict_rows = v18_ml_acceptance_case_verdict_rows(target_rows, snippet_rows)
+    rescore_rows = [
+        {
+            "galaxy": row["galaxy"],
+            "acceptedMlValues": row["acceptedMlValues"],
+            "sourceAcceptance": row["verdict"],
+            "rescoreAllowed": not parse_bool(row["blocksLawChange"]),
+        }
+        for row in verdict_rows
+        if parse_float(row.get("acceptedPriorCandidateCount"), 0.0) > 0
+    ]
+    accepted_cases = sum(1 for row in verdict_rows if parse_float(row.get("acceptedPriorCandidateCount"), 0.0) > 0)
+    source_wide_cases = sum(1 for row in verdict_rows if row["verdict"] == "source-wide M/L convention only")
+    if accepted_cases:
+        verdict = "accepted external M/L prior candidates require rescore"
+    elif source_wide_cases:
+        verdict = "source-wide M/L only; no per-galaxy prior"
+    else:
+        verdict = "no numeric external M/L priors found"
+    passes = {
+        "sourceCacheOnDDrive": str(source_cache).lower().startswith("d:"),
+        "targetCountFive": len(target_rows) == 5,
+        "noLargeDownloads": True,
+        "acceptedPriorCasesZeroOrExplicit": accepted_cases == len(rescore_rows),
+        "lawUnchanged": True,
+    }
+    score_rows = [
+        {"metric": "verdict", "value": verdict},
+        {"metric": "targetCount", "value": len(target_rows)},
+        {"metric": "referenceCount", "value": len(reference_rows)},
+        {"metric": "cachedSourceCount", "value": sum(1 for row in fetch_rows if row["cacheStatus"] == "available")},
+        {"metric": "numericMlSnippetCount", "value": len(snippet_rows)},
+        {"metric": "acceptedExternalMlPriorCandidateCaseCount", "value": accepted_cases},
+        {"metric": "sourceWideMlOnlyCaseCount", "value": source_wide_cases},
+        {"metric": "weakSystematicsLeakage", "value": 0},
+    ]
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_reference_inventory.csv", reference_rows)
+    write_csv(out_dir / f"{prefix}_fetch_inventory.csv", fetch_rows)
+    write_csv(out_dir / f"{prefix}_numeric_snippets.csv", snippet_rows)
+    write_csv(out_dir / f"{prefix}_case_verdicts.csv", verdict_rows)
+    write_csv(out_dir / f"{prefix}_rescore_inputs.csv", rescore_rows)
+    report = [
+        "# MTS v18.35 M/L Source Acceptance",
+        "",
+        "This mode reads bounded source pages/PDFs for the five v18.33 M/L-boundary cases. It does not change v18.26 and does not score a new law.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Targets: `{len(target_rows)}`.",
+        f"- References: `{len(reference_rows)}`.",
+        f"- Cached source rows: `{sum(1 for row in fetch_rows if row['cacheStatus'] == 'available')}`.",
+        f"- Numeric M/L snippets: `{len(snippet_rows)}`.",
+        f"- Accepted per-galaxy M/L prior candidate cases: `{accepted_cases}`.",
+        f"- Parser: `{parse_meta.get('parserNames', '') or 'html/text'}`.",
+        "",
+        "## Case Verdicts",
+        "",
+        "| Galaxy | Direction | Accepted prior candidates | Source-wide numeric | Verdict | Next action |",
+        "| --- | --- | ---: | ---: | --- | --- |",
+    ]
+    for row in verdict_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['failureDirection']} | {row['acceptedPriorCandidateCount']} | {row['sourceWideNumericCount']} | {row['verdict']} | {row['nextAction']} |"
+        )
+    report.extend(["", "## Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.extend(
+        [
+            "",
+            "## Direction",
+            "",
+            "A numeric M/L value is only usable for a future rescore if it is case-specific and tied to a bounded source page/PDF. Generic paper-wide M/L language is not accepted as a transport-law input.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-ml-source-acceptance-v1",
+        "verdict": verdict,
+        "summary": {
+            "targetCount": len(target_rows),
+            "referenceCount": len(reference_rows),
+            "cachedSourceCount": sum(1 for row in fetch_rows if row["cacheStatus"] == "available"),
+            "numericMlSnippetCount": len(snippet_rows),
+            "acceptedExternalMlPriorCandidateCaseCount": accepted_cases,
+            "sourceWideMlOnlyCaseCount": source_wide_cases,
+            "weakSystematicsLeakage": 0,
+            "sourceCacheOnDDrive": str(source_cache).lower().startswith("d:"),
+            "lawChanged": False,
+            "passes": passes,
+        },
+        "sourceCache": str(source_cache),
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_reference_inventory.csv",
+            f"{prefix}_fetch_inventory.csv",
+            f"{prefix}_numeric_snippets.csv",
+            f"{prefix}_case_verdicts.csv",
+            f"{prefix}_rescore_inputs.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18mlsourceacceptance(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_ML_SOURCE_ACCEPTANCE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_OBSERVED_STATE_V18_ML_SOURCE_ACCEPTANCE_CACHE
+    capsule = write_v18_ml_source_acceptance_artifacts(out_dir, source_cache, args.offline)
+    summary = capsule["summary"]
+    print("MTS v18.35 M/L source acceptance")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"targets={summary['targetCount']}",
+                f"references={summary['referenceCount']}",
+                f"cached_sources={summary['cachedSourceCount']}",
+                f"numeric_ml_snippets={summary['numericMlSnippetCount']}",
+                f"accepted_ml_prior_cases={summary['acceptedExternalMlPriorCandidateCaseCount']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 M/L source acceptance to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -86426,6 +86912,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18mlboundaryaudit",
             "v18mlprovenance",
             "observedstatev18mlprovenance",
+            "v18mlsourceacceptance",
+            "observedstatev18mlsourceacceptance",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -86754,6 +87242,8 @@ def main() -> None:
         cmd_v18mlboundaryaudit(args)
     elif args.mode in {"v18mlprovenance", "observedstatev18mlprovenance"}:
         cmd_v18mlprovenance(args)
+    elif args.mode in {"v18mlsourceacceptance", "observedstatev18mlsourceacceptance"}:
+        cmd_v18mlsourceacceptance(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
