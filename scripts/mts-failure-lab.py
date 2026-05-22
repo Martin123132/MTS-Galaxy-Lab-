@@ -202,6 +202,7 @@ DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_MERGE_OUT = OUTPUT_PACK_ROOT / "m
 DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_BROWSER_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-radial-transfer-browser-lock-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_OVERSHELF_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-overshelf-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_LIMITATION_POCKET_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-limitation-pocket-candidate-v1"
+DEFAULT_OBSERVED_STATE_V18_NFW_LIMITATION_POCKET_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-limitation-pocket-redteam-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_PROVENANCE_BOUNDARY_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-provenance-boundary-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_CASE_PAIR_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-case-pair-audit-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_FRONTIER_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-frontier-lock-v1"
@@ -71418,6 +71419,376 @@ def cmd_v18nfwlimitationpocketcandidate(args: argparse.Namespace) -> None:
     print(f"Wrote v18.30 NFW limitation-pocket candidate to {out_dir.resolve()}")
 
 
+def v18_nfw_limitation_pocket_scaled_forced(
+    base: dict,
+    activation_scale: float = 1.0,
+    zero_branch: str | None = None,
+) -> dict[str, dict[str, float]]:
+    forced: dict[str, dict[str, float]] = {}
+    for curve in base["cleanCurves"]:
+        acts, _values, _mass = v18_nfw_limitation_pocket_activations(curve, base["table1ByName"])
+        forced[curve["name"]] = {
+            branch: 0.0 if branch == zero_branch else clamp(parse_float(acts.get(branch), 0.0) * activation_scale, 0.0, 1.0)
+            for branch in V18_NFW_LIMITATION_POCKET_BRANCHES
+        }
+    return forced
+
+
+def v18_nfw_limitation_pocket_redteam_variant_rows(
+    base: dict,
+    strengths: dict[str, float],
+    target_names: set[str],
+    target_rows_by_name: dict[str, dict],
+    radial_transfer_strength: float,
+) -> list[dict]:
+    variants: list[tuple[str, dict[str, float], dict[str, dict[str, float]] | None]] = [
+        ("nominal", strengths, None),
+        ("strength-075", {branch: value * 0.75 for branch, value in strengths.items()}, None),
+        ("strength-125", {branch: min(0.40, value * 1.25) for branch, value in strengths.items()}, None),
+        (
+            "buffered-branch-only",
+            {
+                "bufferedGasRichDiskPoorShelfSuppression": strengths["bufferedGasRichDiskPoorShelfSuppression"],
+                "lowLoadMassiveLowGasShelfSuppression": 0.0,
+            },
+            None,
+        ),
+        (
+            "low-load-branch-only",
+            {
+                "bufferedGasRichDiskPoorShelfSuppression": 0.0,
+                "lowLoadMassiveLowGasShelfSuppression": strengths["lowLoadMassiveLowGasShelfSuppression"],
+            },
+            None,
+        ),
+        ("activation-075", strengths, v18_nfw_limitation_pocket_scaled_forced(base, 0.75)),
+        ("activation-125", strengths, v18_nfw_limitation_pocket_scaled_forced(base, 1.25)),
+        ("drop-buffered-branch", strengths, v18_nfw_limitation_pocket_scaled_forced(base, 1.0, "bufferedGasRichDiskPoorShelfSuppression")),
+        ("drop-low-load-branch", strengths, v18_nfw_limitation_pocket_scaled_forced(base, 1.0, "lowLoadMassiveLowGasShelfSuppression")),
+    ]
+    output: list[dict] = []
+    for variant_name, variant_strengths, forced in variants:
+        rows = v18_nfw_limitation_pocket_score_rows(
+            base,
+            variant_strengths,
+            target_names,
+            target_rows_by_name,
+            radial_transfer_strength,
+            None,
+            forced,
+        )
+        metric = v18_nfw_limitation_pocket_metric(rows)
+        target_rows = [row for row in rows if parse_bool(row.get("pocketTarget"))]
+        output.append(
+            {
+                "variant": variant_name,
+                "bufferedBeta": variant_strengths["bufferedGasRichDiskPoorShelfSuppression"],
+                "lowLoadBeta": variant_strengths["lowLoadMassiveLowGasShelfSuppression"],
+                "targetGainVsV1826Pct": metric["targetGainVsV1826Pct"],
+                "targetGainVsV1826KmS": metric["targetGainVsV1826KmS"],
+                "highGainVsV1826Pct": metric["highGainVsV1826Pct"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionKmS"],
+                "activeProtectedCount": metric["activeProtectedCount"],
+                "highAbove20Candidate": metric["highAbove20Candidate"],
+                "routeChangedCount": metric["routeChangedCount"],
+                "targetCaseGainsKmS": "; ".join(
+                    f"{row['galaxy']}={fmt(parse_float(row['candidateGainVsV1826KmS']))}"
+                    for row in target_rows
+                ),
+            }
+        )
+    return output
+
+
+def v18_nfw_limitation_pocket_distance(row_a: dict, row_b: dict) -> float:
+    columns = [
+        ("memoryLoad", 10.0),
+        ("u075", 1.0),
+        ("uOut", 1.0),
+        ("uMax", 1.0),
+        ("hOverRout", 0.25),
+        ("outerGasShare", 1.0),
+        ("outerDiskShare", 1.0),
+        ("midGasShare", 1.0),
+        ("pointDensity", 4.0),
+        ("mBar_1e9Msun", 100.0),
+        ("tableGasFraction", 1.0),
+    ]
+    total = 0.0
+    count = 0
+    for column, scale in columns:
+        a_value = parse_float(row_a.get(column), math.nan)
+        b_value = parse_float(row_b.get(column), math.nan)
+        if math.isfinite(a_value) and math.isfinite(b_value) and scale > 0.0:
+            total += ((a_value - b_value) / scale) ** 2
+            count += 1
+    return math.sqrt(total / count) if count else math.inf
+
+
+def v18_nfw_limitation_pocket_protected_lookalike_rows(
+    base: dict,
+    strengths: dict[str, float],
+    target_names: set[str],
+    target_rows_by_name: dict[str, dict],
+    radial_transfer_strength: float,
+    reference_rows: list[dict],
+) -> list[dict]:
+    target_rows = [row for row in reference_rows if row["galaxy"] in target_names]
+    protected_rows = [row for row in reference_rows if row["set"] == "clean-protected"]
+    output: list[dict] = []
+    for target in target_rows:
+        branch_hits = [branch for branch in V18_NFW_LIMITATION_POCKET_BRANCHES if parse_float(target.get(f"{branch}Activation"), 0.0) >= 0.05]
+        for branch in branch_hits:
+            candidates = [
+                row for row in protected_rows
+                if row.get("lockedRoute") == target.get("lockedRoute")
+            ]
+            candidates.sort(key=lambda row: v18_nfw_limitation_pocket_distance(target, row))
+            for protected in candidates[:6]:
+                forced = {
+                    protected["galaxy"]: {
+                        other_branch: 0.0
+                        for other_branch in V18_NFW_LIMITATION_POCKET_BRANCHES
+                    }
+                }
+                forced[protected["galaxy"]][branch] = parse_float(target.get(f"{branch}Activation"), 0.0)
+                rows = v18_nfw_limitation_pocket_score_rows(
+                    base,
+                    strengths,
+                    target_names,
+                    target_rows_by_name,
+                    radial_transfer_strength,
+                    None,
+                    forced,
+                )
+                stressed = next(row for row in rows if row["galaxy"] == protected["galaxy"])
+                output.append(
+                    {
+                        "targetGalaxy": target["galaxy"],
+                        "branch": branch,
+                        "protectedGalaxy": protected["galaxy"],
+                        "distance": v18_nfw_limitation_pocket_distance(target, protected),
+                        "protectedRoute": protected["lockedRoute"],
+                        "forcedActivation": parse_float(target.get(f"{branch}Activation"), 0.0),
+                        "protectedV1826Rmse": stressed["v18_26Rmse"],
+                        "protectedStressRmse": stressed["candidateRmse"],
+                        "protectedRegressionKmS": stressed["protectedRegressionKmS"],
+                        "protectedRouteChanged": stressed["routeChangedVsV1826"],
+                    }
+                )
+    output.sort(key=lambda row: (-parse_float(row["protectedRegressionKmS"], 0.0), row["targetGalaxy"], row["protectedGalaxy"]))
+    return output
+
+
+def write_v18_nfw_limitation_pocket_redteam_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_nfw_limitation_pocket_redteam"
+    candidate_capsule = write_v18_nfw_limitation_pocket_candidate_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_LIMITATION_POCKET_OUT)
+    browser_capsule = write_v18_nfw_radial_transfer_browser_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_BROWSER_OUT)
+    base = v18_radial_phase_base_context()
+    target_names, target_rows_by_name = v18_nfw_limitation_pocket_target_rows()
+    radial_transfer_capsule = json.loads((DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_OUT / "mts_v18_nfw_radial_transfer_candidate_capsule.json").read_text(encoding="utf-8"))
+    radial_transfer_strength = parse_float(radial_transfer_capsule.get("selectedStrength"), 0.40)
+    strengths = {
+        branch: parse_float(candidate_capsule["selectedStrengths"].get(branch), 0.0)
+        for branch in V18_NFW_LIMITATION_POCKET_BRANCHES
+    }
+    train_names, holdout_names = observed_state_split(base["cleanCurves"], SPLIT_SEED, HOLDOUT_FRACTION)
+    nominal_rows = v18_nfw_limitation_pocket_score_rows(
+        base,
+        strengths,
+        target_names,
+        target_rows_by_name,
+        radial_transfer_strength,
+        (train_names, holdout_names),
+    )
+    nominal_metric = v18_nfw_limitation_pocket_metric(nominal_rows)
+    null_rows = v18_nfw_limitation_pocket_null_rows(base, strengths, target_names, target_rows_by_name, radial_transfer_strength, nominal_rows)
+    variant_rows = v18_nfw_limitation_pocket_redteam_variant_rows(base, strengths, target_names, target_rows_by_name, radial_transfer_strength)
+    lookalike_rows = v18_nfw_limitation_pocket_protected_lookalike_rows(
+        base,
+        strengths,
+        target_names,
+        target_rows_by_name,
+        radial_transfer_strength,
+        nominal_rows,
+    )
+    seed_rows: list[dict] = []
+    for seed in V18_NFW_LIMITATION_POCKET_SEEDS:
+        seed_train, seed_holdout = observed_state_split(base["cleanCurves"], seed, HOLDOUT_FRACTION)
+        seed_rows_full = v18_nfw_limitation_pocket_score_rows(
+            base,
+            strengths,
+            target_names,
+            target_rows_by_name,
+            radial_transfer_strength,
+            (seed_train, seed_holdout),
+        )
+        all_metric = v18_nfw_limitation_pocket_metric(seed_rows_full)
+        holdout_metric = v18_nfw_limitation_pocket_metric(seed_rows_full, "holdout")
+        seed_rows.append(
+            {
+                "seed": seed,
+                "targetGainVsV1826Pct": all_metric["targetGainVsV1826Pct"],
+                "holdoutTargetGainVsV1826Pct": holdout_metric["targetGainVsV1826Pct"],
+                "highGainVsV1826Pct": all_metric["highGainVsV1826Pct"],
+                "protectedMaxRegressionKmS": all_metric["protectedMaxRegressionKmS"],
+                "activeProtectedCount": all_metric["activeProtectedCount"],
+                "highAbove20Candidate": all_metric["highAbove20Candidate"],
+                "routeChangedCount": all_metric["routeChangedCount"],
+            }
+        )
+
+    best_null = max([parse_float(row["targetGainVsV1826Pct"]) for row in null_rows if math.isfinite(parse_float(row["targetGainVsV1826Pct"]))] or [0.0])
+    null_margin = nominal_metric["targetGainVsV1826Pct"] - best_null if math.isfinite(best_null) else math.nan
+    nominal_variant = next(row for row in variant_rows if row["variant"] == "nominal")
+    strength_075 = next(row for row in variant_rows if row["variant"] == "strength-075")
+    strength_125 = next(row for row in variant_rows if row["variant"] == "strength-125")
+    activation_075 = next(row for row in variant_rows if row["variant"] == "activation-075")
+    activation_125 = next(row for row in variant_rows if row["variant"] == "activation-125")
+    branch_only_rows = [row for row in variant_rows if row["variant"] in {"buffered-branch-only", "low-load-branch-only"}]
+    max_lookalike_regression = max([parse_float(row["protectedRegressionKmS"], 0.0) for row in lookalike_rows] or [0.0])
+    lookalike_regression_over_1 = sum(1 for row in lookalike_rows if parse_float(row["protectedRegressionKmS"], 0.0) > 1.0)
+    browser_summary = browser_capsule["summary"]
+    passes = {
+        "baselineRemains21p90": round(parse_float(browser_summary["allGalaxyLockedMtsMeanRmse"]), 2) == 21.90,
+        "v1826LockUnchanged": browser_summary["browserCacheParityMismatchCount"] == 0 and browser_summary["v1826HighAbove20"] == 0,
+        "candidateAlreadyForReview": candidate_capsule["verdict"] == "v18.30 limitation-pocket candidate for review",
+        "nominalTargetGainAtLeast15Pct": nominal_metric["targetGainVsV1826Pct"] >= 15.0,
+        "nominalNullMarginAtLeast10Pct": null_margin >= 10.0,
+        "nominalProtectedClean": nominal_metric["activeProtectedCount"] == 0 and nominal_metric["protectedMaxRegressionKmS"] == 0.0,
+        "nominalRouteStable": nominal_metric["routeChangedCount"] == 0,
+        "strength075KeepsTenPctTargetGain": parse_float(strength_075["targetGainVsV1826Pct"], 0.0) >= 10.0,
+        "strength125NoProtectedOrAbove20": parse_float(strength_125["protectedMaxRegressionKmS"], 0.0) == 0.0 and int(strength_125["highAbove20Candidate"]) == 0,
+        "activation075KeepsTenPctTargetGain": parse_float(activation_075["targetGainVsV1826Pct"], 0.0) >= 10.0,
+        "activation125NoProtectedOrAbove20": parse_float(activation_125["protectedMaxRegressionKmS"], 0.0) == 0.0 and int(activation_125["highAbove20Candidate"]) == 0,
+        "eachBranchHasPositiveTargetGain": all(parse_float(row["targetGainVsV1826KmS"], 0.0) > 0.0 for row in branch_only_rows),
+        "weakLeakageZero": nominal_metric["weakSystematicsLeakage"] == 0,
+    }
+    verdict = "v18.30 red-team passed; browser lock next" if all(passes.values()) else "v18.30 red-team blocked"
+    score_row = {
+        "candidateId": "observed-state-response-v18.30-nfw-limitation-pocket-redteam",
+        "verdict": verdict,
+        "targetGainVsV1826Pct": nominal_metric["targetGainVsV1826Pct"],
+        "targetGainVsV1826KmS": nominal_metric["targetGainVsV1826KmS"],
+        "highGainVsV1826Pct": nominal_metric["highGainVsV1826Pct"],
+        "protectedMaxRegressionKmS": nominal_metric["protectedMaxRegressionKmS"],
+        "activeProtectedCount": nominal_metric["activeProtectedCount"],
+        "highAbove20Candidate": nominal_metric["highAbove20Candidate"],
+        "routeChangedCount": nominal_metric["routeChangedCount"],
+        "weakSystematicsLeakage": nominal_metric["weakSystematicsLeakage"],
+        "bestNullTargetGainVsV1826Pct": best_null,
+        "nullMarginTargetPct": null_margin,
+        "maxForcedLookalikeRegressionKmS": max_lookalike_regression,
+        "forcedLookalikeRegressionOver1Count": lookalike_regression_over_1,
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_row])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", nominal_rows)
+    write_csv(out_dir / f"{prefix}_stress_variants.csv", variant_rows)
+    write_csv(out_dir / f"{prefix}_seed_replay.csv", seed_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_protected_lookalike_stress.csv", lookalike_rows)
+    write_csv(
+        out_dir / f"{prefix}_acceptance_gates.csv",
+        [{"gate": key, "pass": value} for key, value in passes.items()],
+    )
+    formula = {
+        "candidateId": "observed-state-response-v18.30-nfw-limitation-pocket-redteam",
+        "redteamVerdict": verdict,
+        "testedCandidate": candidate_capsule["summary"]["candidateId"],
+        "selectedStrengths": strengths,
+        "redteamScope": [
+            "branch ablation",
+            "strength stress",
+            "activation stress",
+            "same-active-count and branch-shuffle nulls",
+            "nearest protected lookalike forced-activation stress",
+        ],
+        "browserChanged": False,
+        "canonicalMtsChanged": False,
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.30 NFW Limitation-Pocket Red-Team",
+        "",
+        "This mode stress-tests the already selected v18.30 limitation-pocket candidate. It does not introduce a new law and does not update the browser.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Target gain over v18.26: `{fmt(nominal_metric['targetGainVsV1826Pct'])}%` / `{fmt(nominal_metric['targetGainVsV1826KmS'])}` km/s.",
+        f"- Clean high-RMSE gain over v18.26: `{fmt(nominal_metric['highGainVsV1826Pct'])}%`.",
+        f"- Protected max regression: `{fmt(nominal_metric['protectedMaxRegressionKmS'])}` km/s.",
+        f"- Active protected cases: `{nominal_metric['activeProtectedCount']}`.",
+        f"- High above 20 km/s: `{nominal_metric['highAbove20Candidate']}`.",
+        f"- Route changes: `{nominal_metric['routeChangedCount']}`.",
+        f"- Best null target gain: `{fmt(best_null)}%`.",
+        f"- Null margin: `{fmt(null_margin)}` points.",
+        f"- Forced protected-lookalike max regression: `{fmt(max_lookalike_regression)}` km/s.",
+        "",
+        "## Stress Variants",
+        "",
+        "| Variant | Target Gain % | High Gain % | Protected Regression | Active Protected | Above 20 |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in variant_rows:
+        report.append(
+            f"| {row['variant']} | {fmt(row['targetGainVsV1826Pct'])} | {fmt(row['highGainVsV1826Pct'])} | {fmt(row['protectedMaxRegressionKmS'])} | {row['activeProtectedCount']} | {row['highAbove20Candidate']} |"
+        )
+    report.extend(["", "## Acceptance Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "The forced protected-lookalike stress is deliberately adversarial: it asks what would happen if the branch leaked onto nearby protected galaxies. Those regressions are not nominal formula hits; they define the danger zone that the browser-lock pass must preserve.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-nfw-limitation-pocket-redteam-v1",
+        "verdict": verdict,
+        "summary": {**score_row, "passes": passes},
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_stress_variants.csv",
+            f"{prefix}_seed_replay.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_protected_lookalike_stress.csv",
+            f"{prefix}_acceptance_gates.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18nfwlimitationpocketredteam(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NFW_LIMITATION_POCKET_REDTEAM_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_nfw_limitation_pocket_redteam_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.30 NFW limitation-pocket red-team")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"target_gain_vs_v1826={fmt(summary['targetGainVsV1826Pct'])}%",
+                f"high_gain_vs_v1826={fmt(summary['highGainVsV1826Pct'])}%",
+                f"protected={fmt(summary['protectedMaxRegressionKmS'])}",
+                f"active_protected={summary['activeProtectedCount']}",
+                f"null_margin={fmt(summary['nullMarginTargetPct'])}",
+                f"forced_lookalike_max={fmt(summary['maxForcedLookalikeRegressionKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18.30 NFW limitation-pocket red-team to {out_dir.resolve()}")
+
+
 V18_NFW_PROVENANCE_GAP_THRESHOLD = 3.0
 
 
@@ -87957,6 +88328,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwovershelfcandidate",
             "v18nfwlimitationpocketcandidate",
             "observedstatev18nfwlimitationpocketcandidate",
+            "v18nfwlimitationpocketredteam",
+            "observedstatev18nfwlimitationpocketredteam",
             "v18nfwprovenanceboundary",
             "observedstatev18nfwprovenanceboundary",
             "v18nfwcasepairaudit",
@@ -88291,6 +88664,8 @@ def main() -> None:
         cmd_v18nfwovershelfcandidate(args)
     elif args.mode in {"v18nfwlimitationpocketcandidate", "observedstatev18nfwlimitationpocketcandidate"}:
         cmd_v18nfwlimitationpocketcandidate(args)
+    elif args.mode in {"v18nfwlimitationpocketredteam", "observedstatev18nfwlimitationpocketredteam"}:
+        cmd_v18nfwlimitationpocketredteam(args)
     elif args.mode in {"v18nfwprovenanceboundary", "observedstatev18nfwprovenanceboundary"}:
         cmd_v18nfwprovenanceboundary(args)
     elif args.mode in {"v18nfwcasepairaudit", "observedstatev18nfwcasepairaudit"}:
