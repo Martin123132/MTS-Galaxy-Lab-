@@ -201,6 +201,7 @@ DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_REDTEAM_OUT = OUTPUT_PACK_ROOT / 
 DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_MERGE_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-radial-transfer-merge-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_BROWSER_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-radial-transfer-browser-lock-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_OVERSHELF_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-overshelf-candidate-v1"
+DEFAULT_OBSERVED_STATE_V18_NFW_PROVENANCE_BOUNDARY_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-provenance-boundary-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -70771,6 +70772,442 @@ def cmd_v18nfwovershelfcandidate(args: argparse.Namespace) -> None:
     print(f"Wrote v18.27 NFW oversupport-shelf candidate to {out_dir.resolve()}")
 
 
+V18_NFW_PROVENANCE_GAP_THRESHOLD = 3.0
+
+
+def v18_nfw_provenance_metadata_maps() -> tuple[dict[str, dict], dict[str, dict], dict[str, dict]]:
+    metadata_dir = DEFAULT_V21_METADATA_FETCH_OUT
+    source_dir = DEFAULT_V21_SOURCE_EVIDENCE_OUT
+    metadata_case: dict[str, dict] = {}
+    source_case: dict[str, dict] = {}
+    evidence_counts: dict[str, dict] = {}
+    case_path = metadata_dir / "mts_v21_metadata_case_map.csv"
+    if case_path.exists():
+        metadata_case = {row.get("name", ""): row for row in read_csv_rows(case_path)}
+    source_case_path = source_dir / "mts_v21_source_paper_case_verdicts.csv"
+    if source_case_path.exists():
+        source_case = {row.get("name", ""): row for row in read_csv_rows(source_case_path)}
+    evidence_path = source_dir / "mts_v21_source_paper_extracted_evidence.csv"
+    if evidence_path.exists():
+        for row in read_csv_rows(evidence_path):
+            name = row.get("name", "")
+            if not name:
+                continue
+            item = evidence_counts.setdefault(
+                name,
+                {
+                    "caseSpecificEvidenceCount": 0,
+                    "sourceWideMethodEvidenceCount": 0,
+                    "evidenceTypes": set(),
+                },
+            )
+            if parse_bool(row.get("caseSpecificEvidence")):
+                item["caseSpecificEvidenceCount"] += 1
+            if parse_bool(row.get("sourceWideMethodEvidence")):
+                item["sourceWideMethodEvidenceCount"] += 1
+            evidence_type = row.get("evidenceType", "")
+            if evidence_type:
+                item["evidenceTypes"].add(evidence_type)
+    for item in evidence_counts.values():
+        item["evidenceTypes"] = "; ".join(sorted(item["evidenceTypes"]))
+    return metadata_case, source_case, evidence_counts
+
+
+def v18_nfw_provenance_boundary_class(row: dict) -> tuple[str, str, bool]:
+    name = row.get("galaxy", "")
+    gap = parse_float(row.get("v1826MinusNfwPriorKmS"), 0.0)
+    attack = row.get("attackClass", "")
+    shape = row.get("shapeClass", "")
+    quality = parse_float(row.get("qualityCode"), math.nan)
+    route = row.get("lockedRoute", "")
+    if name == "UGC07399" and gap >= 2.0:
+        return (
+            "already repaired radial-transfer boundary",
+            "v18.26 moved the clean radial-transfer target; remaining fitted-halo gap is a competitor ceiling, not a new broad branch.",
+            False,
+        )
+    if "quality/provenance" in attack or (math.isfinite(quality) and quality >= 2.0 and gap >= 2.0):
+        return (
+            "quality/provenance boundary",
+            "Treat as source-quality/provenance gated before any transport-law extension.",
+            False,
+        )
+    if "tail anatomy" in attack or shape == "outer oversupport/tail":
+        return (
+            "tail anatomy boundary",
+            "Tail/shelf trimming has anatomy value but failed null/holdout promotion earlier.",
+            False,
+        )
+    if "phase anatomy" in attack:
+        return (
+            "phase anatomy boundary",
+            "Phase transfer helps isolated cases but did not survive prior null/holdout gates.",
+            False,
+        )
+    if "fitted-halo flexibility" in attack or shape in {"mixed phase", "mostly amplitude tie"}:
+        return (
+            "heterogeneous fitted-halo boundary",
+            "The gap is not a coherent state branch and should be treated as fitted-halo flexibility.",
+            False,
+        )
+    if "support-safety" in attack or "shelf/tail" in attack:
+        return (
+            "law-facing shelf/support boundary",
+            "Only a named, narrow state mechanism is worth testing; v18.27 did not pass.",
+            True,
+        )
+    if "watchlist" in attack and gap >= V18_NFW_PROVENANCE_GAP_THRESHOLD:
+        return (
+            "watchlist unresolved boundary",
+            "Keep as a case-pair physics target, not a broad threshold search.",
+            True,
+        )
+    if gap >= V18_NFW_PROVENANCE_GAP_THRESHOLD and route in {"low-load", "buffered single-crossing"}:
+        return (
+            "watchlist unresolved boundary",
+            "Large fitted-halo gap remains, but no safe branch class is established.",
+            True,
+        )
+    return (
+        "small-gap no-action boundary",
+        "The remaining fitted-halo gap is too small or too isolated to justify another law branch.",
+        False,
+    )
+
+
+def write_v18_nfw_provenance_boundary_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_nfw_provenance_boundary"
+    browser_capsule = write_v18_nfw_radial_transfer_browser_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_BROWSER_OUT)
+    merge_capsule = write_v18_nfw_radial_transfer_merge_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_MERGE_OUT)
+    attack_capsule = write_v18_nfw_gap_attack_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_ATTACK_OUT)
+    overshelf_capsule = write_v18_nfw_overshelf_candidate_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_OVERSHELF_OUT)
+    merge_rows = read_csv_rows(DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_MERGE_OUT / "mts_v18_nfw_radial_transfer_merge_case_ledger.csv")
+    attack_rows = read_csv_rows(DEFAULT_OBSERVED_STATE_V18_NFW_ATTACK_OUT / "mts_v18_nfw_gap_attack_case_ledger.csv")
+    attack_by_name = {row["galaxy"]: row for row in attack_rows}
+    metadata_case, source_case, evidence_counts = v18_nfw_provenance_metadata_maps()
+
+    case_rows: list[dict] = []
+    metadata_crosswalk: list[dict] = []
+    for merge in merge_rows:
+        if merge.get("set") == "weak-systematics-excluded":
+            continue
+        if merge.get("set") != "clean-high-rmse":
+            continue
+        name = merge["galaxy"]
+        attack = attack_by_name.get(name, {})
+        meta = metadata_case.get(name, {})
+        source = source_case.get(name, {})
+        evidence = evidence_counts.get(name, {})
+        gap = parse_float(merge.get("v1826MinusNfwPriorKmS"), math.nan)
+        if not math.isfinite(gap):
+            continue
+        row = {
+            "galaxy": name,
+            "set": merge.get("set", ""),
+            "lockedRoute": merge.get("lockedRoute", ""),
+            "v18_26Rmse": parse_float(merge.get("v18_26_radial_transferRmse")),
+            "v18_21Rmse": parse_float(merge.get("v18_21_radial_phaseRmse")),
+            "v18_10Rmse": parse_float(merge.get("v18_10_releaseRmse")),
+            "canonicalRmse": parse_float(merge.get("canonical_mtsRmse")),
+            "mondGlobalRmse": parse_float(merge.get("mond_global_a0Rmse")),
+            "nfwPriorRmse": parse_float(merge.get("nfw_concentration_priorRmse")),
+            "nfwFreeRmse": parse_float(merge.get("nfw_freeRmse")),
+            "v1826MinusMondGlobalKmS": parse_float(merge.get("v1826MinusMondGlobalKmS")),
+            "v1826MinusNfwPriorKmS": gap,
+            "v1826MinusNfwFreeKmS": parse_float(merge.get("v1826MinusNfwFreeKmS")),
+            "v1826BeatsMondGlobal": parse_bool(merge.get("v1826BeatsMondGlobal")),
+            "v1826BeatsNfwPrior": parse_bool(merge.get("v1826BeatsNfwPrior")),
+            "winnerRawRmseWithV1826": merge.get("winnerRawRmseWithV1826", ""),
+            "v1826BranchHits": merge.get("v1826BranchHits", ""),
+            "v1826BaseRadialPhaseFamilies": merge.get("v1826BaseRadialPhaseFamilies", ""),
+            "radialTransferAttackClass": merge.get("radialTransferAttackClass", ""),
+            "attackClass": attack.get("attackClass", ""),
+            "shapeClass": attack.get("shapeClass", ""),
+            "tailGainVsV1821KmS": parse_float(attack.get("tailGainVsV1821KmS"), 0.0),
+            "phaseGainVsV1821KmS": parse_float(attack.get("phaseGainVsV1821KmS"), 0.0),
+            "lawFacingBeforeV1826": parse_bool(attack.get("lawFacing")),
+            "qualityCode": attack.get("qualityCode", meta.get("qualityCode", "")),
+            "qualityLabel": attack.get("qualityLabel", meta.get("qualityLabel", "")),
+            "inclinationDeg": attack.get("inclinationDeg", meta.get("inclinationDeg", "")),
+            "inclinationUncertaintyDeg": attack.get("inclinationUncertaintyDeg", meta.get("inclinationUncertaintyDeg", "")),
+            "distanceMethod": attack.get("distanceMethod", ""),
+            "rotationCurveRefCodes": attack.get("rotationCurveRefCodes", meta.get("referenceCodes", "")),
+            "memoryLoad": attack.get("memoryLoad", merge.get("memoryLoad", "")),
+            "uOut": attack.get("uOut", ""),
+            "uMax": attack.get("uMax", ""),
+            "hOverRout": attack.get("hOverRout", ""),
+            "outerGasShare": attack.get("outerGasShare", ""),
+            "outerDiskShare": attack.get("outerDiskShare", ""),
+            "barCurv": attack.get("barCurv", ""),
+            "pointDensity": attack.get("pointDensity", ""),
+            "sourceEvidenceCaseVerdict": source.get("caseVerdict", "not fetched for this case"),
+            "directEvidenceTypeCount": parse_float(source.get("directEvidenceTypeCount"), 0.0),
+            "caseSpecificEvidenceCount": evidence.get("caseSpecificEvidenceCount", 0),
+            "sourceWideMethodEvidenceCount": evidence.get("sourceWideMethodEvidenceCount", 0),
+            "evidenceTypes": evidence.get("evidenceTypes", ""),
+            "largeNfwGap": gap >= V18_NFW_PROVENANCE_GAP_THRESHOLD,
+        }
+        boundary_class, next_action, unresolved = v18_nfw_provenance_boundary_class(row)
+        row["boundaryClass"] = boundary_class
+        row["boundaryNextAction"] = next_action
+        row["unresolvedLawFacingAfterV1827"] = unresolved
+        row["transportBranchRecommendedNow"] = unresolved and boundary_class in {
+            "law-facing shelf/support boundary",
+            "watchlist unresolved boundary",
+        }
+        case_rows.append(row)
+        metadata_crosswalk.append(
+            {
+                "galaxy": name,
+                "qualityCode": row["qualityCode"],
+                "qualityLabel": row["qualityLabel"],
+                "rotationCurveRefCodes": row["rotationCurveRefCodes"],
+                "v21MetadataFetched": bool(meta),
+                "v21SourceEvidenceFetched": bool(source),
+                "sourceEvidenceCaseVerdict": row["sourceEvidenceCaseVerdict"],
+                "directEvidenceTypeCount": row["directEvidenceTypeCount"],
+                "caseSpecificEvidenceCount": row["caseSpecificEvidenceCount"],
+                "sourceWideMethodEvidenceCount": row["sourceWideMethodEvidenceCount"],
+                "evidenceTypes": row["evidenceTypes"],
+            }
+        )
+    case_rows.sort(key=lambda row: (-parse_float(row["v1826MinusNfwPriorKmS"], 0.0), row["galaxy"]))
+
+    large_gap_rows = [row for row in case_rows if parse_bool(row["largeNfwGap"])]
+    non_transport_classes = {
+        "quality/provenance boundary",
+        "tail anatomy boundary",
+        "phase anatomy boundary",
+        "heterogeneous fitted-halo boundary",
+        "already repaired radial-transfer boundary",
+        "small-gap no-action boundary",
+    }
+    non_transport_large_rows = [row for row in large_gap_rows if row["boundaryClass"] in non_transport_classes]
+    unresolved_rows = [row for row in large_gap_rows if parse_bool(row["unresolvedLawFacingAfterV1827"])]
+
+    group_rows: list[dict] = []
+    for boundary_class in sorted({row["boundaryClass"] for row in case_rows}):
+        rows = [row for row in case_rows if row["boundaryClass"] == boundary_class]
+        large_rows = [row for row in rows if parse_bool(row["largeNfwGap"])]
+        group_rows.append(
+            {
+                "boundaryClass": boundary_class,
+                "caseCount": len(rows),
+                "largeGapCount": len(large_rows),
+                "meanV18_26Rmse": safe_mean(parse_float(row["v18_26Rmse"]) for row in rows),
+                "meanNfwPriorRmse": safe_mean(parse_float(row["nfwPriorRmse"]) for row in rows),
+                "meanNfwGapKmS": safe_mean(parse_float(row["v1826MinusNfwPriorKmS"]) for row in rows),
+                "maxNfwGapKmS": max([parse_float(row["v1826MinusNfwPriorKmS"]) for row in rows] or [math.nan]),
+                "meanMondGapKmS": safe_mean(parse_float(row["v1826MinusMondGlobalKmS"]) for row in rows),
+                "topGalaxies": "; ".join(row["galaxy"] for row in rows[:8]),
+                "unresolvedLawFacingCount": sum(1 for row in rows if parse_bool(row["unresolvedLawFacingAfterV1827"])),
+            }
+        )
+
+    next_target_rows: list[dict] = []
+    for index, row in enumerate(unresolved_rows, start=1):
+        next_target_rows.append(
+            {
+                "priority": index,
+                "galaxy": row["galaxy"],
+                "lockedRoute": row["lockedRoute"],
+                "boundaryClass": row["boundaryClass"],
+                "shapeClass": row["shapeClass"],
+                "v18_26Rmse": row["v18_26Rmse"],
+                "nfwPriorRmse": row["nfwPriorRmse"],
+                "nfwGapKmS": row["v1826MinusNfwPriorKmS"],
+                "qualityCode": row["qualityCode"],
+                "nextAction": row["boundaryNextAction"],
+            }
+        )
+    if not next_target_rows:
+        next_target_rows.append(
+            {
+                "priority": 1,
+                "galaxy": "none",
+                "lockedRoute": "",
+                "boundaryClass": "no large unresolved law-facing NFW gap",
+                "shapeClass": "",
+                "v18_26Rmse": "",
+                "nfwPriorRmse": "",
+                "nfwGapKmS": "",
+                "qualityCode": "",
+                "nextAction": "Pivot to external validation/provenance rather than adding another internal branch.",
+            }
+        )
+
+    browser_summary = browser_capsule["summary"]
+    overshelf_summary = overshelf_capsule["summary"]
+    non_transport_share = (100.0 * len(non_transport_large_rows) / len(large_gap_rows)) if large_gap_rows else 100.0
+    passes = {
+        "baselineRemains21p90": round(parse_float(browser_summary["allGalaxyLockedMtsMeanRmse"]), 2) == 21.90,
+        "v1826LockUnchanged": (
+            browser_summary["browserCacheParityMismatchCount"] == 0
+            and browser_summary["browserRouteMismatchCount"] == 0
+            and parse_float(browser_summary["v1826ProtectedMaxRegressionVsV1821KmS"], math.nan) == 0.0
+            and browser_summary["v1826HighAbove20"] == 0
+            and browser_summary["weakSystematicsLeakage"] == 0
+        ),
+        "v1827NotPromoted": overshelf_capsule.get("verdict") != "v18.27 oversupport-shelf candidate for review",
+        "largeGapBoundaryShareAtLeast60Pct": non_transport_share >= 60.0,
+        "unresolvedLargeLawFacingNoMoreThan2": len(unresolved_rows) <= 2,
+        "weakLeakageZero": browser_summary["weakSystematicsLeakage"] == 0,
+        "lawChanged": False,
+    }
+    if passes["largeGapBoundaryShareAtLeast60Pct"] and passes["unresolvedLargeLawFacingNoMoreThan2"]:
+        verdict = "remaining NFW gap mostly provenance/tail boundary"
+    elif len(unresolved_rows) > 2:
+        verdict = "law-facing NFW gap remains"
+    else:
+        verdict = "boundary split inconclusive"
+
+    score_rows = [
+        {"metric": "baselineMeanRmse", "value": browser_summary["allGalaxyLockedMtsMeanRmse"]},
+        {"metric": "v18_26HighGainPct", "value": browser_summary["v1826HighGainPct"]},
+        {"metric": "v18_26CleanGainPct", "value": browser_summary["v1826CleanGainPct"]},
+        {"metric": "v18_26HighAbove20", "value": browser_summary["v1826HighAbove20"]},
+        {"metric": "v18_26ProtectedRegressionKmS", "value": browser_summary["v1826ProtectedMaxRegressionVsV1821KmS"]},
+        {"metric": "weakSystematicsLeakage", "value": browser_summary["weakSystematicsLeakage"]},
+        {"metric": "v18_27Verdict", "value": overshelf_capsule.get("verdict")},
+        {"metric": "v18_27TargetGainVsV1826Pct", "value": overshelf_summary.get("candidateTargetGainVsV1826Pct")},
+        {"metric": "largeNfwGapThresholdKmS", "value": V18_NFW_PROVENANCE_GAP_THRESHOLD},
+        {"metric": "largeNfwGapCaseCount", "value": len(large_gap_rows)},
+        {"metric": "nonTransportBoundaryLargeGapCount", "value": len(non_transport_large_rows)},
+        {"metric": "nonTransportBoundaryLargeGapSharePct", "value": non_transport_share},
+        {"metric": "unresolvedLargeLawFacingCount", "value": len(unresolved_rows)},
+        {"metric": "unresolvedLargeLawFacingGalaxies", "value": "; ".join(row["galaxy"] for row in unresolved_rows)},
+    ]
+    formula_guard = {
+        "candidateId": "observed-state-response-v18.26-with-provenance-boundary-guard",
+        "status": verdict,
+        "lawChanged": False,
+        "baseLaw": "locked v18.26 radial-transfer candidate",
+        "v18_27Status": overshelf_capsule.get("verdict"),
+        "purpose": "Classify remaining NFW-prior gap into transport-law-facing versus provenance/tail/fitted-halo boundary before adding any further branch.",
+        "forbiddenInputs": ["galaxy names", "NFW parameters", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+        "recommendedNextMode": "v18nfwcasepairaudit" if len(unresolved_rows) in {1, 2} else "external validation/provenance",
+    }
+
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_group_summary.csv", group_rows)
+    write_csv(out_dir / f"{prefix}_metadata_crosswalk.csv", metadata_crosswalk)
+    write_csv(out_dir / f"{prefix}_next_targets.csv", next_target_rows)
+    (out_dir / f"{prefix}_formula_guard.json").write_text(json.dumps(json_clean(formula_guard), indent=2, sort_keys=True), encoding="utf-8")
+
+    report = [
+        "# MTS v18.28 NFW Provenance-Boundary Audit",
+        "",
+        "This mode does not change v18.26. It asks whether the remaining NFW-prior gap is a transport-law target or mostly quality/provenance, tail-anatomy, and fitted-halo boundary structure.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- v18.26 remains locked: high gain `{fmt(browser_summary['v1826HighGainPct'])}%`, clean gain `{fmt(browser_summary['v1826CleanGainPct'])}%`, high above-20 `{browser_summary['v1826HighAbove20']}`, protected regression `{fmt(browser_summary['v1826ProtectedMaxRegressionVsV1821KmS'])}` km/s.",
+        f"- v18.27 overshelf status: `{overshelf_capsule.get('verdict')}` with target gain `{fmt(overshelf_summary.get('candidateTargetGainVsV1826Pct'))}%` over v18.26.",
+        f"- Large v18.26/NFW-prior gap threshold: `{fmt(V18_NFW_PROVENANCE_GAP_THRESHOLD)}` km/s.",
+        f"- Large-gap cases: `{len(large_gap_rows)}`.",
+        f"- Non-transport boundary large-gap cases: `{len(non_transport_large_rows)}` / `{len(large_gap_rows)}` (`{fmt(non_transport_share)}%`).",
+        f"- Unresolved large law-facing cases after v18.27: `{len(unresolved_rows)}` ({'; '.join(row['galaxy'] for row in unresolved_rows) or 'none'}).",
+        "",
+        "## Boundary Classes",
+        "",
+        "| Class | Cases | Large gaps | Mean v18.26 RMSE | Mean NFW-prior RMSE | Mean gap | Unresolved law-facing | Top galaxies |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for row in group_rows:
+        report.append(
+            f"| {row['boundaryClass']} | {row['caseCount']} | {row['largeGapCount']} | {fmt(row['meanV18_26Rmse'])} | {fmt(row['meanNfwPriorRmse'])} | {fmt(row['meanNfwGapKmS'])} | {row['unresolvedLawFacingCount']} | {row['topGalaxies']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Next Targets",
+            "",
+            "| Priority | Galaxy | Route | Class | Shape | v18.26 RMSE | NFW-prior RMSE | Gap | Next action |",
+            "| ---: | --- | --- | --- | --- | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for row in next_target_rows:
+        report.append(
+            f"| {row['priority']} | {row['galaxy']} | {row['lockedRoute']} | {row['boundaryClass']} | {row['shapeClass']} | {fmt(row['v18_26Rmse'])} | {fmt(row['nfwPriorRmse'])} | {fmt(row['nfwGapKmS'])} | {row['nextAction']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Guard Result",
+            "",
+            "| Gate | Pass |",
+            "| --- | ---: |",
+        ]
+    )
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.extend(
+        [
+            "",
+            "## Practical Direction",
+            "",
+            "Do not add another broad shelf or scalar branch. If work continues internally, keep it to the named unresolved case-pair physics target. Otherwise, the more valuable path is external observed validation/provenance instead of chasing NFW-prior fitted-halo ceilings.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-nfw-provenance-boundary-v1",
+        "verdict": verdict,
+        "summary": {
+            "baselineMeanRmse": browser_summary["allGalaxyLockedMtsMeanRmse"],
+            "v18_26HighGainPct": browser_summary["v1826HighGainPct"],
+            "v18_26CleanGainPct": browser_summary["v1826CleanGainPct"],
+            "v18_26HighAbove20": browser_summary["v1826HighAbove20"],
+            "v18_26ProtectedRegressionKmS": browser_summary["v1826ProtectedMaxRegressionVsV1821KmS"],
+            "weakSystematicsLeakage": browser_summary["weakSystematicsLeakage"],
+            "v18_27Verdict": overshelf_capsule.get("verdict"),
+            "largeNfwGapThresholdKmS": V18_NFW_PROVENANCE_GAP_THRESHOLD,
+            "largeNfwGapCaseCount": len(large_gap_rows),
+            "nonTransportBoundaryLargeGapCount": len(non_transport_large_rows),
+            "nonTransportBoundaryLargeGapSharePct": non_transport_share,
+            "unresolvedLargeLawFacingCount": len(unresolved_rows),
+            "unresolvedLargeLawFacingGalaxies": [row["galaxy"] for row in unresolved_rows],
+            "passes": passes,
+        },
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_group_summary.csv",
+            f"{prefix}_metadata_crosswalk.csv",
+            f"{prefix}_next_targets.csv",
+            f"{prefix}_formula_guard.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18nfwprovenanceboundary(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NFW_PROVENANCE_BOUNDARY_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_nfw_provenance_boundary_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.28 NFW provenance-boundary audit")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"large_gap={summary['largeNfwGapCaseCount']}",
+                f"boundary_share={fmt(summary['nonTransportBoundaryLargeGapSharePct'])}%",
+                f"unresolved={summary['unresolvedLargeLawFacingCount']}",
+                f"targets={';'.join(summary['unresolvedLargeLawFacingGalaxies']) or 'none'}",
+                f"v18_26_high_gain={fmt(summary['v18_26HighGainPct'])}%",
+                f"protected={fmt(summary['v18_26ProtectedRegressionKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 NFW provenance-boundary audit to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -83823,6 +84260,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwradialtransferbrowserlock",
             "v18nfwovershelfcandidate",
             "observedstatev18nfwovershelfcandidate",
+            "v18nfwprovenanceboundary",
+            "observedstatev18nfwprovenanceboundary",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -84137,6 +84576,8 @@ def main() -> None:
         cmd_v18nfwradialtransferbrowserlock(args)
     elif args.mode in {"v18nfwovershelfcandidate", "observedstatev18nfwovershelfcandidate"}:
         cmd_v18nfwovershelfcandidate(args)
+    elif args.mode in {"v18nfwprovenanceboundary", "observedstatev18nfwprovenanceboundary"}:
+        cmd_v18nfwprovenanceboundary(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
