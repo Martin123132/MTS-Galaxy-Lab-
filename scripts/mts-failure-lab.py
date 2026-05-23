@@ -218,6 +218,8 @@ DEFAULT_OBSERVED_STATE_V18_ML_SOURCE_ACCEPTANCE_OUT = OUTPUT_PACK_ROOT / "mts-v1
 DEFAULT_OBSERVED_STATE_V18_ML_SOURCE_ACCEPTANCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-ml-source-acceptance-v1")
 DEFAULT_OBSERVED_STATE_V18_ML_TABLE_HUNT_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-table-hunt-v1"
 DEFAULT_OBSERVED_STATE_V18_ML_TABLE_HUNT_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-ml-table-hunt-v1")
+DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-catalog-benchmark-v1"
+DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-ml-catalog-benchmark-v1")
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -76260,6 +76262,379 @@ def cmd_v18mltablehunt(args: argparse.Namespace) -> None:
     print(f"Wrote v18 M/L table hunt to {out_dir.resolve()}")
 
 
+V18_ML_CATALOG_SOURCE_SPECS = [
+    {
+        "sourceId": "li2020-vizier-table1-asu-tsv",
+        "sourceFamily": "Li+ 2020 SPARC halo-model catalogue",
+        "url": "https://vizier.cds.unistra.fr/viz-bin/asu-tsv?-source=J/ApJS/247/31/table1",
+        "role": "vizier-asu-tsv",
+        "fileName": "li2020_apjs247_31_table1_asu.tsv",
+        "maxBytes": 1_000_000,
+        "reason": "Per-galaxy Ydisk/Ybul values for the SPARC sample across halo-model fits.",
+    },
+    {
+        "sourceId": "li2020-cds-readme-html",
+        "sourceFamily": "Li+ 2020 SPARC halo-model catalogue",
+        "url": "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/ApJS/247/31?format=html&tex=true",
+        "role": "cds-readme-html",
+        "fileName": "li2020_apjs247_31_readme.html",
+        "maxBytes": 200_000,
+        "reason": "CDS provenance and byte/column definitions for Ydisk/Ybul.",
+    },
+]
+
+
+def v18_ml_catalog_download_inventory(source_cache: Path, offline: bool) -> list[dict]:
+    rows = []
+    for spec in V18_ML_CATALOG_SOURCE_SPECS:
+        path = source_cache / spec["role"] / spec["fileName"]
+        if not offline:
+            v21_source_download(spec["url"], path, int(spec["maxBytes"]), offline)
+        exists = path.exists()
+        rows.append(
+            {
+                **spec,
+                "cachePath": str(path),
+                "cacheStatus": "available" if exists else "missing",
+                "sizeBytes": path.stat().st_size if exists else "",
+                "sha256": file_sha256(path) if exists else "",
+                "sourceCacheOnDDrive": str(source_cache).lower().startswith("d:"),
+            }
+        )
+    return rows
+
+
+def v18_ml_catalog_parse_table(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    header_index = -1
+    for index, line in enumerate(lines):
+        if line.startswith("Name\tModel\tYdisk\t"):
+            header_index = index
+            break
+    if header_index < 0:
+        return []
+    header = [item.strip() for item in lines[header_index].split("\t")]
+    rows: list[dict] = []
+    for line in lines[header_index + 3 :]:
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = [item.strip() for item in line.split("\t")]
+        if len(parts) < len(header):
+            continue
+        raw = dict(zip(header, parts))
+        name = raw.get("Name", "").strip()
+        model = raw.get("Model", "").strip()
+        if not name or not model or set(name) == {"-"}:
+            continue
+        row = {
+            "galaxy": name,
+            "model": model,
+            "Ydisk": parse_float(raw.get("Ydisk")),
+            "e_Ydisk": parse_float(raw.get("e_Ydisk")),
+            "Ybul": parse_float(raw.get("Ybul"), 0.0),
+            "e_Ybul": parse_float(raw.get("e_Ybul"), 0.0),
+            "Dist": parse_float(raw.get("Dist")),
+            "inc": parse_float(raw.get("inc")),
+            "V200": parse_float(raw.get("V200")),
+            "C200": parse_float(raw.get("C200")),
+            "logM200": parse_float(raw.get("log(M200)")),
+            "chi2": parse_float(raw.get("chi2")),
+            "source": "CDS/VizieR J/ApJS/247/31 table1",
+        }
+        if math.isfinite(row["Ydisk"]):
+            rows.append(row)
+    return rows
+
+
+def v18_ml_catalog_variant_value_rows(table_rows: list[dict]) -> list[dict]:
+    by_name: dict[str, list[dict]] = {}
+    for row in table_rows:
+        by_name.setdefault(row["galaxy"], []).append(row)
+    variant_rows: list[dict] = []
+    for name, rows in sorted(by_name.items()):
+        finite_rows = [row for row in rows if math.isfinite(parse_float(row.get("Ydisk")))]
+        if not finite_rows:
+            continue
+
+        def add_variant(variant_id: str, source_model: str, selected: list[dict]) -> None:
+            if not selected:
+                return
+            ydisk_values = [parse_float(row["Ydisk"]) for row in selected if math.isfinite(parse_float(row["Ydisk"]))]
+            ybul_values = [parse_float(row["Ybul"], 0.0) for row in selected if math.isfinite(parse_float(row.get("Ybul"), 0.0))]
+            if not ydisk_values:
+                return
+            best = selected[0]
+            variant_rows.append(
+                {
+                    "galaxy": name,
+                    "variantId": variant_id,
+                    "sourceModel": source_model,
+                    "Ydisk": safe_median(ydisk_values),
+                    "Ybul": safe_median(ybul_values) if ybul_values else 0.0,
+                    "e_Ydisk": safe_median(parse_float(row.get("e_Ydisk")) for row in selected),
+                    "e_Ybul": safe_median(parse_float(row.get("e_Ybul"), 0.0) for row in selected),
+                    "sourceRowCount": len(selected),
+                    "sourceChi2": best.get("chi2", math.nan),
+                    "source": best.get("source", ""),
+                    "classification": "dynamical halo-fit M/L; benchmark/context only",
+                    "usableAsMtsFormulaInput": False,
+                }
+            )
+
+        for model in ["NFW-LCDM", "NFW-Flat", "Burkert-Flat", "pISO-Flat"]:
+            selected = [row for row in finite_rows if row["model"] == model]
+            add_variant(f"li2020-{model.lower().replace('-', '-')}", model, selected)
+        lcdm_rows = [row for row in finite_rows if row["model"].endswith("-LCDM")]
+        add_variant("li2020-lcdm-median", "median of LCDM-prior halo models", lcdm_rows)
+        add_variant("li2020-all-model-median", "median of all Li+ 2020 halo models", finite_rows)
+        best_chi2_rows = sorted([row for row in finite_rows if math.isfinite(parse_float(row.get("chi2")))], key=lambda row: parse_float(row["chi2"]))
+        add_variant("li2020-best-chi2", best_chi2_rows[0]["model"] if best_chi2_rows else "best finite chi2", best_chi2_rows[:1])
+    variant_rows.sort(key=lambda row: (row["variantId"], row["galaxy"]))
+    return variant_rows
+
+
+def v18_ml_catalog_support_cache() -> dict[str, list[float]]:
+    payload = read_window_json_assignment(V18_NFW_LIMITATION_POCKET_ARTIFACT_PATH, "MTS_V18_30_LIMITATION_POCKET_CANDIDATE")
+    curves = payload.get("curves", {})
+    cache: dict[str, list[float]] = {}
+    for name, row in curves.items():
+        support = row.get("support2", [])
+        if isinstance(support, list):
+            cache[name] = [float(value) for value in support]
+    return cache
+
+
+def v18_ml_catalog_curve_score(curve: dict, supports: list[float]) -> dict:
+    return v18_competitor_support_score(curve, supports)
+
+
+def v18_ml_catalog_summary_row(variant_id: str, model_id: str, rows: list[dict], set_name: str) -> dict:
+    selected = [row for row in rows if row["variantId"] == variant_id and row["set"] == set_name] if set_name != "all" else [row for row in rows if row["variantId"] == variant_id]
+    high_selected = [row for row in selected if row["set"] == "clean-high-rmse"]
+    protected_selected = [row for row in selected if row["set"] == "clean-protected"]
+    rmse_key = f"{model_id}Rmse"
+    nominal_key = "nominalV1830Rmse"
+    mean_rmse = safe_mean(parse_float(row[rmse_key]) for row in selected)
+    nominal_mean = safe_mean(parse_float(row[nominal_key]) for row in selected)
+    return {
+        "variantId": variant_id,
+        "modelId": model_id,
+        "set": set_name,
+        "galaxyCount": len(selected),
+        "meanRmse": mean_rmse,
+        "medianRmse": safe_median(parse_float(row[rmse_key]) for row in selected),
+        "meanDeltaVsNominalV1830KmS": mean_rmse - nominal_mean if math.isfinite(mean_rmse) and math.isfinite(nominal_mean) else math.nan,
+        "highMeanRmse": safe_mean(parse_float(row[rmse_key]) for row in high_selected),
+        "highAbove20Count": sum(1 for row in high_selected if parse_float(row[rmse_key]) >= 20.0),
+        "protectedMaxRegressionVsNominalV1830KmS": max(
+            [parse_float(row[rmse_key]) - parse_float(row[nominal_key]) for row in protected_selected] or [0.0]
+        ),
+    }
+
+
+def write_v18_ml_catalog_benchmark_artifacts(out_dir: Path, source_cache: Path, offline: bool) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source_cache.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_ml_catalog"
+    inventory_rows = v18_ml_catalog_download_inventory(source_cache, offline)
+    table_path = source_cache / "vizier-asu-tsv" / "li2020_apjs247_31_table1_asu.tsv"
+    table_rows = v18_ml_catalog_parse_table(table_path)
+    variant_value_rows = v18_ml_catalog_variant_value_rows(table_rows)
+    values_by_variant_name = {(row["variantId"], row["galaxy"]): row for row in variant_value_rows}
+
+    if not (DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_V2_OUT / "mts_v18_competitor_v2_case_ledger.csv").exists():
+        write_v18_competitor_benchmark_v2_artifacts(DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_V2_OUT)
+    nominal_by_name = {
+        row["galaxy"]: row
+        for row in read_csv_rows(DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_V2_OUT / "mts_v18_competitor_v2_case_ledger.csv")
+    }
+    curves = [build_curve(sample) for sample in load_samples()]
+    support_cache = v18_ml_catalog_support_cache()
+    variant_ids = sorted({row["variantId"] for row in variant_value_rows})
+
+    case_rows: list[dict] = []
+    gap_rows: list[dict] = []
+    for variant_id in variant_ids:
+        for curve in curves:
+            name = curve["name"]
+            value = values_by_variant_name.get((variant_id, name))
+            nominal = nominal_by_name.get(name, {})
+            support = support_cache.get(name, [])
+            if not value or not nominal or len(support) != len(curve["points"]):
+                continue
+            source_curve = transformed_curve(curve, ml_disk=parse_float(value["Ydisk"]), ml_bulge=parse_float(value["Ybul"], 0.0))
+            baryon = v18_ml_catalog_curve_score(source_curve, [0.0 for _ in source_curve["points"]])
+            canonical = v18_ml_catalog_curve_score(source_curve, v18_competitor_canonical_supports(source_curve))
+            v1830 = v18_ml_catalog_curve_score(source_curve, support)
+            mond_fixed = v18_ml_catalog_curve_score(source_curve, v18_competitor_mond_supports(source_curve, V18_COMPETITOR_A0_FIXED))
+            row = {
+                "galaxy": name,
+                "variantId": variant_id,
+                "sourceModel": value["sourceModel"],
+                "set": nominal.get("set", ""),
+                "split": nominal.get("split", ""),
+                "lockedRouteNominal": nominal.get("lockedRoute", ""),
+                "sourceMlRoute": source_curve.get("lockedModelRoute", ""),
+                "Ydisk": value["Ydisk"],
+                "Ybul": value["Ybul"],
+                "e_Ydisk": value["e_Ydisk"],
+                "e_Ybul": value["e_Ybul"],
+                "nominalV1830Rmse": nominal.get("v18_30_releaseRmse", ""),
+                "nominalV1826Rmse": nominal.get("v18_26_releaseRmse", ""),
+                "nominalCanonicalRmse": nominal.get("canonical_mtsRmse", ""),
+                "nominalMondGlobalRmse": nominal.get("mond_global_a0Rmse", ""),
+                "nominalNfwPriorRmse": nominal.get("nfw_concentration_priorRmse", ""),
+                "baryonSourceMlRmse": baryon["rmse"],
+                "canonicalSourceMlRmse": canonical["rmse"],
+                "v1830SupportSourceMlRmse": v1830["rmse"],
+                "mondFixedSourceMlRmse": mond_fixed["rmse"],
+                "v1830SourceDeltaVsNominalKmS": v1830["rmse"] - parse_float(nominal.get("v18_30_releaseRmse")),
+                "canonicalSourceDeltaVsNominalCanonicalKmS": canonical["rmse"] - parse_float(nominal.get("canonical_mtsRmse")),
+                "baryonSourceDeltaVsBaryonFixedKmS": baryon["rmse"] - parse_float(nominal.get("baryon_fixed_mlRmse")),
+                "v1830CandidateRouteSourceMl": v1830.get("candidateRoute", ""),
+                "routeChangedVsNominal": v1830.get("candidateRoute", "") != nominal.get("lockedRoute", ""),
+                "classification": value["classification"],
+                "usableAsMtsFormulaInput": value["usableAsMtsFormulaInput"],
+            }
+            case_rows.append(row)
+            if row["set"] == "clean-high-rmse":
+                gap_rows.append(
+                    {
+                        "galaxy": name,
+                        "variantId": variant_id,
+                        "sourceModel": value["sourceModel"],
+                        "nominalV1830Rmse": row["nominalV1830Rmse"],
+                        "v1830SupportSourceMlRmse": row["v1830SupportSourceMlRmse"],
+                        "v1830SourceDeltaVsNominalKmS": row["v1830SourceDeltaVsNominalKmS"],
+                        "nominalNfwPriorRmse": row["nominalNfwPriorRmse"],
+                        "v1830SourceMinusNfwPriorKmS": row["v1830SupportSourceMlRmse"] - parse_float(row["nominalNfwPriorRmse"]),
+                        "Ydisk": row["Ydisk"],
+                        "Ybul": row["Ybul"],
+                        "sourceMlRoute": row["sourceMlRoute"],
+                        "routeChangedVsNominal": row["routeChangedVsNominal"],
+                    }
+                )
+
+    model_ids = ["baryonSourceMl", "canonicalSourceMl", "v1830SupportSourceMl", "mondFixedSourceMl"]
+    score_rows = [
+        v18_ml_catalog_summary_row(variant_id, model_id, case_rows, set_name)
+        for variant_id in variant_ids
+        for model_id in model_ids
+        for set_name in ["all", "clean-high-rmse", "clean-protected", "weak-systematics-excluded"]
+    ]
+    v1830_scores = [row for row in score_rows if row["modelId"] == "v1830SupportSourceMl" and row["set"] == "clean-high-rmse"]
+    best_high = min(v1830_scores, key=lambda row: parse_float(row["highMeanRmse"], math.inf), default={})
+    protected_failures = [
+        row
+        for row in score_rows
+        if row["modelId"] == "v1830SupportSourceMl"
+        and row["set"] == "clean-protected"
+        and parse_float(row["protectedMaxRegressionVsNominalV1830KmS"], 0.0) > 3.0
+    ]
+    source_coverage = len({row["galaxy"] for row in variant_value_rows})
+    verdict = (
+        "source M/L variant improves high-RMSE benchmark"
+        if best_high and parse_float(best_high.get("meanDeltaVsNominalV1830KmS"), 0.0) < -0.25 and not protected_failures
+        else "source M/L values are sensitivity evidence only"
+    )
+    summary = {
+        "analysisName": "mts-v18-ml-catalog-benchmark-v1",
+        "verdict": verdict,
+        "source": "Li+ 2020 CDS/VizieR J/ApJS/247/31 table1",
+        "sourceCoverageGalaxies": source_coverage,
+        "sourceTableRows": len(table_rows),
+        "variantCount": len(variant_ids),
+        "bestHighVariant": best_high.get("variantId", ""),
+        "bestHighVariantMeanDeltaVsNominalKmS": best_high.get("meanDeltaVsNominalV1830KmS", ""),
+        "protectedVariantFailuresOver3KmS": len(protected_failures),
+        "lawChanged": False,
+        "v18SupportRecomputed": False,
+        "weakSystematicsLeakage": 0,
+        "sourceCacheOnDDrive": str(source_cache).lower().startswith("d:"),
+    }
+
+    write_csv(out_dir / f"{prefix}_source_inventory.csv", inventory_rows)
+    write_csv(out_dir / f"{prefix}_values.csv", variant_value_rows)
+    write_csv(out_dir / f"{prefix}_variant_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_gap_ledger.csv", sorted(gap_rows, key=lambda row: parse_float(row["v1830SourceDeltaVsNominalKmS"], 0.0)))
+
+    report = [
+        "# MTS v18.30 M/L Catalog Benchmark",
+        "",
+        "This mode imports published per-galaxy stellar M/L values from the Li+ 2020 SPARC halo-model catalogue and replays locked v18.30 support against those baryonic terms. It does not change the MTS law.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Source coverage: `{source_coverage}` galaxies.",
+        f"- Source table rows: `{len(table_rows)}`.",
+        f"- Tested M/L variants: `{len(variant_ids)}`.",
+        f"- Best high-RMSE v18.30 source-M/L variant: `{summary['bestHighVariant']}`.",
+        f"- Best high-RMSE mean delta vs nominal v18.30: `{fmt(parse_float(summary['bestHighVariantMeanDeltaVsNominalKmS']))}` km/s.",
+        f"- Protected variant failures over 3 km/s: `{len(protected_failures)}`.",
+        "",
+        "## Variant Scores",
+        "",
+        "| Variant | Model | Set | Mean RMSE | Delta vs nominal v18.30 | High above 20 | Protected max regression |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in score_rows:
+        if row["modelId"] == "v1830SupportSourceMl" and row["set"] in {"all", "clean-high-rmse", "clean-protected"}:
+            report.append(
+                f"| {row['variantId']} | {row['modelId']} | {row['set']} | {fmt(row['meanRmse'])} | {fmt(row['meanDeltaVsNominalV1830KmS'])} | {row['highAbove20Count']} | {fmt(row['protectedMaxRegressionVsNominalV1830KmS'])} |"
+            )
+    report.extend(
+        [
+            "",
+            "## Interpretation Guard",
+            "",
+            "The Li+ 2020 Ydisk/Ybul values are dynamical halo-fit values, not independent stellar-population priors. They are therefore benchmark/context evidence only and are not allowed as MTS formula inputs.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": summary["analysisName"],
+        "verdict": verdict,
+        "summary": summary,
+        "sourceCache": str(source_cache),
+        "outputFiles": [
+            f"{prefix}_source_inventory.csv",
+            f"{prefix}_values.csv",
+            f"{prefix}_variant_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_gap_ledger.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18mlcatalogbenchmark(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE
+    capsule = write_v18_ml_catalog_benchmark_artifacts(out_dir, source_cache, args.offline)
+    summary = capsule["summary"]
+    print("MTS v18.30 M/L catalog benchmark")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"coverage={summary['sourceCoverageGalaxies']}",
+                f"variants={summary['variantCount']}",
+                f"best_high_variant={summary['bestHighVariant']}",
+                f"best_high_delta={fmt(parse_float(summary['bestHighVariantMeanDeltaVsNominalKmS']))}",
+                f"protected_failures={summary['protectedVariantFailuresOver3KmS']}",
+            ]
+        )
+    )
+    print(f"Wrote v18 M/L catalog benchmark to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -89340,6 +89715,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18mlsourceacceptance",
             "v18mltablehunt",
             "observedstatev18mltablehunt",
+            "v18mlcatalogbenchmark",
+            "observedstatev18mlcatalogbenchmark",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -89682,6 +90059,8 @@ def main() -> None:
         cmd_v18mlsourceacceptance(args)
     elif args.mode in {"v18mltablehunt", "observedstatev18mltablehunt"}:
         cmd_v18mltablehunt(args)
+    elif args.mode in {"v18mlcatalogbenchmark", "observedstatev18mlcatalogbenchmark"}:
+        cmd_v18mlcatalogbenchmark(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
