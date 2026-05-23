@@ -21,7 +21,7 @@
   var V18_RELEASE_DISPLAY_NAME = "MTS v18.21 radial-phase release candidate (exact cache gated)";
   var V18_RADIAL_TRANSFER_DISPLAY_NAME = "MTS v18.26 radial-transfer candidate (exact cache gated)";
   var V18_LIMITATION_POCKET_DISPLAY_NAME = "MTS v18.30 release candidate (exact cache gated)";
-  var V18_LOW_VBAR_POLARITY_DISPLAY_NAME = "MTS v18.34 low-Vbar polarity review candidate (exact cache gated)";
+  var V18_LOW_VBAR_POLARITY_DISPLAY_NAME = "MTS v18.35 low-Vbar polarity safety review candidate (exact cache gated)";
   var V18_RELEASE_ARTIFACT = window.MTS_V18_21_RADIAL_PHASE_CANDIDATE || window.MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE || window.MTS_V18_07_FAMILY_SURFACE_CANDIDATE || window.MTS_V18_05_RELEASE_CANDIDATE || window.MTS_V18_01_REVIEW_CANDIDATE;
   var V18_RADIAL_TRANSFER_ARTIFACT = window.MTS_V18_26_RADIAL_TRANSFER_CANDIDATE || null;
   var V18_LIMITATION_POCKET_ARTIFACT = window.MTS_V18_30_LIMITATION_POCKET_CANDIDATE || null;
