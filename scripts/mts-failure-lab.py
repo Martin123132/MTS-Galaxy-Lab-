@@ -204,6 +204,7 @@ DEFAULT_OBSERVED_STATE_V18_NFW_OVERSHELF_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-o
 DEFAULT_OBSERVED_STATE_V18_NFW_LIMITATION_POCKET_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-limitation-pocket-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_LIMITATION_POCKET_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-limitation-pocket-redteam-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_LIMITATION_POCKET_BROWSER_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-limitation-pocket-browser-lock-v1"
+DEFAULT_OBSERVED_STATE_V18_RELEASE_REPLACEMENT_GATE_OUT = OUTPUT_PACK_ROOT / "mts-v18-release-replacement-gate-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_PROVENANCE_BOUNDARY_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-provenance-boundary-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_CASE_PAIR_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-case-pair-audit-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_FRONTIER_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-frontier-lock-v1"
@@ -71862,7 +71863,7 @@ def write_v18_nfw_limitation_pocket_browser_lock_artifacts(out_dir: Path) -> dic
         protected_regression = max(0.0, candidate["rmse"] - v1826_score["rmse"]) if set_name == "clean-protected" else 0.0
         entry = {
             "candidateId": "observed-state-response-v18.30-nfw-limitation-pocket-release-candidate",
-            "releaseCandidate": "MTS v18.30 limitation-pocket candidate",
+            "releaseCandidate": "MTS v18.30 release candidate",
             "supportSource": "python v18.30 exact support cache",
             "support2": [float(value) for value in candidate_supports],
             "set": set_name,
@@ -71997,7 +71998,7 @@ def write_v18_nfw_limitation_pocket_browser_lock_artifacts(out_dir: Path) -> dic
         "curves": artifact_curves,
         "metadata": {
             "candidateId": "observed-state-response-v18.30-nfw-limitation-pocket-release-candidate",
-            "displayName": "MTS v18.30 limitation-pocket candidate",
+            "displayName": "MTS v18.30 release candidate",
             "source": "scripts/mts-failure-lab.py v18nfwlimitationpocketbrowserlock",
             "verdict": verdict,
             "curveCount": len(artifact_curves),
@@ -72127,6 +72128,274 @@ def cmd_v18nfwlimitationpocketbrowserlock(args: argparse.Namespace) -> None:
         )
     )
     print(f"Wrote v18.30 NFW limitation-pocket browser lock to {out_dir.resolve()}")
+
+
+def v18_release_replacement_competitor_rows() -> dict[str, dict]:
+    competitor_dir = DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_OUT
+    competitor_path = competitor_dir / "mts_v18_competitor_case_ledger.csv"
+    if not competitor_path.exists():
+        write_v18_competitor_benchmark_artifacts(competitor_dir)
+    return {row["galaxy"]: row for row in read_csv_rows(competitor_path)}
+
+
+def write_v18_release_replacement_gate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_release_replacement_gate"
+    v1826_capsule = write_v18_nfw_radial_transfer_browser_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_BROWSER_OUT)
+    v1830_capsule = write_v18_nfw_limitation_pocket_browser_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_LIMITATION_POCKET_BROWSER_OUT)
+    competitor_by_name = v18_release_replacement_competitor_rows()
+    v1826_rows = {
+        row["galaxy"]: row
+        for row in read_csv_rows(DEFAULT_OBSERVED_STATE_V18_NFW_RADIAL_TRANSFER_BROWSER_OUT / "mts_v18_nfw_radial_transfer_browser_lock_case_ledger.csv")
+    }
+    v1830_rows = read_csv_rows(DEFAULT_OBSERVED_STATE_V18_NFW_LIMITATION_POCKET_BROWSER_OUT / "mts_v18_nfw_limitation_pocket_browser_lock_case_ledger.csv")
+    target_names, _target_rows_by_name = v18_nfw_limitation_pocket_target_rows()
+
+    case_rows: list[dict] = []
+    target_rows: list[dict] = []
+    protected_rows: list[dict] = []
+    competitor_rows: list[dict] = []
+    for row in v1830_rows:
+        name = row["galaxy"]
+        comp = competitor_by_name.get(name, {})
+        base_rmse = parse_float(row["baselineRmse"])
+        v1826_rmse = parse_float(row["v18_26Rmse"])
+        v1830_rmse = parse_float(row["v18_30Rmse"])
+        nfw_prior = parse_float(comp.get("nfw_concentration_priorRmse"))
+        mond_global = parse_float(comp.get("mond_global_a0Rmse"))
+        route_changed = parse_bool(row.get("routeChangedVsV1826"))
+        is_target = name in target_names
+        set_name = row.get("set", "")
+        replacement = {
+            "galaxy": name,
+            "set": set_name,
+            "split": row.get("split", ""),
+            "lockedRoute": row.get("lockedRoute", ""),
+            "baselineRmse": base_rmse,
+            "v18_26Rmse": v1826_rmse,
+            "v18_30Rmse": v1830_rmse,
+            "gainVsV18_26KmS": v1826_rmse - v1830_rmse,
+            "gainVsV18_26Pct": pct_improvement(v1826_rmse, v1830_rmse),
+            "gainVsCanonicalPct": pct_improvement(base_rmse, v1830_rmse),
+            "v18_26MinusNfwPriorKmS": v1826_rmse - nfw_prior if math.isfinite(nfw_prior) else math.nan,
+            "v18_30MinusNfwPriorKmS": v1830_rmse - nfw_prior if math.isfinite(nfw_prior) else math.nan,
+            "v18_30NfwGapDeltaVsV18_26KmS": v1830_rmse - v1826_rmse if math.isfinite(nfw_prior) else math.nan,
+            "v18_26MinusMondGlobalKmS": v1826_rmse - mond_global if math.isfinite(mond_global) else math.nan,
+            "v18_30MinusMondGlobalKmS": v1830_rmse - mond_global if math.isfinite(mond_global) else math.nan,
+            "nfwPriorRmse": nfw_prior,
+            "mondGlobalRmse": mond_global,
+            "pocketTarget": is_target,
+            "branchHits": row.get("branchHits", ""),
+            "stillAbove20": parse_bool(row.get("stillAbove20")) if set_name == "clean-high-rmse" else "",
+            "protectedRegressionVsV18_26KmS": parse_float(row.get("protectedRegressionVsV1826KmS"), 0.0) if set_name == "clean-protected" else "",
+            "routeChangedVsV18_26": route_changed,
+            "weakSystematicsExcluded": parse_bool(row.get("weakSystematicsExcluded")),
+        }
+        case_rows.append(replacement)
+        if is_target:
+            target_rows.append(replacement)
+        if set_name == "clean-protected":
+            protected_rows.append(replacement)
+        if set_name != "weak-systematics-excluded":
+            competitor_rows.append(
+                {
+                    "galaxy": name,
+                    "set": set_name,
+                    "v18_26Rmse": v1826_rmse,
+                    "v18_30Rmse": v1830_rmse,
+                    "mondGlobalRmse": mond_global,
+                    "nfwPriorRmse": nfw_prior,
+                    "v18_26MinusNfwPriorKmS": replacement["v18_26MinusNfwPriorKmS"],
+                    "v18_30MinusNfwPriorKmS": replacement["v18_30MinusNfwPriorKmS"],
+                    "v18_30ClosesNfwGapKmS": v1826_rmse - v1830_rmse if math.isfinite(nfw_prior) else math.nan,
+                    "v18_30BeatsMondGlobal": v1830_rmse < mond_global if math.isfinite(mond_global) else "",
+                    "v18_30BeatsNfwPrior": v1830_rmse < nfw_prior if math.isfinite(nfw_prior) else "",
+                    "pocketTarget": is_target,
+                }
+            )
+
+    clean_rows = [row for row in case_rows if row["set"] != "weak-systematics-excluded"]
+    high_rows = [row for row in case_rows if row["set"] == "clean-high-rmse"]
+    holdout_clean_rows = [row for row in clean_rows if row["split"] == "holdout"]
+    holdout_high_rows = [row for row in high_rows if row["split"] == "holdout"]
+    protected_regs = [parse_float(row.get("protectedRegressionVsV18_26KmS"), 0.0) for row in protected_rows]
+    v1826_high_mean = safe_mean(parse_float(row["v18_26Rmse"]) for row in high_rows)
+    v1830_high_mean = safe_mean(parse_float(row["v18_30Rmse"]) for row in high_rows)
+    v1826_clean_mean = safe_mean(parse_float(row["v18_26Rmse"]) for row in clean_rows)
+    v1830_clean_mean = safe_mean(parse_float(row["v18_30Rmse"]) for row in clean_rows)
+    v1826_target_mean = safe_mean(parse_float(row["v18_26Rmse"]) for row in target_rows)
+    v1830_target_mean = safe_mean(parse_float(row["v18_30Rmse"]) for row in target_rows)
+    high_above20 = sum(1 for row in high_rows if parse_bool(row["stillAbove20"]))
+    route_changes = sum(1 for row in clean_rows if parse_bool(row["routeChangedVsV18_26"]))
+    target_gain_pct = pct_improvement(v1826_target_mean, v1830_target_mean)
+    target_gain_kms = v1826_target_mean - v1830_target_mean if math.isfinite(v1826_target_mean) and math.isfinite(v1830_target_mean) else math.nan
+    best_null = parse_float(v1830_capsule["summary"].get("bestNullTargetGainPct"), math.nan)
+    null_margin = parse_float(v1830_capsule["summary"].get("nullMarginTargetPct"), math.nan)
+    high_nfw_gap_delta = safe_mean(parse_float(row["v18_30MinusNfwPriorKmS"]) for row in high_rows) - safe_mean(
+        parse_float(row["v18_26MinusNfwPriorKmS"]) for row in high_rows
+    )
+    target_nfw_gap_delta = safe_mean(parse_float(row["v18_30MinusNfwPriorKmS"]) for row in target_rows) - safe_mean(
+        parse_float(row["v18_26MinusNfwPriorKmS"]) for row in target_rows
+    )
+
+    gate_rows = [
+        {
+            "gate": "v18_26_browser_lock_passed",
+            "required": "v18.26 browser cache lock passed",
+            "value": v1826_capsule["verdict"],
+            "pass": v1826_capsule["verdict"] == "v18.26 browser cache lock passed",
+        },
+        {
+            "gate": "v18_30_browser_lock_passed",
+            "required": "v18.30 browser cache lock passed",
+            "value": v1830_capsule["verdict"],
+            "pass": v1830_capsule["verdict"] == "v18.30 browser cache lock passed",
+        },
+        {
+            "gate": "baseline_remains_21_90",
+            "required": "21.90 rounded",
+            "value": v1830_capsule["summary"]["allGalaxyLockedMtsMeanRmse"],
+            "pass": round(parse_float(v1830_capsule["summary"]["allGalaxyLockedMtsMeanRmse"]), 2) == 21.90,
+        },
+        {"gate": "weak_leakage_zero", "required": "0", "value": v1830_capsule["summary"]["weakSystematicsLeakage"], "pass": parse_float(v1830_capsule["summary"]["weakSystematicsLeakage"]) == 0},
+        {"gate": "cache_mismatch_zero", "required": "0", "value": v1830_capsule["summary"]["browserCacheParityMismatchCount"], "pass": parse_float(v1830_capsule["summary"]["browserCacheParityMismatchCount"]) == 0},
+        {"gate": "route_mismatch_zero", "required": "0", "value": v1830_capsule["summary"]["browserRouteMismatchCount"], "pass": parse_float(v1830_capsule["summary"]["browserRouteMismatchCount"]) == 0},
+        {"gate": "high_above20_zero", "required": "0", "value": high_above20, "pass": high_above20 == 0},
+        {"gate": "route_changes_zero", "required": "0", "value": route_changes, "pass": route_changes == 0},
+        {"gate": "protected_regression_zero", "required": "0.00 km/s", "value": max(protected_regs or [0.0]), "pass": max(protected_regs or [0.0]) == 0.0},
+        {"gate": "target_gain_vs_v18_26_at_least_15pct", "required": ">= 15%", "value": target_gain_pct, "pass": target_gain_pct >= 15.0},
+        {"gate": "high_mean_not_worse_than_v18_26", "required": "v18.30 high mean <= v18.26", "value": v1830_high_mean - v1826_high_mean, "pass": v1830_high_mean <= v1826_high_mean},
+        {"gate": "clean_mean_not_worse_than_v18_26", "required": "v18.30 clean mean <= v18.26", "value": v1830_clean_mean - v1826_clean_mean, "pass": v1830_clean_mean <= v1826_clean_mean},
+        {"gate": "nfw_gap_not_worse_on_high_set", "required": "<= 0 km/s delta", "value": high_nfw_gap_delta, "pass": high_nfw_gap_delta <= 0.0},
+        {"gate": "nfw_gap_improves_on_target_pocket", "required": "< 0 km/s delta", "value": target_nfw_gap_delta, "pass": target_nfw_gap_delta < 0.0},
+        {"gate": "target_null_margin_at_least_10_points", "required": ">= 10 points", "value": null_margin, "pass": math.isfinite(null_margin) and null_margin >= 10.0},
+    ]
+    release_pass = all(parse_bool(row["pass"]) for row in gate_rows)
+    verdict = "v18.30 replaces v18.26 as release candidate" if release_pass else "v18.30 remains candidate; v18.26 release retained"
+    score_row = {
+        "candidateId": "observed-state-response-v18.30-release-replacement-gate",
+        "verdict": verdict,
+        "oldReleaseCandidate": "MTS v18.26 radial-transfer candidate",
+        "newReleaseCandidate": "MTS v18.30 release candidate",
+        "allGalaxyLockedMtsMeanRmse": v1830_capsule["summary"]["allGalaxyLockedMtsMeanRmse"],
+        "cleanSetLockedMtsMeanRmse": v1830_capsule["summary"]["cleanSetLockedMtsMeanRmse"],
+        "v18_26HighGainPct": v1826_capsule["summary"]["v1826HighGainPct"],
+        "v18_30HighGainPct": v1830_capsule["summary"]["v1830HighGainPct"],
+        "v18_26CleanGainPct": v1826_capsule["summary"]["v1826CleanGainPct"],
+        "v18_30CleanGainPct": v1830_capsule["summary"]["v1830CleanGainPct"],
+        "v18_30HoldoutHighGainPct": v1830_capsule["summary"]["v1830HoldoutHighGainPct"],
+        "v18_30HoldoutCleanGainPct": v1830_capsule["summary"]["v1830HoldoutCleanGainPct"],
+        "targetGainVsV18_26Pct": target_gain_pct,
+        "targetGainVsV18_26KmS": target_gain_kms,
+        "bestNullTargetGainPct": best_null,
+        "nullMarginTargetPct": null_margin,
+        "highAbove20": high_above20,
+        "protectedMaxRegressionVsV18_26KmS": max(protected_regs or [0.0]),
+        "routeChangesVsV18_26": route_changes,
+        "weakSystematicsLeakage": v1830_capsule["summary"]["weakSystematicsLeakage"],
+        "browserCacheParityMismatchCount": v1830_capsule["summary"]["browserCacheParityMismatchCount"],
+        "browserRouteMismatchCount": v1830_capsule["summary"]["browserRouteMismatchCount"],
+        "highNfwGapDeltaVsV18_26KmS": high_nfw_gap_delta,
+        "targetNfwGapDeltaVsV18_26KmS": target_nfw_gap_delta,
+        "releaseSuccessor": release_pass,
+    }
+    formula = {
+        "candidateId": score_row["candidateId"],
+        "status": verdict,
+        "releaseSuccessor": release_pass,
+        "sourceOfTruth": "v18.30 exact support cache",
+        "browserPreset": "MTS v18.30 release candidate (exact cache gated)",
+        "canonicalConstantsChanged": False,
+        "q": Q_DEFAULT,
+        "Gamma0": GAMMA0,
+        "ML_disk": ML_DISK,
+        "ML_bulge": ML_BULGE,
+        "forbiddenInputsUsed": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "NFW parameter lookup", "weak/systematics training"],
+        "selectedStrengths": read_json_if_exists(DEFAULT_OBSERVED_STATE_V18_NFW_LIMITATION_POCKET_OUT / "mts_v18_nfw_limitation_pocket_candidate_capsule.json").get("selectedStrengths", {}),
+    }
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_row])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", sorted(target_rows, key=lambda row: -parse_float(row["gainVsV18_26KmS"], 0.0)))
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_competitor_gap.csv", competitor_rows)
+    write_csv(out_dir / f"{prefix}_gate_checks.csv", gate_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", read_csv_rows(DEFAULT_OBSERVED_STATE_V18_NFW_LIMITATION_POCKET_OUT / "mts_v18_nfw_limitation_pocket_candidate_null_controls.csv"))
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    changed = [row for row in target_rows if parse_float(row["gainVsV18_26KmS"], 0.0) > 0.01]
+    report = [
+        "# MTS v18.30 Release Replacement Gate",
+        "",
+        "This mode is a release decision gate, not a new law search. It compares browser-locked v18.30 directly against browser-locked v18.26.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- v18.26 high gain: `{fmt(score_row['v18_26HighGainPct'])}%`; v18.30 high gain: `{fmt(score_row['v18_30HighGainPct'])}%`.",
+        f"- v18.26 clean gain: `{fmt(score_row['v18_26CleanGainPct'])}%`; v18.30 clean gain: `{fmt(score_row['v18_30CleanGainPct'])}%`.",
+        f"- Target pocket gain over v18.26: `{fmt(target_gain_pct)}%` / `{fmt(target_gain_kms)}` km/s.",
+        f"- Protected max regression vs v18.26: `{fmt(max(protected_regs or [0.0]))}` km/s.",
+        f"- High-RMSE cases above 20 km/s: `{high_above20}`.",
+        f"- Route changes vs v18.26: `{route_changes}`.",
+        f"- Null margin: `{fmt(null_margin)}` points.",
+        f"- NFW-prior gap delta on target pocket: `{fmt(target_nfw_gap_delta)}` km/s.",
+        "",
+        "## Changed Target Cases",
+        "",
+        "| Galaxy | v18.26 | v18.30 | Gain | Branch |",
+        "| --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in changed:
+        report.append(
+            f"| {row['galaxy']} | {fmt(row['v18_26Rmse'])} | {fmt(row['v18_30Rmse'])} | {fmt(row['gainVsV18_26KmS'])} | {row['branchHits']} |"
+        )
+    report.extend(["", "## Gate Checks", "", "| Gate | Value | Pass |", "| --- | ---: | ---: |"])
+    for row in gate_rows:
+        report.append(f"| {row['gate']} | {fmt(row['value']) if isinstance(row['value'], (int, float)) else row['value']} | `{row['pass']}` |")
+    report.append("")
+    report.append(verdict)
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-release-replacement-gate-v1",
+        "candidateId": score_row["candidateId"],
+        "verdict": verdict,
+        "summary": score_row,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_competitor_gap.csv",
+            f"{prefix}_gate_checks.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18releasereplacementgate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_RELEASE_REPLACEMENT_GATE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_release_replacement_gate_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.30 release replacement gate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"v18_30_high={fmt(summary['v18_30HighGainPct'])}%",
+                f"v18_30_clean={fmt(summary['v18_30CleanGainPct'])}%",
+                f"target_gain_vs_v18_26={fmt(summary['targetGainVsV18_26Pct'])}%",
+                f"protected={fmt(summary['protectedMaxRegressionVsV18_26KmS'])}",
+                f"null_margin={fmt(summary['nullMarginTargetPct'])}",
+                f"release_successor={summary['releaseSuccessor']}",
+            ]
+        )
+    )
+    print(f"Wrote v18.30 release replacement gate to {out_dir.resolve()}")
 
 
 V18_NFW_PROVENANCE_GAP_THRESHOLD = 3.0
@@ -88672,6 +88941,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwlimitationpocketredteam",
             "v18nfwlimitationpocketbrowserlock",
             "observedstatev18nfwlimitationpocketbrowserlock",
+            "v18releasereplacementgate",
+            "observedstatev18releasereplacementgate",
             "v18nfwprovenanceboundary",
             "observedstatev18nfwprovenanceboundary",
             "v18nfwcasepairaudit",
@@ -89010,6 +89281,8 @@ def main() -> None:
         cmd_v18nfwlimitationpocketredteam(args)
     elif args.mode in {"v18nfwlimitationpocketbrowserlock", "observedstatev18nfwlimitationpocketbrowserlock"}:
         cmd_v18nfwlimitationpocketbrowserlock(args)
+    elif args.mode in {"v18releasereplacementgate", "observedstatev18releasereplacementgate"}:
+        cmd_v18releasereplacementgate(args)
     elif args.mode in {"v18nfwprovenanceboundary", "observedstatev18nfwprovenanceboundary"}:
         cmd_v18nfwprovenanceboundary(args)
     elif args.mode in {"v18nfwcasepairaudit", "observedstatev18nfwcasepairaudit"}:

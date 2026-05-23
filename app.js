@@ -19,7 +19,7 @@
   var V18_LEGACY_REVIEW_TOKEN = "__MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE__";
   var V18_RELEASE_DISPLAY_NAME = "MTS v18.21 radial-phase release candidate (exact cache gated)";
   var V18_RADIAL_TRANSFER_DISPLAY_NAME = "MTS v18.26 radial-transfer candidate (exact cache gated)";
-  var V18_LIMITATION_POCKET_DISPLAY_NAME = "MTS v18.30 limitation-pocket candidate (exact cache gated)";
+  var V18_LIMITATION_POCKET_DISPLAY_NAME = "MTS v18.30 release candidate (exact cache gated)";
   var V18_RELEASE_ARTIFACT = window.MTS_V18_21_RADIAL_PHASE_CANDIDATE || window.MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE || window.MTS_V18_07_FAMILY_SURFACE_CANDIDATE || window.MTS_V18_05_RELEASE_CANDIDATE || window.MTS_V18_01_REVIEW_CANDIDATE;
   var V18_RADIAL_TRANSFER_ARTIFACT = window.MTS_V18_26_RADIAL_TRANSFER_CANDIDATE || null;
   var V18_LIMITATION_POCKET_ARTIFACT = window.MTS_V18_30_LIMITATION_POCKET_CANDIDATE || null;
@@ -4051,7 +4051,7 @@
     var branchSafety = artifact && artifact.metadata && artifact.metadata.branchSafetyV1803;
     var edgeHarden = artifact && artifact.metadata && artifact.metadata.edgeHardenV1804;
     var releaseStress = artifact && artifact.metadata && artifact.metadata.releaseStressV1805;
-    var radialRedteam = artifact && artifact.metadata && (artifact.metadata.radialTransferRedTeamV1826 || artifact.metadata.radialPhaseRedTeamV1822);
+    var radialRedteam = artifact && artifact.metadata && (artifact.metadata.limitationPocketRedTeamV1830 || artifact.metadata.radialTransferRedTeamV1826 || artifact.metadata.radialPhaseRedTeamV1822);
     var artifactCount = artifact && artifact.metadata ? artifact.metadata.curveCount : 0;
     var nativeMeta = artifact && artifact.metadata ? v18NativeMetaForSource(activeSource, artifact.metadata) : {};
     var cacheMismatch = releaseLock.browserCacheParityMismatchCount == null ? 0 : releaseLock.browserCacheParityMismatchCount;
@@ -4088,7 +4088,7 @@
     if ($("v18ReviewNote")) {
       $("v18ReviewNote").textContent = active
         ? "Active preset uses " + activeDisplay + " via " + (nativeReady ? "native expression" : "exact support cache with " + artifactCount + " cached curves") + ". Release-lock status: " + releaseLock.verdict + ". Native mismatches are " + String(nativeMismatch) + "; cache mismatches are " + String(cacheMismatch) + ". Red-team: " + (radialRedteam ? radialRedteam.verdict + " with " + fmt(radialRedteam.nullMarginPriorityPct || radialRedteam.nullMarginTargetPct, 2) + " point null margin" : "not run") + ". Branch prune: " + (branchPrune ? branchPrune.verdict + " (" + branchPrune.essentialBranchCount + " / " + branchPrune.activeBranchCount + " essential)" : "cache-gated") + ". Family audit: " + (familyAudit ? familyAudit.verdict + " (" + familyAudit.stableFamilyCount + " / " + familyAudit.familyCount + " stable)" : "cache-gated") + ". The lock keeps all clean high-RMSE cases below 20 km/s with protected max regression under the release guard."
-        : "Select " + V18_RELEASE_DISPLAY_NAME + " or " + V18_RADIAL_TRANSFER_DISPLAY_NAME + " in the Test Rig to inspect a cache-gated release candidate.";
+        : "Select " + V18_RELEASE_DISPLAY_NAME + ", " + V18_RADIAL_TRANSFER_DISPLAY_NAME + ", or " + V18_LIMITATION_POCKET_DISPLAY_NAME + " in the Test Rig to inspect a cache-gated release candidate.";
     }
   }
 
