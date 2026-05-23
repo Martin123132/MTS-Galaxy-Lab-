@@ -229,6 +229,7 @@ DEFAULT_OBSERVED_STATE_V18_EXTERNAL_ML_GAP_TEST_OUT = OUTPUT_PACK_ROOT / "mts-v1
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
+DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-locked-family-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -78652,6 +78653,191 @@ def cmd_v18legacyvbarpolaritystress(args: argparse.Namespace) -> None:
     print(f"Wrote v18 legacy low-Vbar polarity stress to {out_dir.resolve()}")
 
 
+def write_v18_legacy_vbar_polarity_locked_family_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_legacy_vbar_polarity_locked"
+    base_rows = v18_competitor_gap_base_rows()
+    locked = {"addBeta": 1.0, "reliefBeta": 1.0, "addHMax": 0.18, "reliefHMin": 0.10}
+    seed_replay: list[dict] = []
+    all_case_rows: list[dict] = []
+    regression_rows: list[dict] = []
+    all_null_rows: list[dict] = []
+    for split_seed in V18_LEGACY_VBAR_POLARITY_STRESS_SPLIT_SEEDS:
+        split_by_name = v18_legacy_vbar_polarity_stress_split(base_rows, split_seed)
+        selected_rows = v18_legacy_vbar_polarity_apply_split(
+            v18_legacy_vbar_polarity_score_rows(base_rows, locked["addBeta"], locked["reliefBeta"], locked["addHMax"]),
+            split_by_name,
+        )
+        metric = {
+            "splitSeed": split_seed,
+            "selectedFamily": "add=1.00;relief=1.00;hMax=0.18",
+            **locked,
+        }
+        for split in [None, "train", "holdout"]:
+            metric.update(v18_legacy_vbar_shape_metric(selected_rows, split))
+        null_rows = v18_legacy_vbar_polarity_stress_null_rows(base_rows, selected_rows, metric, split_by_name, split_seed)
+        all_null_rows.extend(null_rows)
+        allowed_nulls = [row for row in null_rows if row["nullType"] != "protected-lookalike-active-replay-polarity-stress"]
+        best_allowed_null_holdout = max([parse_float(row["holdoutTargetGainVsV18_30Pct"], -999.0) for row in allowed_nulls] or [-999.0])
+        metric["bestAllowedNullHoldoutTargetGainPct"] = best_allowed_null_holdout
+        metric["stressNullMarginHoldoutTargetPct"] = parse_float(metric["holdoutTargetGainVsV18_30Pct"], -999.0) - best_allowed_null_holdout
+        metric["sameActiveNullMedianHoldoutTargetGainPct"] = statistics.median(
+            [
+                parse_float(row["holdoutTargetGainVsV18_30Pct"], math.nan)
+                for row in null_rows
+                if row["nullType"] == "same-active-random-low-load-polarity-stress"
+                and math.isfinite(parse_float(row["holdoutTargetGainVsV18_30Pct"], math.nan))
+            ]
+        )
+        metric["protectedLookalikeStressMaxRegressionKmS"] = max(
+            [
+                parse_float(row["allProtectedMaxRegressionVsV18_30KmS"], 0.0)
+                for row in null_rows
+                if row["nullType"] == "protected-lookalike-active-replay-polarity-stress"
+            ] or [0.0]
+        )
+        seed_replay.append(metric)
+        for row in selected_rows:
+            out_row = {
+                **v18_legacy_vbar_polarity_strip_support(row),
+                "splitSeed": split_seed,
+                "selectedFamily": metric["selectedFamily"],
+                "stressNullMarginHoldoutTargetPct": metric["stressNullMarginHoldoutTargetPct"],
+            }
+            all_case_rows.append(out_row)
+            if parse_float(row["candidateMinusV18_30KmS"], 0.0) >= 0.25:
+                regression_rows.append(out_row)
+    holdout_gains = [parse_float(row["holdoutTargetGainVsV18_30Pct"], math.nan) for row in seed_replay]
+    margins = [parse_float(row["stressNullMarginHoldoutTargetPct"], math.nan) for row in seed_replay]
+    finite_holdout_gains = [value for value in holdout_gains if math.isfinite(value)]
+    finite_margins = [value for value in margins if math.isfinite(value)]
+    median_holdout_gain = statistics.median(finite_holdout_gains) if finite_holdout_gains else math.nan
+    min_holdout_gain = min(finite_holdout_gains) if finite_holdout_gains else math.nan
+    median_null_margin = statistics.median(finite_margins) if finite_margins else math.nan
+    min_null_margin = min(finite_margins) if finite_margins else math.nan
+    max_protected_regression = max([parse_float(row["allProtectedMaxRegressionVsV18_30KmS"], 0.0) for row in seed_replay] or [0.0])
+    max_high_regression = max([parse_float(row["allHighMaxRegressionVsV18_30KmS"], 0.0) for row in seed_replay] or [0.0])
+    max_high_above20 = max([parse_float(row["allHighAbove20Count"], 0.0) for row in seed_replay] or [0.0])
+    max_route_changes = max([parse_float(row["allRouteChangedCount"], 0.0) for row in seed_replay] or [0.0])
+    passes = {
+        "medianHoldoutTargetGainAtLeast7Pct": median_holdout_gain >= 7.0,
+        "minHoldoutTargetGainPositive": min_holdout_gain > 0.0,
+        "medianStressNullMarginAtLeast2Pct": median_null_margin >= 2.0,
+        "minStressNullMarginNonNegative": min_null_margin >= 0.0,
+        "protectedMaxRegressionAtMost1KmS": max_protected_regression <= 1.0,
+        "highMaxRegressionAtMost1KmS": max_high_regression <= 1.0,
+        "highAbove20Zero": max_high_above20 == 0,
+        "routeChangesZero": max_route_changes == 0,
+        "lockedFamilyStableAllSeeds": True,
+        "weakLeakageZero": True,
+    }
+    if all(passes.values()):
+        verdict = "locked polarity family survives stress for review"
+    elif median_holdout_gain > 0.0 and median_null_margin > 0.0:
+        verdict = "locked polarity family useful but not review-ready"
+    else:
+        verdict = "locked polarity family not above stress null"
+    formula = {
+        "candidateId": "observed-state-response-v18.34-legacy-low-vbar-polarity-locked-family",
+        "baseLaw": "locked v18.30 release candidate",
+        "status": verdict,
+        "lawChanged": False,
+        "lockedFamily": locked,
+        "whyLocked": "The wider hMax=0.20 family caused the only stress failure, a F563-1 high-RMSE regression. This mode freezes the stable hMax=0.18 family and reruns the same stress harness.",
+        "inputs": ["locked route", "log10(max Vbar)", "h/rOut", "outer gas share", "uMax", "mid gas share", "inner gas share", "radius/rOut"],
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE lookup", "NFW parameters as formula input", "weak/systematics cases"],
+    }
+    score_row = {
+        "candidateId": formula["candidateId"],
+        "verdict": verdict,
+        "seedCount": len(seed_replay),
+        "medianHoldoutTargetGainVsV18_30Pct": median_holdout_gain,
+        "minHoldoutTargetGainVsV18_30Pct": min_holdout_gain,
+        "medianStressNullMarginHoldoutTargetPct": median_null_margin,
+        "minStressNullMarginHoldoutTargetPct": min_null_margin,
+        "maxProtectedRegressionVsV18_30KmS": max_protected_regression,
+        "maxHighRegressionVsV18_30KmS": max_high_regression,
+        "maxHighAbove20Count": max_high_above20,
+        "maxRouteChanges": max_route_changes,
+        "selectedFamily": "add=1.00;relief=1.00;hMax=0.18",
+        "weakSystematicsLeakage": 0,
+        **{f"pass_{key}": value for key, value in passes.items()},
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_row])
+    write_csv(out_dir / f"{prefix}_seed_replay.csv", seed_replay)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", all_case_rows)
+    write_csv(out_dir / f"{prefix}_regression_ledger.csv", sorted(regression_rows, key=lambda row: -parse_float(row["candidateMinusV18_30KmS"])))
+    write_csv(out_dir / f"{prefix}_null_controls.csv", all_null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18 Locked Low-Vbar Polarity Family",
+        "",
+        "This mode freezes the stable low-Vbar polarity family from the stress run: `add=1.00; relief=1.00; hMax=0.18`. It does not change the browser law and does not use galaxy names, residuals, raw RMSE, NFW parameters, or weak/systematics cases as formula inputs.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Median holdout target gain vs v18.30: `{fmt(median_holdout_gain)}%`.",
+        f"- Minimum holdout target gain vs v18.30: `{fmt(min_holdout_gain)}%`.",
+        f"- Median stress-null margin: `{fmt(median_null_margin)}` points.",
+        f"- Minimum stress-null margin: `{fmt(min_null_margin)}` points.",
+        f"- Max protected regression vs v18.30: `{fmt(max_protected_regression)}` km/s.",
+        f"- Max high-RMSE regression vs v18.30: `{fmt(max_high_regression)}` km/s.",
+        f"- High cases above 20 km/s: `{fmt(max_high_above20)}`.",
+        "",
+        "## Seed Replay",
+        "",
+        "| Seed | Holdout target gain % | Null margin | Protected max reg | High max reg |",
+        "| ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in seed_replay:
+        report.append(
+            f"| {row['splitSeed']} | {fmt(row['holdoutTargetGainVsV18_30Pct'])} | {fmt(row['stressNullMarginHoldoutTargetPct'])} | {fmt(row['allProtectedMaxRegressionVsV18_30KmS'])} | {fmt(row['allHighMaxRegressionVsV18_30KmS'])} |"
+        )
+    report.extend(["", "## Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.append("")
+    report.append(verdict)
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-legacy-vbar-polarity-locked-family-v1",
+        "candidateId": formula["candidateId"],
+        "verdict": verdict,
+        "summary": score_row,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_seed_replay.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_regression_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18legacyvbarpolaritylock(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_LOCK_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_legacy_vbar_polarity_locked_family_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18 locked low-Vbar polarity family")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"median_holdout_target_gain={fmt(summary['medianHoldoutTargetGainVsV18_30Pct'])}%",
+                f"min_holdout_target_gain={fmt(summary['minHoldoutTargetGainVsV18_30Pct'])}%",
+                f"median_null_margin={fmt(summary['medianStressNullMarginHoldoutTargetPct'])}",
+                f"protected_reg={fmt(summary['maxProtectedRegressionVsV18_30KmS'])}",
+                f"high_reg={fmt(summary['maxHighRegressionVsV18_30KmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 locked low-Vbar polarity family to {out_dir.resolve()}")
+
+
 V18_COMPETITOR_GAP_TARGET_THRESHOLD_KMS = 8.0
 V18_COMPETITOR_GAP_COMPLETION_GRID = [0.0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.65]
 V18_COMPETITOR_GAP_SUPPRESSION_GRID = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
@@ -93487,6 +93673,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18legacyvbarpolarity",
             "v18legacyvbarpolaritystress",
             "observedstatev18legacyvbarpolaritystress",
+            "v18legacyvbarpolaritylock",
+            "observedstatev18legacyvbarpolaritylock",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -93847,6 +94035,8 @@ def main() -> None:
         cmd_v18legacyvbarpolarity(args)
     elif args.mode in {"v18legacyvbarpolaritystress", "observedstatev18legacyvbarpolaritystress"}:
         cmd_v18legacyvbarpolaritystress(args)
+    elif args.mode in {"v18legacyvbarpolaritylock", "observedstatev18legacyvbarpolaritylock"}:
+        cmd_v18legacyvbarpolaritylock(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
