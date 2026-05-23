@@ -183,6 +183,7 @@ DEFAULT_OBSERVED_STATE_V18_FAMILY_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-ob
 DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_FINAL_OUT = OUTPUT_PACK_ROOT / "mts-observed-v18-release-lock-final-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-benchmark-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_V2_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-benchmark-v2"
+DEFAULT_OBSERVED_STATE_V18_COMPETITOR_GAP_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-gap-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LAW_SPEC_OUT = OUTPUT_PACK_ROOT / "mts-v18-law-spec-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_FIGURES_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-figures-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_GAP_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-gap-audit-v1"
@@ -77030,6 +77031,480 @@ def cmd_v18mldiscriminator(args: argparse.Namespace) -> None:
     print(f"Wrote v18 M/L discriminator to {out_dir.resolve()}")
 
 
+V18_COMPETITOR_GAP_TARGET_THRESHOLD_KMS = 8.0
+V18_COMPETITOR_GAP_COMPLETION_GRID = [0.0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.65]
+V18_COMPETITOR_GAP_SUPPRESSION_GRID = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+V18_COMPETITOR_GAP_SEEDS = [20260523, 20260524, 271828, 314159, 42, 12345, 8675309]
+
+
+def v18_competitor_gap_benchmark_rows() -> dict[str, dict]:
+    case_path = DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_V2_OUT / "mts_v18_competitor_v2_case_ledger.csv"
+    if not case_path.exists():
+        write_v18_competitor_benchmark_v2_artifacts(DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_V2_OUT)
+    return {row["galaxy"]: row for row in read_csv_rows(case_path)}
+
+
+def v18_competitor_gap_artifact() -> dict:
+    if not V18_NFW_LIMITATION_POCKET_ARTIFACT_PATH.exists():
+        write_v18_nfw_limitation_pocket_browser_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_LIMITATION_POCKET_BROWSER_OUT)
+    return read_window_json_assignment(V18_NFW_LIMITATION_POCKET_ARTIFACT_PATH, "MTS_V18_30_LIMITATION_POCKET_CANDIDATE")
+
+
+def v18_competitor_gap_activation_values(curve: dict, table1_by_name: dict[str, dict]) -> tuple[dict[str, float], dict, dict]:
+    values = observed_state_values(curve)
+    mass = v18_official_mass_scale_features(curve, table1_by_name)
+    route = curve.get("lockedModelRoute", "")
+    completion = 0.0
+    suppression = 0.0
+    if route == "low-load":
+        completion = max(
+            min(
+                v18_nfw_gap_candidate_smooth(values["outerGasShare"], 0.55, 0.80),
+                v18_nfw_gap_candidate_smooth(0.18 - values["hOverRout"], 0.0, 0.10),
+                v18_nfw_gap_candidate_smooth(0.36 - values["uOut"], 0.0, 0.16),
+                v18_nfw_gap_candidate_smooth(values["memoryLoad"], 0.80, 2.80),
+            ),
+            min(
+                v18_nfw_gap_candidate_smooth(values["outerGasShare"], 0.68, 0.90),
+                v18_nfw_gap_candidate_smooth(0.18 - values["hOverRout"], 0.0, 0.13),
+                v18_nfw_gap_candidate_smooth(0.78 - values["uMax"], 0.0, 0.22),
+            ),
+            min(
+                v18_nfw_gap_candidate_smooth(0.22 - values["outerGasShare"], 0.0, 0.12),
+                v18_nfw_gap_candidate_smooth(values["memoryLoad"], 3.00, 4.80),
+                v18_nfw_gap_candidate_smooth(0.70 - values["uMax"], 0.0, 0.17),
+            ),
+        )
+        suppression = max(
+            min(
+                v18_nfw_gap_candidate_smooth(values["hOverRout"], 0.20, 0.36),
+                v18_nfw_gap_candidate_smooth(values["pointDensity"], 1.00, 3.00),
+                v18_nfw_gap_candidate_smooth(values["uOut"], 0.33, 0.48),
+                v18_nfw_gap_candidate_smooth(values["outerGasShare"], 0.35, 0.60),
+            ),
+            min(
+                v18_nfw_gap_candidate_smooth(values["hOverRout"], 0.28, 0.45),
+                v18_nfw_gap_candidate_smooth(values["pointDensity"], 3.00, 5.20),
+                v18_nfw_gap_candidate_smooth(values["uOut"], 0.38, 0.54),
+            ),
+            min(
+                v18_nfw_gap_candidate_smooth(values["outerGasShare"], 0.50, 0.75),
+                v18_nfw_gap_candidate_smooth(values["innerGasShare"], 0.25, 0.55),
+                v18_nfw_gap_candidate_smooth(0.75 - values["uMax"], 0.0, 0.18),
+            ),
+        )
+    elif route == "buffered single-crossing":
+        suppression = max(
+            suppression,
+            min(
+                v18_nfw_gap_candidate_smooth(values["outerGasShare"], 0.55, 0.80),
+                v18_nfw_gap_candidate_smooth(values["pointDensity"], 2.50, 4.20),
+                v18_nfw_gap_candidate_smooth(values["uMax"], 0.95, 1.25),
+            ),
+        )
+        completion = max(
+            completion,
+            min(
+                v18_nfw_gap_candidate_smooth(0.38 - values["outerGasShare"], 0.0, 0.16),
+                v18_nfw_gap_candidate_smooth(values["memoryLoad"], 6.00, 8.50),
+                v18_nfw_gap_candidate_smooth(0.35 - values["uOut"], 0.0, 0.10),
+            ),
+        )
+    activations = {
+        "quietLowLoadCompletion": clamp(completion, 0.0, 1.0),
+        "quietLowLoadSuppression": clamp(suppression, 0.0, 1.0),
+    }
+    activations["anyActivation"] = max(activations.values())
+    return activations, values, mass
+
+
+def v18_competitor_gap_apply_supports(
+    curve: dict,
+    base_supports: list[float],
+    completion_beta: float,
+    suppression_beta: float,
+    activations: dict[str, float],
+) -> list[float]:
+    output: list[float] = []
+    completion = parse_float(activations.get("quietLowLoadCompletion"), 0.0)
+    suppression = parse_float(activations.get("quietLowLoadSuppression"), 0.0)
+    for point, support in zip(curve["points"], base_supports):
+        x_value = point.get("x", point["r"] / max(curve["rOut"], 1e-9))
+        completion_shape = 0.25 + 0.75 * v18_nfw_gap_candidate_smooth(x_value, 0.20, 0.82)
+        suppression_shape = 0.10 + 0.90 * v18_nfw_gap_candidate_smooth(x_value, 0.10, 0.65)
+        factor = 1.0
+        factor += completion_beta * completion * completion_shape
+        factor -= suppression_beta * suppression * suppression_shape
+        output.append(max(0.0, support * clamp(factor, 0.45, 1.65)))
+    return output
+
+
+def v18_competitor_gap_base_rows() -> list[dict]:
+    artifact = v18_competitor_gap_artifact()
+    benchmark_rows = v18_competitor_gap_benchmark_rows()
+    table1_by_name, _table1_header, _table1_path = v18_mass_scale_table1()
+    curves = [build_curve(sample) for sample in load_samples()]
+    rows: list[dict] = []
+    for curve in curves:
+        name = curve["name"]
+        artifact_entry = artifact.get("curves", {}).get(name, {})
+        base_supports = artifact_entry.get("support2", [])
+        if not base_supports:
+            continue
+        benchmark = benchmark_rows.get(name, {})
+        set_name = benchmark.get("set", artifact_entry.get("set", ""))
+        if set_name == "weak-systematics-excluded":
+            continue
+        activations, values, mass = v18_competitor_gap_activation_values(curve, table1_by_name)
+        v1830 = v18_competitor_support_score(curve, [parse_float(value) for value in base_supports])
+        canonical_rmse = parse_float(benchmark.get("canonical_mtsRmse"), score_curve(curve)["rmse"])
+        nfw_gap = parse_float(benchmark.get("v18_30MinusNfwPriorKmS"), math.nan)
+        target = set_name == "clean-protected" and math.isfinite(nfw_gap) and nfw_gap >= V18_COMPETITOR_GAP_TARGET_THRESHOLD_KMS
+        row = {
+            "galaxy": name,
+            "set": set_name,
+            "split": benchmark.get("split", artifact_entry.get("split", "")),
+            "lockedRoute": curve.get("lockedModelRoute", ""),
+            "v18_30Rmse": v1830["rmse"],
+            "canonicalRmse": canonical_rmse,
+            "nfwPriorRmse": parse_float(benchmark.get("nfw_concentration_priorRmse"), math.nan),
+            "v18_30MinusNfwPriorKmS": nfw_gap,
+            "targetProtectedNfwGap": target,
+            "cleanHighRmse": set_name == "clean-high-rmse",
+            "baseSupport2": [parse_float(value) for value in base_supports],
+            "quietLowLoadCompletionActivation": activations["quietLowLoadCompletion"],
+            "quietLowLoadSuppressionActivation": activations["quietLowLoadSuppression"],
+            "anyActivation": activations["anyActivation"],
+        }
+        for feature in [
+            "memoryLoad",
+            "uMax",
+            "uOut",
+            "hOverRout",
+            "fGasOut",
+            "innerGasShare",
+            "midGasShare",
+            "outerGasShare",
+            "innerDiskShare",
+            "midDiskShare",
+            "outerDiskShare",
+            "pointDensity",
+            "barCurv",
+        ]:
+            row[feature] = values.get(feature, math.nan)
+        for feature in ["mBar_1e9Msun", "tableGasFraction"]:
+            row[feature] = mass.get(feature, math.nan)
+        rows.append(row)
+    return rows
+
+
+def v18_competitor_gap_score_rows(base_rows: list[dict], completion_beta: float, suppression_beta: float) -> list[dict]:
+    curves_by_name = {build_curve(sample)["name"]: build_curve(sample) for sample in load_samples()}
+    rows: list[dict] = []
+    for base in base_rows:
+        curve = curves_by_name[base["galaxy"]]
+        activations = {
+            "quietLowLoadCompletion": base["quietLowLoadCompletionActivation"],
+            "quietLowLoadSuppression": base["quietLowLoadSuppressionActivation"],
+        }
+        candidate_supports = v18_competitor_gap_apply_supports(
+            curve,
+            base["baseSupport2"],
+            completion_beta,
+            suppression_beta,
+            activations,
+        )
+        candidate = v18_competitor_support_score(curve, candidate_supports)
+        branch_hits = []
+        if completion_beta > 0.0 and parse_float(base["quietLowLoadCompletionActivation"], 0.0) >= 0.05:
+            branch_hits.append("quietLowLoadCompletion")
+        if suppression_beta > 0.0 and parse_float(base["quietLowLoadSuppressionActivation"], 0.0) >= 0.05:
+            branch_hits.append("quietLowLoadSuppression")
+        rows.append(
+            {
+                **{key: value for key, value in base.items() if key != "baseSupport2"},
+                "completionBeta": completion_beta,
+                "suppressionBeta": suppression_beta,
+                "candidateRmse": candidate["rmse"],
+                "candidateMinusV18_30KmS": candidate["rmse"] - parse_float(base["v18_30Rmse"]),
+                "candidateGainVsV18_30Pct": pct_improvement(parse_float(base["v18_30Rmse"]), candidate["rmse"]),
+                "candidateGainVsCanonicalPct": pct_improvement(parse_float(base["canonicalRmse"]), candidate["rmse"]),
+                "candidateRoute": candidate["candidateRoute"],
+                "routeChangedVsV18_30": candidate["candidateRoute"] != v18_competitor_support_score(curve, base["baseSupport2"])["candidateRoute"],
+                "branchHits": "; ".join(branch_hits),
+                "support2": candidate_supports,
+            }
+        )
+    return rows
+
+
+def v18_competitor_gap_metric(rows: list[dict]) -> dict:
+    clean_rows = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+    target_rows = [row for row in clean_rows if parse_bool(row["targetProtectedNfwGap"])]
+    high_rows = [row for row in clean_rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [row for row in clean_rows if row["set"] == "clean-protected"]
+    active_rows = [row for row in clean_rows if parse_float(row["anyActivation"], 0.0) >= 0.05]
+    target_gain = pct_improvement(
+        safe_mean(parse_float(row["v18_30Rmse"]) for row in target_rows),
+        safe_mean(parse_float(row["candidateRmse"]) for row in target_rows),
+    )
+    high_mean = safe_mean(parse_float(row["candidateRmse"]) for row in high_rows)
+    clean_gain = pct_improvement(
+        safe_mean(parse_float(row["canonicalRmse"]) for row in clean_rows),
+        safe_mean(parse_float(row["candidateRmse"]) for row in clean_rows),
+    )
+    return {
+        "cleanCount": len(clean_rows),
+        "targetProtectedGapCount": len(target_rows),
+        "activeCleanCount": len(active_rows),
+        "activeProtectedCount": sum(1 for row in active_rows if row["set"] == "clean-protected"),
+        "activeHighCount": sum(1 for row in active_rows if row["set"] == "clean-high-rmse"),
+        "targetGainVsV18_30Pct": target_gain,
+        "targetGainVsV18_30KmS": safe_mean(parse_float(row["v18_30Rmse"]) - parse_float(row["candidateRmse"]) for row in target_rows),
+        "cleanGainVsCanonicalPct": clean_gain,
+        "candidateHighMeanRmse": high_mean,
+        "highAbove20Count": sum(1 for row in high_rows if parse_float(row["candidateRmse"]) >= 20.0),
+        "highMaxRegressionVsV18_30KmS": max([parse_float(row["candidateRmse"]) - parse_float(row["v18_30Rmse"]) for row in high_rows] or [0.0]),
+        "protectedMaxRegressionVsV18_30KmS": max([parse_float(row["candidateRmse"]) - parse_float(row["v18_30Rmse"]) for row in protected_rows] or [0.0]),
+        "routeChangedCount": sum(1 for row in clean_rows if parse_bool(row["routeChangedVsV18_30"])),
+    }
+
+
+def v18_competitor_gap_null_rows(
+    base_rows: list[dict],
+    selected_completion: float,
+    selected_suppression: float,
+    selected_rows: list[dict],
+) -> list[dict]:
+    clean_rows = [row for row in base_rows if row["set"] != "weak-systematics-excluded"]
+    curves_by_name = {build_curve(sample)["name"]: build_curve(sample) for sample in load_samples()}
+    completion_active = [row for row in selected_rows if parse_float(row["quietLowLoadCompletionActivation"], 0.0) >= 0.05 and selected_completion > 0.0]
+    suppression_active = [row for row in selected_rows if parse_float(row["quietLowLoadSuppressionActivation"], 0.0) >= 0.05 and selected_suppression > 0.0]
+    completion_values = sorted([parse_float(row["quietLowLoadCompletionActivation"], 0.0) for row in completion_active], reverse=True)
+    suppression_values = sorted([parse_float(row["quietLowLoadSuppressionActivation"], 0.0) for row in suppression_active], reverse=True)
+    rows: list[dict] = []
+    for seed in V18_COMPETITOR_GAP_SEEDS:
+        rng = random.Random(seed)
+        names = [row["galaxy"] for row in clean_rows]
+        completion_names = set(rng.sample(names, min(len(names), len(completion_values)))) if completion_values else set()
+        remaining = [name for name in names if name not in completion_names]
+        suppression_names = set(rng.sample(remaining or names, min(len(remaining or names), len(suppression_values)))) if suppression_values else set()
+        completion_by_name = {
+            name: completion_values[index % len(completion_values)]
+            for index, name in enumerate(sorted(completion_names))
+        } if completion_values else {}
+        suppression_by_name = {
+            name: suppression_values[index % len(suppression_values)]
+            for index, name in enumerate(sorted(suppression_names))
+        } if suppression_values else {}
+        trial_rows: list[dict] = []
+        for base in base_rows:
+            curve = curves_by_name[base["galaxy"]]
+            comp_act = completion_by_name.get(base["galaxy"], 0.0)
+            supp_act = suppression_by_name.get(base["galaxy"], 0.0)
+            candidate_supports = v18_competitor_gap_apply_supports(
+                curve,
+                base["baseSupport2"],
+                selected_completion,
+                selected_suppression,
+                {
+                    "quietLowLoadCompletion": comp_act,
+                    "quietLowLoadSuppression": supp_act,
+                },
+            )
+            candidate = v18_competitor_support_score(curve, candidate_supports)
+            trial_rows.append(
+                {
+                    **{key: value for key, value in base.items() if key != "baseSupport2"},
+                    "candidateRmse": candidate["rmse"],
+                    "candidateRoute": candidate["candidateRoute"],
+                    "routeChangedVsV18_30": False,
+                }
+            )
+        metric = v18_competitor_gap_metric(trial_rows)
+        rows.append(
+            {
+                "nullId": f"same-active-random-{seed}",
+                "completionActiveCount": len(completion_values),
+                "suppressionActiveCount": len(suppression_values),
+                **metric,
+            }
+        )
+    return rows
+
+
+def write_v18_competitor_gap_candidate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_competitor_gap_candidate"
+    base_rows = v18_competitor_gap_base_rows()
+    score_rows: list[dict] = []
+    trial_cache: dict[tuple[float, float], list[dict]] = {}
+    for completion_beta in V18_COMPETITOR_GAP_COMPLETION_GRID:
+        for suppression_beta in V18_COMPETITOR_GAP_SUPPRESSION_GRID:
+            rows = v18_competitor_gap_score_rows(base_rows, completion_beta, suppression_beta)
+            trial_cache[(completion_beta, suppression_beta)] = rows
+            score_rows.append(
+                {
+                    "completionBeta": completion_beta,
+                    "suppressionBeta": suppression_beta,
+                    **v18_competitor_gap_metric(rows),
+                }
+            )
+    viable = [
+        row for row in score_rows
+        if parse_float(row["protectedMaxRegressionVsV18_30KmS"], 999) <= 3.0
+        and parse_float(row["highMaxRegressionVsV18_30KmS"], 999) <= 3.0
+        and parse_float(row["highAbove20Count"], 999) == 0
+        and parse_float(row["routeChangedCount"], 999) == 0
+    ]
+    selected = max(
+        viable or score_rows,
+        key=lambda row: (
+            parse_float(row["targetGainVsV18_30Pct"], -999),
+            parse_float(row["cleanGainVsCanonicalPct"], -999),
+            -parse_float(row["protectedMaxRegressionVsV18_30KmS"], 999),
+        ),
+    )
+    selected_key = (parse_float(selected["completionBeta"], 0.0), parse_float(selected["suppressionBeta"], 0.0))
+    selected_case_rows = trial_cache[selected_key]
+    null_rows = v18_competitor_gap_null_rows(base_rows, selected_key[0], selected_key[1], selected_case_rows)
+    best_null_target = max([parse_float(row["targetGainVsV18_30Pct"], -999) for row in null_rows] or [-999])
+    null_margin = parse_float(selected["targetGainVsV18_30Pct"], -999) - best_null_target
+    passes = {
+        "targetGainAtLeast8Pct": parse_float(selected["targetGainVsV18_30Pct"], 0.0) >= 8.0,
+        "cleanGainDoesNotFall": parse_float(selected["cleanGainVsCanonicalPct"], -999) >= 45.0,
+        "highAbove20Zero": parse_float(selected["highAbove20Count"], 999) == 0,
+        "highMaxRegressionBelow3": parse_float(selected["highMaxRegressionVsV18_30KmS"], 999) <= 3.0,
+        "protectedMaxRegressionBelow3": parse_float(selected["protectedMaxRegressionVsV18_30KmS"], 999) <= 3.0,
+        "routeChangesZero": parse_float(selected["routeChangedCount"], 999) == 0,
+        "beatsSameActiveNullBy10Pct": null_margin >= 10.0,
+    }
+    verdict = "v18.31 competitor-gap candidate for review" if all(passes.values()) else "competitor-gap branch not promoted"
+    formula = {
+        "candidateId": "observed-state-response-v18.31-competitor-gap-candidate",
+        "baseLaw": "locked v18.30 release candidate",
+        "lawChanged": False,
+        "selectedCompletionBeta": selected_key[0],
+        "selectedSuppressionBeta": selected_key[1],
+        "mechanism": "two-direction radial support reshape for clean protected NFW-gap cases",
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE lookup", "NFW parameters as formula input", "weak/systematics cases"],
+        "status": verdict,
+    }
+    branch_rows = []
+    for row in selected_case_rows:
+        if parse_float(row["anyActivation"], 0.0) >= 0.05 or parse_bool(row["targetProtectedNfwGap"]):
+            branch_rows.append(
+                {
+                    "galaxy": row["galaxy"],
+                    "set": row["set"],
+                    "lockedRoute": row["lockedRoute"],
+                    "targetProtectedNfwGap": row["targetProtectedNfwGap"],
+                    "branchHits": row["branchHits"],
+                    "completionActivation": row["quietLowLoadCompletionActivation"],
+                    "suppressionActivation": row["quietLowLoadSuppressionActivation"],
+                    "v18_30Rmse": row["v18_30Rmse"],
+                    "candidateRmse": row["candidateRmse"],
+                    "deltaKmS": row["candidateMinusV18_30KmS"],
+                    "nfwGapKmS": row["v18_30MinusNfwPriorKmS"],
+                }
+            )
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", [{key: value for key, value in row.items() if key != "support2"} for row in selected_case_rows])
+    write_csv(out_dir / f"{prefix}_branch_ledger.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.31 Competitor-Gap Candidate",
+        "",
+        "This mode keeps v18.30 locked and tests a two-direction state/profile support reshape against clean protected cases where the NFW-prior ceiling still has a large RMSE gap. It does not update the browser law.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Selected completion beta: `{fmt(selected_key[0])}`.",
+        f"- Selected suppression beta: `{fmt(selected_key[1])}`.",
+        f"- Target protected NFW-gap count: `{selected['targetProtectedGapCount']}`.",
+        f"- Target gain vs v18.30: `{fmt(selected['targetGainVsV18_30Pct'])}%`.",
+        f"- Clean gain vs canonical: `{fmt(selected['cleanGainVsCanonicalPct'])}%`.",
+        f"- High above 20 count: `{selected['highAbove20Count']}`.",
+        f"- High max regression vs v18.30: `{fmt(selected['highMaxRegressionVsV18_30KmS'])} km/s`.",
+        f"- Protected max regression vs v18.30: `{fmt(selected['protectedMaxRegressionVsV18_30KmS'])} km/s`.",
+        f"- Route changes: `{selected['routeChangedCount']}`.",
+        f"- Best same-active null target gain: `{fmt(best_null_target)}%`; margin `{fmt(null_margin)} points`.",
+        "",
+        "## Branch Hits",
+        "",
+        "| Galaxy | Set | Target | Branches | v18.30 | Candidate | Delta |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: |",
+    ]
+    for row in sorted(branch_rows, key=lambda item: parse_float(item["deltaKmS"], 0.0)):
+        report.append(
+            f"| {row['galaxy']} | {row['set']} | {row['targetProtectedNfwGap']} | {row['branchHits']} | {fmt(row['v18_30Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['deltaKmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Gate Status",
+            "",
+            "| Gate | Pass |",
+            "| --- | --- |",
+        ]
+    )
+    for key, value in passes.items():
+        report.append(f"| {key} | {value} |")
+    report.extend(
+        [
+            "",
+            "The branch is only promotable if it improves the protected NFW-gap pocket and beats same-active random placement while preserving the locked high-RMSE repairs.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-competitor-gap-candidate-v1",
+        "verdict": verdict,
+        "summary": {
+            **selected,
+            "bestSameActiveNullTargetGainPct": best_null_target,
+            "nullMarginTargetPct": null_margin,
+            "passes": passes,
+            "weakSystematicsLeakage": 0,
+            "lawChanged": False,
+        },
+        "formula": formula,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_branch_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18competitorgapcandidate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_COMPETITOR_GAP_CANDIDATE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_competitor_gap_candidate_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.31 competitor-gap candidate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"target_gain={fmt(summary['targetGainVsV18_30Pct'])}%",
+                f"clean_gain={fmt(summary['cleanGainVsCanonicalPct'])}%",
+                f"high_reg={fmt(summary['highMaxRegressionVsV18_30KmS'])}",
+                f"protected_reg={fmt(summary['protectedMaxRegressionVsV18_30KmS'])}",
+                f"null_margin={fmt(summary['nullMarginTargetPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18.31 competitor-gap candidate to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -90046,6 +90521,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18competitorbenchmark",
             "v18competitorbenchmarkv2",
             "observedstatev18competitorbenchmarkv2",
+            "v18competitorgapcandidate",
+            "observedstatev18competitorgapcandidate",
             "v18lawspec",
             "observedstatev18lawspec",
             "v18competitorfigures",
@@ -90392,6 +90869,8 @@ def main() -> None:
         cmd_v18competitorbenchmark(args)
     elif args.mode in {"v18competitorbenchmarkv2", "observedstatev18competitorbenchmarkv2"}:
         cmd_v18competitorbenchmarkv2(args)
+    elif args.mode in {"v18competitorgapcandidate", "observedstatev18competitorgapcandidate"}:
+        cmd_v18competitorgapcandidate(args)
     elif args.mode in {"v18lawspec", "observedstatev18lawspec"}:
         cmd_v18lawspec(args)
     elif args.mode in {"v18competitorfigures", "observedstatev18competitorfigures"}:
