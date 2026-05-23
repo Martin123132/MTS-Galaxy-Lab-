@@ -184,6 +184,7 @@ DEFAULT_OBSERVED_STATE_V18_RELEASE_LOCK_FINAL_OUT = OUTPUT_PACK_ROOT / "mts-obse
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-benchmark-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_V2_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-benchmark-v2"
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_GAP_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-gap-candidate-v1"
+DEFAULT_OBSERVED_STATE_V18_GAP_PROVENANCE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-gap-provenance-stress-v1"
 DEFAULT_OBSERVED_STATE_V18_LAW_SPEC_OUT = OUTPUT_PACK_ROOT / "mts-v18-law-spec-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_FIGURES_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-figures-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_GAP_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-gap-audit-v1"
@@ -77505,6 +77506,364 @@ def cmd_v18competitorgapcandidate(args: argparse.Namespace) -> None:
     print(f"Wrote v18.31 competitor-gap candidate to {out_dir.resolve()}")
 
 
+V18_GAP_PROVENANCE_ML_DISK_GRID = [0.30, 0.40, 0.50, 0.60, 0.70]
+V18_GAP_PROVENANCE_ML_BULGE_GRID = [0.50, 0.70, 0.90]
+V18_GAP_PROVENANCE_VOBS_GRID = [0.94, 0.97, 1.00, 1.03, 1.06]
+V18_GAP_PROVENANCE_GAS_GRID = [0.80, 0.90, 1.00, 1.10, 1.20]
+V18_GAP_PROVENANCE_BARYON_GRID = [0.85, 0.925, 1.00, 1.075, 1.15]
+
+
+def v18_gap_provenance_transform(
+    curve: dict,
+    *,
+    ml_disk: float | None = None,
+    ml_bulge: float | None = None,
+    vobs_scale: float = 1.0,
+    gas_scale: float = 1.0,
+    baryon_velocity_scale: float = 1.0,
+) -> dict:
+    rows = []
+    for point in curve["points"]:
+        rows.append(
+            {
+                "r": point["r"],
+                "vObs": point["vObs"] * vobs_scale,
+                "err": point["err"] * abs(vobs_scale),
+                "vGas": point["vGas"] * gas_scale * baryon_velocity_scale,
+                "vDisk": point["vDisk"] * baryon_velocity_scale,
+                "vBulge": point["vBulge"] * baryon_velocity_scale,
+                "sbDisk": point["sbDisk"],
+                "sbBulge": point["sbBulge"],
+            }
+        )
+    return build_curve_from_rows(
+        curve["name"],
+        rows,
+        curve["distanceMpc"],
+        ml_disk=curve["mlDisk"] if ml_disk is None else ml_disk,
+        ml_bulge=curve["mlBulge"] if ml_bulge is None else ml_bulge,
+    )
+
+
+def v18_gap_provenance_score(curve: dict, support2: list[float]) -> dict:
+    residuals = []
+    weighted2 = []
+    sigmas = []
+    for point, support in zip(curve["points"], support2):
+        model = math.sqrt(max(0.0, point["bar2"] + max(0.0, support)))
+        residual = model - point["vObs"]
+        sigma = max(ERR_FLOOR, abs(point.get("err", ERR_FLOOR)))
+        residuals.append(residual)
+        weighted2.append((residual / sigma) ** 2)
+        sigmas.append(sigma)
+    rmse = rmse_from_residuals(residuals)
+    weighted_unit = math.sqrt(safe_mean(weighted2))
+    median_sigma = safe_median(sigmas)
+    return {
+        "rmse": rmse,
+        "weightedUnitRmse": weighted_unit,
+        "weightedEquivalentKmS": weighted_unit * median_sigma if math.isfinite(weighted_unit) and math.isfinite(median_sigma) else math.nan,
+        "medianSigma": median_sigma,
+        "meanResidualKmS": safe_mean(residuals),
+        "outerMeanResidualKmS": safe_mean(
+            residual
+            for residual, point in zip(residuals, curve["points"])
+            if parse_float(point.get("x"), 0.0) >= 0.66
+        ),
+    }
+
+
+def v18_gap_provenance_trial_rows_for_case(curve: dict, support2: list[float], base_row: dict) -> list[dict]:
+    trials: list[dict] = []
+    base_rmse = parse_float(base_row["v18_30_releaseRmse"])
+    nfw_rmse = parse_float(base_row["nfw_concentration_priorRmse"])
+
+    def add_trial(kind: str, params: dict, variant: dict) -> None:
+        scored = v18_gap_provenance_score(variant, support2)
+        closure = base_rmse - scored["rmse"]
+        gap = base_rmse - nfw_rmse
+        trials.append(
+            {
+                "galaxy": curve["name"],
+                "set": base_row["set"],
+                "lockedRoute": base_row["lockedRoute"],
+                "targetProtectedNfwGap": base_row["set"] == "clean-protected"
+                and parse_float(base_row["v18_30MinusNfwPriorKmS"], -999) >= V18_COMPETITOR_GAP_TARGET_THRESHOLD_KMS,
+                "stressKind": kind,
+                "params": stress_params_text(params),
+                "v18_30Rmse": base_rmse,
+                "nfwPriorRmse": nfw_rmse,
+                "stressedRmse": scored["rmse"],
+                "weightedEquivalentKmS": scored["weightedEquivalentKmS"],
+                "weightedUnitRmse": scored["weightedUnitRmse"],
+                "medianSigma": scored["medianSigma"],
+                "meanResidualKmS": scored["meanResidualKmS"],
+                "outerMeanResidualKmS": scored["outerMeanResidualKmS"],
+                "rmseDeltaVsV18_30KmS": scored["rmse"] - base_rmse,
+                "gapClosureKmS": closure,
+                "gapClosurePct": 100.0 * closure / gap if gap > 1e-9 else math.nan,
+                "beatsNfwPrior": scored["rmse"] <= nfw_rmse,
+            }
+        )
+
+    add_trial("locked-v18.30", {"baseline": True}, curve)
+    for vobs_scale in V18_GAP_PROVENANCE_VOBS_GRID:
+        add_trial(
+            "velocity-scale",
+            {"vObsScale": vobs_scale},
+            v18_gap_provenance_transform(curve, vobs_scale=vobs_scale),
+        )
+    for ml_disk in V18_GAP_PROVENANCE_ML_DISK_GRID:
+        for ml_bulge in V18_GAP_PROVENANCE_ML_BULGE_GRID:
+            add_trial(
+                "disk-bulge-ML",
+                {"mlDisk": ml_disk, "mlBulge": ml_bulge},
+                v18_gap_provenance_transform(curve, ml_disk=ml_disk, ml_bulge=ml_bulge),
+            )
+    for gas_scale in V18_GAP_PROVENANCE_GAS_GRID:
+        add_trial(
+            "gas-scale",
+            {"gasVelocityScale": gas_scale},
+            v18_gap_provenance_transform(curve, gas_scale=gas_scale),
+        )
+    for baryon_scale in V18_GAP_PROVENANCE_BARYON_GRID:
+        add_trial(
+            "baryon-scale",
+            {"baryonVelocityScale": baryon_scale},
+            v18_gap_provenance_transform(curve, baryon_velocity_scale=baryon_scale),
+        )
+    # This is not a model refit: it asks whether large quoted velocity errors already downweight the apparent gap.
+    weighted = v18_gap_provenance_score(curve, support2)
+    gap = base_rmse - nfw_rmse
+    weighted_closure = base_rmse - weighted["weightedEquivalentKmS"]
+    trials.append(
+        {
+            "galaxy": curve["name"],
+            "set": base_row["set"],
+            "lockedRoute": base_row["lockedRoute"],
+            "targetProtectedNfwGap": base_row["set"] == "clean-protected"
+            and parse_float(base_row["v18_30MinusNfwPriorKmS"], -999) >= V18_COMPETITOR_GAP_TARGET_THRESHOLD_KMS,
+            "stressKind": "error-weighting",
+            "params": stress_params_text({"errFloor": ERR_FLOOR, "score": "weightedEquivalentKmS"}),
+            "v18_30Rmse": base_rmse,
+            "nfwPriorRmse": nfw_rmse,
+            "stressedRmse": weighted["weightedEquivalentKmS"],
+            "weightedEquivalentKmS": weighted["weightedEquivalentKmS"],
+            "weightedUnitRmse": weighted["weightedUnitRmse"],
+            "medianSigma": weighted["medianSigma"],
+            "meanResidualKmS": weighted["meanResidualKmS"],
+            "outerMeanResidualKmS": weighted["outerMeanResidualKmS"],
+            "rmseDeltaVsV18_30KmS": weighted["weightedEquivalentKmS"] - base_rmse,
+            "gapClosureKmS": weighted_closure,
+            "gapClosurePct": 100.0 * weighted_closure / gap if gap > 1e-9 else math.nan,
+            "beatsNfwPrior": weighted["weightedEquivalentKmS"] <= nfw_rmse,
+        }
+    )
+    return trials
+
+
+def v18_gap_provenance_best_case_rows(trial_rows: list[dict]) -> list[dict]:
+    grouped: dict[str, list[dict]] = {}
+    for row in trial_rows:
+        grouped.setdefault(row["galaxy"], []).append(row)
+    rows = []
+    for name, items in sorted(grouped.items()):
+        baseline = next((row for row in items if row["stressKind"] == "locked-v18.30"), items[0])
+        model_trials = [row for row in items if row["stressKind"] not in {"locked-v18.30", "error-weighting"}]
+        best_model = min(model_trials or items, key=lambda row: parse_float(row["stressedRmse"], math.inf))
+        error_trial = next((row for row in items if row["stressKind"] == "error-weighting"), {})
+        best_any = min([best_model, error_trial] if error_trial else [best_model], key=lambda row: parse_float(row["stressedRmse"], math.inf))
+        best_kind = best_any.get("stressKind", "")
+        closure_pct = parse_float(best_any.get("gapClosurePct"), math.nan)
+        if parse_bool(best_any.get("beatsNfwPrior")) or closure_pct >= 70.0:
+            interpretation = "provenance-sensitive gap"
+        elif closure_pct >= 30.0:
+            interpretation = "partly provenance-sensitive"
+        else:
+            interpretation = "gap survives local provenance stress"
+        rows.append(
+            {
+                "galaxy": name,
+                "set": baseline["set"],
+                "lockedRoute": baseline["lockedRoute"],
+                "targetProtectedNfwGap": baseline["targetProtectedNfwGap"],
+                "v18_30Rmse": baseline["v18_30Rmse"],
+                "nfwPriorRmse": baseline["nfwPriorRmse"],
+                "nfwGapKmS": parse_float(baseline["v18_30Rmse"]) - parse_float(baseline["nfwPriorRmse"]),
+                "bestModelStressKind": best_model["stressKind"],
+                "bestModelParams": best_model["params"],
+                "bestModelRmse": best_model["stressedRmse"],
+                "bestModelGapClosurePct": best_model["gapClosurePct"],
+                "errorWeightedEquivalentKmS": error_trial.get("stressedRmse", ""),
+                "errorWeightedGapClosurePct": error_trial.get("gapClosurePct", ""),
+                "bestAnyStressKind": best_kind,
+                "bestAnyParams": best_any.get("params", ""),
+                "bestAnyRmse": best_any.get("stressedRmse", ""),
+                "bestAnyGapClosurePct": best_any.get("gapClosurePct", ""),
+                "interpretation": interpretation,
+            }
+        )
+    return rows
+
+
+def v18_gap_provenance_summary_rows(case_rows: list[dict], trial_rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    target_rows = [row for row in case_rows if parse_bool(row["targetProtectedNfwGap"])]
+    kind_rows: list[dict] = []
+    for kind in sorted({row["stressKind"] for row in trial_rows if row["stressKind"] != "locked-v18.30"}):
+        best_by_case = []
+        for case in target_rows:
+            items = [row for row in trial_rows if row["galaxy"] == case["galaxy"] and row["stressKind"] == kind]
+            if items:
+                best_by_case.append(min(items, key=lambda row: parse_float(row["stressedRmse"], math.inf)))
+        kind_rows.append(
+            {
+                "stressKind": kind,
+                "targetCaseCount": len(best_by_case),
+                "meanRmse": safe_mean(parse_float(row["stressedRmse"]) for row in best_by_case),
+                "meanGapClosurePct": safe_mean(parse_float(row["gapClosurePct"]) for row in best_by_case),
+                "casesBeatingNfwPrior": sum(1 for row in best_by_case if parse_bool(row["beatsNfwPrior"])),
+                "casesClosing70Pct": sum(1 for row in best_by_case if parse_float(row["gapClosurePct"], -999) >= 70.0),
+                "casesClosing30Pct": sum(1 for row in best_by_case if parse_float(row["gapClosurePct"], -999) >= 30.0),
+            }
+        )
+    target_summary = [
+        {
+            "group": "target-protected-nfw-gap",
+            "caseCount": len(target_rows),
+            "v18_30MeanRmse": safe_mean(parse_float(row["v18_30Rmse"]) for row in target_rows),
+            "nfwPriorMeanRmse": safe_mean(parse_float(row["nfwPriorRmse"]) for row in target_rows),
+            "bestModelStressMeanRmse": safe_mean(parse_float(row["bestModelRmse"]) for row in target_rows),
+            "bestAnyStressMeanRmse": safe_mean(parse_float(row["bestAnyRmse"]) for row in target_rows),
+            "bestAnyMeanGapClosurePct": safe_mean(parse_float(row["bestAnyGapClosurePct"]) for row in target_rows),
+            "provenanceSensitiveCount": sum(1 for row in target_rows if row["interpretation"] == "provenance-sensitive gap"),
+            "partlyProvenanceSensitiveCount": sum(1 for row in target_rows if row["interpretation"] == "partly provenance-sensitive"),
+            "gapSurvivesCount": sum(1 for row in target_rows if row["interpretation"] == "gap survives local provenance stress"),
+        }
+    ]
+    return target_summary, kind_rows
+
+
+def write_v18_gap_provenance_stress_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_gap_provenance"
+    artifact = v18_competitor_gap_artifact()
+    benchmark_rows = v18_competitor_gap_benchmark_rows()
+    curves_by_name = {build_curve(sample)["name"]: build_curve(sample) for sample in load_samples()}
+    trial_rows: list[dict] = []
+    for name, base_row in sorted(benchmark_rows.items()):
+        if base_row.get("set") == "weak-systematics-excluded":
+            continue
+        nfw_gap = parse_float(base_row.get("v18_30MinusNfwPriorKmS"), -999.0)
+        target = base_row.get("set") == "clean-protected" and nfw_gap >= V18_COMPETITOR_GAP_TARGET_THRESHOLD_KMS
+        near_high = base_row.get("set") == "clean-high-rmse" and nfw_gap >= 1.0
+        if not (target or near_high):
+            continue
+        curve = curves_by_name.get(name)
+        support2 = artifact.get("curves", {}).get(name, {}).get("support2", [])
+        if curve and support2:
+            trial_rows.extend(v18_gap_provenance_trial_rows_for_case(curve, [parse_float(value) for value in support2], base_row))
+    case_rows = v18_gap_provenance_best_case_rows(trial_rows)
+    target_summary, kind_summary = v18_gap_provenance_summary_rows(case_rows, trial_rows)
+    target = target_summary[0] if target_summary else {}
+    sensitive_count = int(parse_float(target.get("provenanceSensitiveCount"), 0.0))
+    partial_count = int(parse_float(target.get("partlyProvenanceSensitiveCount"), 0.0))
+    target_count = int(parse_float(target.get("caseCount"), 0.0))
+    if target_count and sensitive_count + partial_count >= math.ceil(0.5 * target_count):
+        verdict = "NFW gap is provenance-sensitive enough to pause law search"
+    elif target_count and parse_float(target.get("bestAnyMeanGapClosurePct"), 0.0) >= 20.0:
+        verdict = "NFW gap partly provenance-sensitive; external variables needed"
+    else:
+        verdict = "NFW gap survives simple provenance stress"
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_stress_trials.csv", trial_rows)
+    write_csv(out_dir / f"{prefix}_target_summary.csv", target_summary)
+    write_csv(out_dir / f"{prefix}_kind_summary.csv", kind_summary)
+    report = [
+        "# MTS v18 Gap Provenance Stress",
+        "",
+        "This mode keeps the locked v18.30 support cache fixed and asks whether the remaining NFW-prior gaps are sensitive to local observational/provenance degrees of freedom. It does not change the framework law.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Target protected NFW-gap cases: `{target.get('caseCount', 0)}`.",
+        f"- v18.30 target mean RMSE: `{fmt(parse_float(target.get('v18_30MeanRmse')))} km/s`.",
+        f"- NFW-prior target mean RMSE: `{fmt(parse_float(target.get('nfwPriorMeanRmse')))} km/s`.",
+        f"- Best model-stress target mean RMSE: `{fmt(parse_float(target.get('bestModelStressMeanRmse')))} km/s`.",
+        f"- Best any-stress target mean RMSE: `{fmt(parse_float(target.get('bestAnyStressMeanRmse')))} km/s`.",
+        f"- Best any-stress mean gap closure: `{fmt(parse_float(target.get('bestAnyMeanGapClosurePct')))}%`.",
+        f"- Provenance-sensitive: `{target.get('provenanceSensitiveCount', 0)}`; partly sensitive: `{target.get('partlyProvenanceSensitiveCount', 0)}`; survives: `{target.get('gapSurvivesCount', 0)}`.",
+        "",
+        "## Stress Kinds",
+        "",
+        "| Stress | Mean RMSE | Mean gap closure | Beats NFW | >=70% closure | >=30% closure |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in kind_summary:
+        report.append(
+            f"| {row['stressKind']} | {fmt(row['meanRmse'])} | {fmt(row['meanGapClosurePct'])}% | {row['casesBeatingNfwPrior']} | {row['casesClosing70Pct']} | {row['casesClosing30Pct']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Target Cases",
+            "",
+            "| Galaxy | Route | v18.30 | NFW prior | Best stress | Best RMSE | Closure | Interpretation |",
+            "| --- | --- | ---: | ---: | --- | ---: | ---: | --- |",
+        ]
+    )
+    for row in [item for item in case_rows if parse_bool(item["targetProtectedNfwGap"])]:
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | {fmt(row['v18_30Rmse'])} | {fmt(row['nfwPriorRmse'])} | {row['bestAnyStressKind']} | {fmt(row['bestAnyRmse'])} | {fmt(row['bestAnyGapClosurePct'])}% | {row['interpretation']} |"
+        )
+    report.extend(
+        [
+            "",
+            "A provenance stress result can explain a competitor gap, but it cannot become a hidden transport-law correction. Any future law still needs pre-residual physical variables and holdout/null gates.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-gap-provenance-stress-v1",
+        "verdict": verdict,
+        "summary": {
+            **(target_summary[0] if target_summary else {}),
+            "weakSystematicsLeakage": 0,
+            "lawChanged": False,
+        },
+        "outputFiles": [
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_stress_trials.csv",
+            f"{prefix}_target_summary.csv",
+            f"{prefix}_kind_summary.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18gapprovenancestress(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_GAP_PROVENANCE_STRESS_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_gap_provenance_stress_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18 gap provenance stress")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"targets={summary.get('caseCount', 0)}",
+                f"best_any_mean={fmt(parse_float(summary.get('bestAnyStressMeanRmse')))}",
+                f"closure={fmt(parse_float(summary.get('bestAnyMeanGapClosurePct')))}%",
+                f"sensitive={summary.get('provenanceSensitiveCount', 0)}",
+                f"survives={summary.get('gapSurvivesCount', 0)}",
+            ]
+        )
+    )
+    print(f"Wrote v18 gap provenance stress to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -90523,6 +90882,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18competitorbenchmarkv2",
             "v18competitorgapcandidate",
             "observedstatev18competitorgapcandidate",
+            "v18gapprovenancestress",
+            "observedstatev18gapprovenancestress",
             "v18lawspec",
             "observedstatev18lawspec",
             "v18competitorfigures",
@@ -90871,6 +91232,8 @@ def main() -> None:
         cmd_v18competitorbenchmarkv2(args)
     elif args.mode in {"v18competitorgapcandidate", "observedstatev18competitorgapcandidate"}:
         cmd_v18competitorgapcandidate(args)
+    elif args.mode in {"v18gapprovenancestress", "observedstatev18gapprovenancestress"}:
+        cmd_v18gapprovenancestress(args)
     elif args.mode in {"v18lawspec", "observedstatev18lawspec"}:
         cmd_v18lawspec(args)
     elif args.mode in {"v18competitorfigures", "observedstatev18competitorfigures"}:
