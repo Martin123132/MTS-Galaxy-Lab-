@@ -220,6 +220,7 @@ DEFAULT_OBSERVED_STATE_V18_ML_TABLE_HUNT_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-ta
 DEFAULT_OBSERVED_STATE_V18_ML_TABLE_HUNT_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-ml-table-hunt-v1")
 DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-catalog-benchmark-v1"
 DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-ml-catalog-benchmark-v1")
+DEFAULT_OBSERVED_STATE_V18_ML_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-sensitivity-discriminator-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -76635,6 +76636,400 @@ def cmd_v18mlcatalogbenchmark(args: argparse.Namespace) -> None:
     print(f"Wrote v18 M/L catalog benchmark to {out_dir.resolve()}")
 
 
+V18_ML_DISCRIMINATOR_FEATURES = [
+    "memoryLoad",
+    "uMax",
+    "uOut",
+    "LgapOverH",
+    "hOverRout",
+    "fGasOut",
+    "innerGasShare",
+    "midGasShare",
+    "outerGasShare",
+    "innerDiskShare",
+    "midDiskShare",
+    "outerDiskShare",
+    "innerBulgeShare",
+    "midBulgeShare",
+    "outerBulgeShare",
+    "barInnerOuter",
+    "barMidOuter",
+    "barCurv",
+    "pointDensity",
+    "route_low",
+    "route_single",
+]
+
+
+def v18_ml_discriminator_source_rows() -> list[dict]:
+    path = DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_OUT / "mts_v18_ml_catalog_case_ledger.csv"
+    if not path.exists():
+        write_v18_ml_catalog_benchmark_artifacts(
+            DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_OUT,
+            DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE,
+            True,
+        )
+    return read_csv_rows(path)
+
+
+def v18_ml_discriminator_case_rows() -> list[dict]:
+    source_rows = v18_ml_discriminator_source_rows()
+    by_name: dict[str, list[dict]] = {}
+    for row in source_rows:
+        by_name.setdefault(row["galaxy"], []).append(row)
+    curves_by_name = {build_curve(sample)["name"]: build_curve(sample) for sample in load_samples()}
+    rows: list[dict] = []
+    for name, items in sorted(by_name.items()):
+        curve = curves_by_name.get(name)
+        if not curve:
+            continue
+        best = min(items, key=lambda row: parse_float(row["v1830SourceDeltaVsNominalKmS"], math.inf))
+        worst = max(items, key=lambda row: parse_float(row["v1830SourceDeltaVsNominalKmS"], -math.inf))
+        set_name = best.get("set", "")
+        best_delta = parse_float(best["v1830SourceDeltaVsNominalKmS"])
+        worst_delta = parse_float(worst["v1830SourceDeltaVsNominalKmS"])
+        high_help = set_name == "clean-high-rmse" and best_delta <= -2.0
+        high_harm = set_name == "clean-high-rmse" and worst_delta >= 5.0
+        protected_harm = set_name == "clean-protected" and worst_delta >= 3.0
+        if high_help and high_harm:
+            label = "beneficial-but-fragile"
+        elif high_help:
+            label = "beneficial-high"
+        elif high_harm:
+            label = "harmful-high"
+        elif protected_harm:
+            label = "protected-harm"
+        else:
+            label = "neutral"
+        values = observed_state_values(curve)
+        row = {
+            "galaxy": name,
+            "set": set_name,
+            "split": best.get("split", ""),
+            "lockedRoute": best.get("lockedRouteNominal", ""),
+            "sourceMlSensitivityLabel": label,
+            "targetBeneficialHigh": high_help,
+            "riskHighHarm": high_harm,
+            "riskProtectedHarm": protected_harm,
+            "bestVariant": best["variantId"],
+            "bestSourceModel": best["sourceModel"],
+            "bestDeltaKmS": best_delta,
+            "bestYdisk": best["Ydisk"],
+            "bestYbul": best["Ybul"],
+            "worstVariant": worst["variantId"],
+            "worstSourceModel": worst["sourceModel"],
+            "worstDeltaKmS": worst_delta,
+            "worstYdisk": worst["Ydisk"],
+            "worstYbul": worst["Ybul"],
+            "sourceMlRangeKmS": worst_delta - best_delta,
+            "nominalV1830Rmse": best["nominalV1830Rmse"],
+            "nominalNfwPriorRmse": best["nominalNfwPriorRmse"],
+        }
+        for feature in V18_ML_DISCRIMINATOR_FEATURES:
+            row[feature] = values.get(feature, math.nan)
+        rows.append(row)
+    return rows
+
+
+def v18_ml_discriminator_group_contrast(case_rows: list[dict]) -> list[dict]:
+    groups = ["beneficial-high", "beneficial-but-fragile", "harmful-high", "protected-harm", "neutral"]
+    rows: list[dict] = []
+    for group in groups:
+        selected = [row for row in case_rows if row["sourceMlSensitivityLabel"] == group]
+        if not selected:
+            continue
+        summary = {
+            "group": group,
+            "count": len(selected),
+            "galaxies": "; ".join(row["galaxy"] for row in selected),
+            "meanBestDeltaKmS": safe_mean(parse_float(row["bestDeltaKmS"]) for row in selected),
+            "meanWorstDeltaKmS": safe_mean(parse_float(row["worstDeltaKmS"]) for row in selected),
+        }
+        for feature in V18_ML_DISCRIMINATOR_FEATURES:
+            summary[f"{feature}Mean"] = safe_mean(parse_float(row.get(feature)) for row in selected)
+            summary[f"{feature}Median"] = safe_median(parse_float(row.get(feature)) for row in selected)
+        rows.append(summary)
+    return rows
+
+
+def v18_ml_rule_active(row: dict, rule: dict) -> bool:
+    first = parse_float(row.get(rule["featureA"]))
+    if not math.isfinite(first):
+        return False
+    ok = first >= rule["thresholdA"] if rule["directionA"] == "ge" else first <= rule["thresholdA"]
+    feature_b = rule.get("featureB", "")
+    if feature_b:
+        second = parse_float(row.get(feature_b))
+        if not math.isfinite(second):
+            return False
+        ok = ok and (second >= rule["thresholdB"] if rule["directionB"] == "ge" else second <= rule["thresholdB"])
+    return ok
+
+
+def v18_ml_rule_metrics(rule: dict, rows: list[dict], split: str) -> dict:
+    selected = rows if split == "all" else [row for row in rows if row["split"] == split]
+    targets = [row for row in selected if parse_bool(row["targetBeneficialHigh"])]
+    high_risks = [row for row in selected if parse_bool(row["riskHighHarm"])]
+    protected_risks = [row for row in selected if parse_bool(row["riskProtectedHarm"])]
+    active = [row for row in selected if v18_ml_rule_active(row, rule)]
+    active_targets = [row for row in active if parse_bool(row["targetBeneficialHigh"])]
+    active_high_risk = [row for row in active if parse_bool(row["riskHighHarm"])]
+    active_protected_risk = [row for row in active if parse_bool(row["riskProtectedHarm"])]
+    active_protected = [row for row in active if row["set"] == "clean-protected"]
+    recall = len(active_targets) / len(targets) if targets else 0.0
+    precision = len(active_targets) / len(active) if active else 0.0
+    utility = len(active_targets) - 1.0 * len(active_high_risk) - 2.0 * len(active_protected_risk) - 0.25 * max(0, len(active_protected) - len(active_protected_risk))
+    return {
+        f"{split}ActiveCount": len(active),
+        f"{split}TargetCount": len(targets),
+        f"{split}TargetHitCount": len(active_targets),
+        f"{split}TargetRecall": recall,
+        f"{split}TargetPrecision": precision,
+        f"{split}HighRiskHitCount": len(active_high_risk),
+        f"{split}ProtectedRiskHitCount": len(active_protected_risk),
+        f"{split}ProtectedHitCount": len(active_protected),
+        f"{split}Utility": utility,
+        f"{split}ActiveTargets": "; ".join(row["galaxy"] for row in active_targets),
+        f"{split}ActiveRisks": "; ".join(row["galaxy"] for row in active if parse_bool(row["riskHighHarm"]) or parse_bool(row["riskProtectedHarm"])),
+    }
+
+
+def v18_ml_candidate_rule_pool(case_rows: list[dict]) -> list[dict]:
+    train_rows = [row for row in case_rows if row["split"] == "train" and row["set"] != "weak-systematics-excluded"]
+    rules: list[dict] = []
+    for feature in V18_ML_DISCRIMINATOR_FEATURES:
+        values = sorted({parse_float(row.get(feature)) for row in train_rows if math.isfinite(parse_float(row.get(feature)))})
+        if not values:
+            continue
+        thresholds = sorted({values[min(len(values) - 1, max(0, round((len(values) - 1) * q)))] for q in [0.2, 0.35, 0.5, 0.65, 0.8]})
+        for threshold in thresholds:
+            for direction in ["ge", "le"]:
+                rules.append(
+                    {
+                        "ruleId": f"{feature}_{direction}_{fmt_num(threshold).replace('-', 'm').replace('.', 'p')}",
+                        "ruleType": "one-variable",
+                        "featureA": feature,
+                        "directionA": direction,
+                        "thresholdA": threshold,
+                        "featureB": "",
+                        "directionB": "",
+                        "thresholdB": "",
+                    }
+                )
+    single_scored = []
+    for rule in rules:
+        scored = dict(rule)
+        scored.update(v18_ml_rule_metrics(rule, case_rows, "train"))
+        single_scored.append(scored)
+    top_singles = sorted(
+        single_scored,
+        key=lambda row: (
+            -parse_float(row["trainUtility"], -999),
+            -parse_float(row["trainTargetRecall"], 0.0),
+            parse_float(row["trainProtectedRiskHitCount"], 999),
+            parse_float(row["trainProtectedHitCount"], 999),
+        ),
+    )[:50]
+    two_rules: list[dict] = []
+    for i, left in enumerate(top_singles):
+        for right in top_singles[i + 1 :]:
+            if left["featureA"] == right["featureA"]:
+                continue
+            rule_id = f"{left['ruleId']}__AND__{right['ruleId']}"
+            two_rules.append(
+                {
+                    "ruleId": rule_id,
+                    "ruleType": "two-variable",
+                    "featureA": left["featureA"],
+                    "directionA": left["directionA"],
+                    "thresholdA": parse_float(left["thresholdA"]),
+                    "featureB": right["featureA"],
+                    "directionB": right["directionA"],
+                    "thresholdB": parse_float(right["thresholdA"]),
+                }
+            )
+    return rules + two_rules
+
+
+def v18_ml_discriminator_rule_rows(case_rows: list[dict]) -> list[dict]:
+    rows = []
+    for rule in v18_ml_candidate_rule_pool(case_rows):
+        scored = dict(rule)
+        for split in ["train", "holdout", "all"]:
+            scored.update(v18_ml_rule_metrics(rule, case_rows, split))
+        rows.append(scored)
+    rows.sort(
+        key=lambda row: (
+            -parse_float(row["trainUtility"], -999),
+            -parse_float(row["holdoutUtility"], -999),
+            parse_float(row["allProtectedRiskHitCount"], 999),
+            -parse_float(row["allTargetRecall"], 0.0),
+        )
+    )
+    return rows
+
+
+def v18_ml_discriminator_null_rows(case_rows: list[dict], rule_rows: list[dict]) -> list[dict]:
+    rng = random.Random(18037)
+    clean_rows = [row for row in case_rows if row["set"] != "weak-systematics-excluded"]
+    true_target_count = sum(1 for row in clean_rows if parse_bool(row["targetBeneficialHigh"]))
+    base_rules = [
+        {
+            "ruleId": row["ruleId"],
+            "ruleType": row["ruleType"],
+            "featureA": row["featureA"],
+            "directionA": row["directionA"],
+            "thresholdA": parse_float(row["thresholdA"]),
+            "featureB": row.get("featureB", ""),
+            "directionB": row.get("directionB", ""),
+            "thresholdB": parse_float(row.get("thresholdB"), math.nan) if row.get("thresholdB", "") != "" else "",
+        }
+        for row in rule_rows[:250]
+    ]
+    rows = []
+    for seed in range(64):
+        shuffled_names = set(rng.sample([row["galaxy"] for row in clean_rows], true_target_count))
+        shuffled = []
+        for row in case_rows:
+            item = dict(row)
+            item["targetBeneficialHigh"] = item["galaxy"] in shuffled_names
+            shuffled.append(item)
+        scored = []
+        for rule in base_rules:
+            item = dict(rule)
+            item.update(v18_ml_rule_metrics(rule, shuffled, "train"))
+            item.update(v18_ml_rule_metrics(rule, shuffled, "holdout"))
+            scored.append(item)
+        best = max(scored, key=lambda row: (parse_float(row["trainUtility"], -999), parse_float(row["holdoutUtility"], -999)))
+        rows.append(
+            {
+                "nullId": f"shuffled-target-{seed:02d}",
+                "targetCount": true_target_count,
+                "bestRuleId": best["ruleId"],
+                "trainUtility": best["trainUtility"],
+                "holdoutUtility": best["holdoutUtility"],
+                "holdoutTargetRecall": best["holdoutTargetRecall"],
+                "holdoutProtectedRiskHitCount": best["holdoutProtectedRiskHitCount"],
+            }
+        )
+    return rows
+
+
+def write_v18_ml_discriminator_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_ml_discriminator"
+    if not (DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_OUT / "mts_v18_ml_catalog_capsule.json").exists():
+        write_v18_ml_catalog_benchmark_artifacts(
+            DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_OUT,
+            DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE,
+            True,
+        )
+    case_rows = v18_ml_discriminator_case_rows()
+    group_rows = v18_ml_discriminator_group_contrast(case_rows)
+    rule_rows = v18_ml_discriminator_rule_rows(case_rows)
+    null_rows = v18_ml_discriminator_null_rows(case_rows, rule_rows)
+    best_rule = rule_rows[0] if rule_rows else {}
+    null_best_holdout = max([parse_float(row["holdoutUtility"], -999) for row in null_rows] or [-999])
+    serious = (
+        parse_float(best_rule.get("holdoutTargetRecall"), 0.0) >= 0.5
+        and parse_float(best_rule.get("holdoutProtectedRiskHitCount"), 999) == 0
+        and parse_float(best_rule.get("holdoutUtility"), -999) > null_best_holdout
+    )
+    verdict = "current state/profile M/L discriminator found" if serious else "M/L help/harm not safely separable"
+    summary = {
+        "analysisName": "mts-v18-ml-sensitivity-discriminator-v1",
+        "verdict": verdict,
+        "beneficialHighCount": sum(1 for row in case_rows if parse_bool(row["targetBeneficialHigh"])),
+        "highHarmCount": sum(1 for row in case_rows if parse_bool(row["riskHighHarm"])),
+        "protectedHarmCount": sum(1 for row in case_rows if parse_bool(row["riskProtectedHarm"])),
+        "bestRuleId": best_rule.get("ruleId", ""),
+        "bestRuleType": best_rule.get("ruleType", ""),
+        "bestHoldoutTargetRecall": best_rule.get("holdoutTargetRecall", ""),
+        "bestHoldoutUtility": best_rule.get("holdoutUtility", ""),
+        "bestHoldoutProtectedRiskHitCount": best_rule.get("holdoutProtectedRiskHitCount", ""),
+        "bestNullHoldoutUtility": null_best_holdout,
+        "lawChanged": False,
+        "weakSystematicsLeakage": 0,
+    }
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_group_contrast.csv", group_rows)
+    write_csv(out_dir / f"{prefix}_separator_rules.csv", rule_rows[:500])
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    report = [
+        "# MTS v18.30 M/L Sensitivity Discriminator",
+        "",
+        "This mode asks whether the galaxies helped by published source M/L values are separable from harmful/protected lookalikes using existing pre-residual MTS state/profile variables. It does not change v18.30.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Beneficial high-RMSE cases: `{summary['beneficialHighCount']}`.",
+        f"- High-RMSE harmed cases: `{summary['highHarmCount']}`.",
+        f"- Protected harmed cases: `{summary['protectedHarmCount']}`.",
+        f"- Best rule: `{summary['bestRuleId']}`.",
+        f"- Best holdout target recall: `{fmt(parse_float(summary['bestHoldoutTargetRecall']))}`.",
+        f"- Best holdout protected-risk hits: `{summary['bestHoldoutProtectedRiskHitCount']}`.",
+        f"- Best holdout utility: `{fmt(parse_float(summary['bestHoldoutUtility']))}`; best shuffled null: `{fmt(null_best_holdout)}`.",
+        "",
+        "## Group Contrast",
+        "",
+        "| Group | Count | Mean best delta | Mean worst delta | Galaxies |",
+        "| --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in group_rows:
+        report.append(f"| {row['group']} | {row['count']} | {fmt(row['meanBestDeltaKmS'])} | {fmt(row['meanWorstDeltaKmS'])} | {row['galaxies']} |")
+    report.extend(["", "## Top Rules", "", "| Rule | Type | Train utility | Holdout utility | Holdout recall | Protected risk hits |", "| --- | --- | ---: | ---: | ---: | ---: |"])
+    for row in rule_rows[:20]:
+        report.append(
+            f"| {row['ruleId']} | {row['ruleType']} | {fmt(row['trainUtility'])} | {fmt(row['holdoutUtility'])} | {fmt(row['holdoutTargetRecall'])} | {row['holdoutProtectedRiskHitCount']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "A source-M/L branch is not justified unless a state/profile rule captures beneficial high-RMSE cases while avoiding protected harm and beating shuffled target labels. This run is a discriminator test, not a formula update.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": summary["analysisName"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_group_contrast.csv",
+            f"{prefix}_separator_rules.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18mldiscriminator(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_ML_DISCRIMINATOR_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_ml_discriminator_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.30 M/L sensitivity discriminator")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"beneficial={summary['beneficialHighCount']}",
+                f"high_harm={summary['highHarmCount']}",
+                f"protected_harm={summary['protectedHarmCount']}",
+                f"best_rule={summary['bestRuleId']}",
+                f"holdout_recall={fmt(parse_float(summary['bestHoldoutTargetRecall']))}",
+                f"holdout_utility={fmt(parse_float(summary['bestHoldoutUtility']))}",
+            ]
+        )
+    )
+    print(f"Wrote v18 M/L discriminator to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -89717,6 +90112,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18mltablehunt",
             "v18mlcatalogbenchmark",
             "observedstatev18mlcatalogbenchmark",
+            "v18mldiscriminator",
+            "observedstatev18mldiscriminator",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -90061,6 +90458,8 @@ def main() -> None:
         cmd_v18mltablehunt(args)
     elif args.mode in {"v18mlcatalogbenchmark", "observedstatev18mlcatalogbenchmark"}:
         cmd_v18mlcatalogbenchmark(args)
+    elif args.mode in {"v18mldiscriminator", "observedstatev18mldiscriminator"}:
+        cmd_v18mldiscriminator(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
