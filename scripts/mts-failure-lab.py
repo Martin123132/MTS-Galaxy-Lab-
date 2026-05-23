@@ -185,6 +185,8 @@ DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v1
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_BENCHMARK_V2_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-benchmark-v2"
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_GAP_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-gap-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_GAP_PROVENANCE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-gap-provenance-stress-v1"
+DEFAULT_OBSERVED_STATE_V18_LEGACY_VARIABLE_MINE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-variable-mine-v1"
+DEFAULT_LEGACY_SOURCE_REPOS = GALAXY_WORK_ROOT / "legacy-source-repos"
 DEFAULT_OBSERVED_STATE_V18_LAW_SPEC_OUT = OUTPUT_PACK_ROOT / "mts-v18-law-spec-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_FIGURES_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-figures-v1"
 DEFAULT_OBSERVED_STATE_V18_NFW_GAP_OUT = OUTPUT_PACK_ROOT / "mts-v18-nfw-gap-audit-v1"
@@ -77864,6 +77866,911 @@ def cmd_v18gapprovenancestress(args: argparse.Namespace) -> None:
     print(f"Wrote v18 gap provenance stress to {out_dir.resolve()}")
 
 
+LEGACY_VARIABLE_KEYWORDS = [
+    "inclination",
+    "quality",
+    "asym",
+    "warp",
+    "bar",
+    "environment",
+    "tidal",
+    "gas",
+    "fraction",
+    "hi",
+    "rhi",
+    "mass",
+    "exponent",
+    "m(r)",
+    "surface",
+    "brightness",
+    "concentration",
+    "compact",
+    "extended",
+    "outlier",
+    "cluster",
+    "isolated",
+    "m/l",
+    "ml",
+]
+
+
+def legacy_name_key(value: object) -> str:
+    text = str(value or "").strip().upper()
+    text = text.replace(" ", "").replace("_", "").replace("-", "")
+    text = re.sub(r"[^A-Z0-9]", "", text)
+    return text
+
+
+def legacy_name_keys(value: object) -> set[str]:
+    key = legacy_name_key(value)
+    keys = {key} if key else set()
+    match = re.match(r"^([A-Z]+)0+([0-9].*)$", key)
+    if match:
+        keys.add(match.group(1) + match.group(2))
+    match = re.match(r"^([A-Z]+)([0-9]+)([A-Z0-9]*)$", key)
+    if match:
+        prefix, digits, suffix = match.groups()
+        if len(digits) < 4:
+            keys.add(prefix + digits.zfill(4) + suffix)
+        if len(digits) < 3:
+            keys.add(prefix + digits.zfill(3) + suffix)
+    return {item for item in keys if item}
+
+
+def legacy_current_name_map() -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for sample in load_samples():
+        name = build_curve(sample)["name"]
+        for key in legacy_name_keys(name):
+            mapping[key] = name
+    return mapping
+
+
+def legacy_match_current_name(value: object, name_map: dict[str, str]) -> str:
+    for key in legacy_name_keys(value):
+        if key in name_map:
+            return name_map[key]
+    return ""
+
+
+def legacy_file_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix:
+        return suffix.lstrip(".")
+    return "extensionless-text"
+
+
+def legacy_read_text(path: Path, max_bytes: int = 4_000_000) -> str:
+    if path.stat().st_size > max_bytes:
+        return ""
+    data = path.read_bytes()
+    for encoding in ["utf-8-sig", "utf-8", "cp1252", "latin-1"]:
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def legacy_keyword_hits(text: str) -> str:
+    lower = text.lower()
+    return "; ".join(keyword for keyword in LEGACY_VARIABLE_KEYWORDS if keyword in lower)
+
+
+def legacy_split_table_line(line: str) -> list[str]:
+    clean = line.strip().strip("|")
+    if not clean:
+        return []
+    if set(clean.replace("|", "").replace("-", "").replace(":", "").strip()) == set():
+        return []
+    if "|" in line:
+        return [part.strip() for part in clean.split("|")]
+    if "\t" in line:
+        return [part.strip() for part in clean.split("\t") if part.strip()]
+    if re.search(r"\s{2,}", clean):
+        return [part.strip() for part in re.split(r"\s{2,}", clean) if part.strip()]
+    return []
+
+
+def legacy_header_like(fields: list[str]) -> bool:
+    if len(fields) < 2:
+        return False
+    joined = " ".join(fields).lower()
+    return "galaxy" in joined or "object" in joined or "name" in joined
+
+
+def legacy_galaxy_like(value: object) -> bool:
+    text = str(value or "").strip()
+    return bool(
+        re.match(
+            r"^(NGC|UGC|DDO|IC|ESO|F|D|KK|KK98|PGC|Cam|CVnI|HARO|Ho|UGCA)[\s_\-]*[A-Za-z0-9]+",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def legacy_rows_from_text_tables(path: Path, text: str) -> tuple[list[dict], list[dict]]:
+    rows: list[dict] = []
+    table_catalog: list[dict] = []
+    table_id = 0
+    header: list[str] | None = None
+    row_count = 0
+    for raw_line in text.splitlines():
+        fields = legacy_split_table_line(raw_line)
+        if not fields:
+            if header is not None:
+                table_catalog.append(
+                    {
+                        "sourcePath": str(path),
+                        "tableId": table_id,
+                        "parser": "text-table",
+                        "columnCount": len(header),
+                        "rowCount": row_count,
+                        "columns": "; ".join(header),
+                    }
+                )
+                table_id += 1
+            header = None
+            row_count = 0
+            continue
+        if all(re.fullmatch(r"[:\-\s]+", field or "") for field in fields):
+            continue
+        if legacy_header_like(fields):
+            if header is not None:
+                table_catalog.append(
+                    {
+                        "sourcePath": str(path),
+                        "tableId": table_id,
+                        "parser": "text-table",
+                        "columnCount": len(header),
+                        "rowCount": row_count,
+                        "columns": "; ".join(header),
+                    }
+                )
+                table_id += 1
+            header = [re.sub(r"\s+", "_", field.strip()) or f"column_{idx}" for idx, field in enumerate(fields)]
+            row_count = 0
+            continue
+        if header is None:
+            continue
+        if len(fields) < 2:
+            continue
+        if len(fields) == len(header) + 1 and re.fullmatch(r"[0-9]+", fields[0]):
+            fields = fields[1:]
+        if len(fields) < len(header):
+            fields = fields + [""] * (len(header) - len(fields))
+        if len(fields) > len(header):
+            fields = fields[: len(header) - 1] + [" ".join(fields[len(header) - 1 :])]
+        item = {header[idx]: fields[idx] for idx in range(len(header))}
+        if not any(legacy_galaxy_like(value) for value in item.values()):
+            continue
+        item["_sourcePath"] = str(path)
+        item["_tableId"] = table_id
+        item["_parser"] = "text-table"
+        item["_rowIndex"] = row_count
+        rows.append(item)
+        row_count += 1
+    if header is not None:
+        table_catalog.append(
+            {
+                "sourcePath": str(path),
+                "tableId": table_id,
+                "parser": "text-table",
+                "columnCount": len(header),
+                "rowCount": row_count,
+                "columns": "; ".join(header),
+            }
+        )
+    return rows, table_catalog
+
+
+def legacy_rows_from_csv_like(path: Path) -> tuple[list[dict], list[dict]]:
+    suffix = path.suffix.lower()
+    text = legacy_read_text(path)
+    if not text:
+        return [], []
+    delimiter = "\t" if suffix in {".tsv", ".dat"} else ","
+    try:
+        sample = text[:4096]
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
+        delimiter = dialect.delimiter
+    except csv.Error:
+        pass
+    try:
+        reader = csv.DictReader(text.splitlines(), delimiter=delimiter)
+        rows = []
+        for idx, row in enumerate(reader):
+            if not row:
+                continue
+            item = {str(key or f"column_{col}").strip(): str(value or "").strip() for col, (key, value) in enumerate(row.items())}
+            if any(legacy_galaxy_like(value) for value in item.values()):
+                item["_sourcePath"] = str(path)
+                item["_tableId"] = 0
+                item["_parser"] = "csv-like"
+                item["_rowIndex"] = idx
+                rows.append(item)
+        if rows:
+            return rows, [
+                {
+                    "sourcePath": str(path),
+                    "tableId": 0,
+                    "parser": "csv-like",
+                    "columnCount": len(rows[0]),
+                    "rowCount": len(rows),
+                    "columns": "; ".join(key for key in rows[0] if not key.startswith("_")),
+                }
+            ]
+    except csv.Error:
+        pass
+    return legacy_rows_from_text_tables(path, text)
+
+
+def legacy_rows_from_json(path: Path) -> tuple[list[dict], list[dict]]:
+    text = legacy_read_text(path)
+    if not text:
+        return [], []
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return [], []
+    rows: list[dict] = []
+
+    def walk(value: object, trail: str) -> None:
+        if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+            for idx, item in enumerate(value):
+                flat = {str(key): str(val) for key, val in item.items() if not isinstance(val, (dict, list))}
+                if any(legacy_galaxy_like(val) for val in flat.values()):
+                    flat["_sourcePath"] = str(path)
+                    flat["_tableId"] = trail or "json-root"
+                    flat["_parser"] = "json-array"
+                    flat["_rowIndex"] = idx
+                    rows.append(flat)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                walk(item, f"{trail}.{key}" if trail else str(key))
+
+    walk(data, "")
+    catalog = []
+    if rows:
+        by_table = Counter(row["_tableId"] for row in rows)
+        for table_id, count in sorted(by_table.items()):
+            sample = next(row for row in rows if row["_tableId"] == table_id)
+            catalog.append(
+                {
+                    "sourcePath": str(path),
+                    "tableId": table_id,
+                    "parser": "json-array",
+                    "columnCount": len([key for key in sample if not key.startswith("_")]),
+                    "rowCount": count,
+                    "columns": "; ".join(key for key in sample if not key.startswith("_")),
+                }
+            )
+    return rows, catalog
+
+
+def legacy_rows_from_ipynb(path: Path) -> tuple[list[dict], list[dict]]:
+    text = legacy_read_text(path, max_bytes=12_000_000)
+    if not text:
+        return [], []
+    try:
+        notebook = json.loads(text)
+    except json.JSONDecodeError:
+        return [], []
+    chunks: list[str] = []
+    for cell in notebook.get("cells", []):
+        if cell.get("cell_type") not in {"markdown", "code"}:
+            continue
+        source = cell.get("source", [])
+        chunks.append("".join(source) if isinstance(source, list) else str(source))
+        for output in cell.get("outputs", []):
+            if output.get("output_type") == "stream":
+                text = output.get("text", [])
+                chunks.append("".join(text) if isinstance(text, list) else str(text))
+                continue
+            data = output.get("data", {})
+            if not isinstance(data, dict):
+                continue
+            if "text/plain" in data:
+                text = data.get("text/plain", [])
+                chunks.append("".join(text) if isinstance(text, list) else str(text))
+            elif "text/html" in data:
+                html_text = data.get("text/html", [])
+                html_text = "".join(html_text) if isinstance(html_text, list) else str(html_text)
+                html_text = re.sub(r"</t[dh]>\s*<t[dh][^>]*>", "\t", html_text, flags=re.IGNORECASE)
+                html_text = re.sub(r"</tr>\s*<tr[^>]*>", "\n", html_text, flags=re.IGNORECASE)
+                html_text = re.sub(r"<[^>]+>", " ", html_text)
+                chunks.append(html.unescape(html_text))
+    return legacy_rows_from_text_tables(path, "\n".join(chunks))
+
+
+def legacy_extract_source_rows(source_root: Path) -> tuple[list[dict], list[dict], list[dict]]:
+    inventory: list[dict] = []
+    table_catalog: list[dict] = []
+    rows: list[dict] = []
+    if not source_root.exists():
+        return inventory, table_catalog, rows
+    allowed_suffixes = {".csv", ".tsv", ".txt", ".md", ".json", ".ipynb", ".dat", ".mrt", ""}
+    skip_parts = {".git", "__pycache__", "node_modules"}
+    for path in sorted(source_root.rglob("*")):
+        if not path.is_file():
+            continue
+        if any(part in skip_parts for part in path.parts):
+            continue
+        suffix = path.suffix.lower()
+        if suffix not in allowed_suffixes:
+            continue
+        if path.stat().st_size > 12_000_000:
+            inventory.append(
+                {
+                    "sourcePath": str(path),
+                    "relativePath": str(path.relative_to(source_root)),
+                    "fileType": legacy_file_type(path),
+                    "sizeBytes": path.stat().st_size,
+                    "sha256": file_sha256(path),
+                    "parseStatus": "skipped-large",
+                    "rowCandidateCount": 0,
+                    "tableCount": 0,
+                    "keywordHits": "",
+                }
+            )
+            continue
+        try:
+            text_for_keywords = legacy_read_text(path, max_bytes=1_000_000)
+            if suffix in {".csv", ".tsv", ".dat", ".mrt"}:
+                file_rows, file_tables = legacy_rows_from_csv_like(path)
+            elif suffix == ".json":
+                file_rows, file_tables = legacy_rows_from_json(path)
+            elif suffix == ".ipynb":
+                file_rows, file_tables = legacy_rows_from_ipynb(path)
+            else:
+                file_rows, file_tables = legacy_rows_from_text_tables(path, legacy_read_text(path))
+            status = "parsed" if file_rows or file_tables else "no-galaxy-table"
+        except Exception as exc:  # noqa: BLE001 - audit mode must not fail on one old file.
+            file_rows = []
+            file_tables = []
+            text_for_keywords = ""
+            status = f"parse-error: {type(exc).__name__}"
+        rows.extend(file_rows)
+        table_catalog.extend(file_tables)
+        inventory.append(
+            {
+                "sourcePath": str(path),
+                "relativePath": str(path.relative_to(source_root)),
+                "fileType": legacy_file_type(path),
+                "sizeBytes": path.stat().st_size,
+                "sha256": file_sha256(path),
+                "parseStatus": status,
+                "rowCandidateCount": len(file_rows),
+                "tableCount": len(file_tables),
+                "keywordHits": legacy_keyword_hits(text_for_keywords),
+            }
+        )
+    return inventory, table_catalog, rows
+
+
+def legacy_find_galaxy_column(row: dict, name_map: dict[str, str]) -> tuple[str, str]:
+    preferred = [
+        key for key in row
+        if not key.startswith("_") and re.search(r"galaxy|object|name", key, flags=re.IGNORECASE)
+    ]
+    for key in preferred + [key for key in row if not key.startswith("_") and key not in preferred]:
+        match = legacy_match_current_name(row.get(key), name_map)
+        if match:
+            return key, match
+    return "", ""
+
+
+def legacy_source_stage(path_text: str) -> str:
+    lower = path_text.lower()
+    if "mts-galaxy-analysis" in lower:
+        return "early standalone galaxy-analysis repo"
+    if "galaxy-work" in lower and "legacy" in lower:
+        return "Motion-TimeSpace galaxy-work legacy notes"
+    if "sparc-analysis" in lower:
+        return "Motion-TimeSpace SPARC analysis draft"
+    if "notebook" in lower or lower.endswith(".ipynb"):
+        return "legacy notebook"
+    if "current-drafts" in lower:
+        return "current draft artifact"
+    return "legacy source"
+
+
+def legacy_candidate_use(column: str, source_path: str) -> str:
+    text = str(column or "").lower()
+    forbidden = [
+        "rmse",
+        "rms",
+        "mae",
+        "mse",
+        "chi",
+        "resid",
+        "residual",
+        "nfw",
+        "gain",
+        "candidate",
+        "score",
+        "fit",
+        "recipe",
+        "pred",
+        "model",
+        "damage",
+        "branch",
+        "class",
+        "amp",
+        "dlogv",
+        "required",
+        "obs",
+        "pen",
+        "best",
+        "oracle",
+        "loss",
+        "error",
+    ]
+    if re.fullmatch(r"a[0-9_]*|p[0-9_]*|a-last|a_last", column.strip().lower()):
+        return "diagnostic-only"
+    if any(word in text for word in forbidden):
+        return "diagnostic-only"
+    physical = [
+        "mass",
+        "gas",
+        "hi",
+        "mstar",
+        "ml",
+        "m/l",
+        "radius",
+        "rhi",
+        "scale",
+        "inclination",
+        "quality",
+        "environment",
+        "type",
+        "morph",
+        "bar",
+        "warp",
+        "asym",
+        "surface",
+        "brightness",
+        "exponent",
+        "rmax",
+        "rd",
+        "x_",
+        "dxdr",
+        "slope",
+        "concentration",
+    ]
+    if any(word in text for word in physical):
+        return "possible observable/proxy after source validation"
+    return "unknown; needs source validation"
+
+
+def legacy_join_rows(raw_rows: list[dict], case_by_name: dict[str, dict], name_map: dict[str, str]) -> tuple[list[dict], list[dict]]:
+    join_rows: list[dict] = []
+    column_rows: list[dict] = []
+    seen_columns: set[tuple[str, str, str]] = set()
+    for raw in raw_rows:
+        galaxy_col, galaxy = legacy_find_galaxy_column(raw, name_map)
+        if not galaxy or galaxy not in case_by_name:
+            continue
+        case = case_by_name[galaxy]
+        source_path = raw.get("_sourcePath", "")
+        table_id = str(raw.get("_tableId", ""))
+        parser = raw.get("_parser", "")
+        for column, value in raw.items():
+            if column.startswith("_") or column == galaxy_col:
+                continue
+            text = str(value or "").strip()
+            if not text:
+                continue
+            numeric_value = parse_float(text)
+            is_numeric = math.isfinite(numeric_value)
+            column_key = (source_path, table_id, column)
+            if column_key not in seen_columns:
+                column_rows.append(
+                    {
+                        "sourcePath": source_path,
+                        "tableId": table_id,
+                        "parser": parser,
+                        "column": column,
+                        "valueType": "numeric" if is_numeric else "categorical/text",
+                        "candidateUse": legacy_candidate_use(column, source_path),
+                        "stage": legacy_source_stage(source_path),
+                    }
+                )
+                seen_columns.add(column_key)
+            join_rows.append(
+                {
+                    "galaxy": galaxy,
+                    "legacyGalaxyToken": raw.get(galaxy_col, ""),
+                    "set": case.get("set", ""),
+                    "split": case.get("split", ""),
+                    "lockedRoute": case.get("lockedRoute", ""),
+                    "targetProtectedNfwGap": parse_bool(case.get("targetProtectedNfwGap")),
+                    "gapSurvivesLocalStress": str(case.get("gapStressInterpretation", "")).startswith("gap survives"),
+                    "gapPartlyProvenanceSensitive": "partly" in str(case.get("gapStressInterpretation", "")),
+                    "nfwGapKmS": case.get("v18_30MinusNfwPriorKmS", ""),
+                    "v18_30Rmse": case.get("v18_30Rmse", ""),
+                    "sourcePath": source_path,
+                    "tableId": table_id,
+                    "parser": parser,
+                    "column": column,
+                    "valueRaw": text,
+                    "valueNumeric": numeric_value if is_numeric else "",
+                    "valueType": "numeric" if is_numeric else "categorical/text",
+                    "candidateUse": legacy_candidate_use(column, source_path),
+                    "stage": legacy_source_stage(source_path),
+                }
+            )
+    return join_rows, column_rows
+
+
+def legacy_rule_hit(rule: dict, row: dict) -> bool:
+    if row.get("sourcePath") != rule["sourcePath"] or str(row.get("tableId")) != str(rule["tableId"]) or row.get("column") != rule["column"]:
+        return False
+    if rule["ruleType"] == "numeric-threshold":
+        value = parse_float(row.get("valueNumeric"))
+        threshold = parse_float(rule.get("threshold"))
+        if not math.isfinite(value) or not math.isfinite(threshold):
+            return False
+        return value >= threshold if rule["direction"] == "ge" else value <= threshold
+    return str(row.get("valueRaw", "")).strip().lower() == str(rule.get("category", "")).strip().lower()
+
+
+def legacy_rule_metrics(rule: dict, join_rows: list[dict], target_field: str, split: str | None = None, override_targets: set[str] | None = None) -> dict:
+    feature_rows = [
+        row for row in join_rows
+        if row.get("sourcePath") == rule["sourcePath"]
+        and str(row.get("tableId")) == str(rule["tableId"])
+        and row.get("column") == rule["column"]
+        and (split is None or row.get("split") == split)
+    ]
+    by_galaxy: dict[str, dict] = {}
+    for row in feature_rows:
+        by_galaxy.setdefault(row["galaxy"], row)
+    rows = list(by_galaxy.values())
+    target_rows = [
+        row for row in rows
+        if (row["galaxy"] in override_targets if override_targets is not None else parse_bool(row.get(target_field)))
+    ]
+    hits = [row for row in rows if legacy_rule_hit(rule, row)]
+    true_hits = [
+        row for row in hits
+        if (row["galaxy"] in override_targets if override_targets is not None else parse_bool(row.get(target_field)))
+    ]
+    false_hits = [
+        row for row in hits
+        if not (row["galaxy"] in override_targets if override_targets is not None else parse_bool(row.get(target_field)))
+    ]
+    protected_false = [row for row in false_hits if row.get("set") == "clean-protected"]
+    high_false = [row for row in false_hits if row.get("set") == "clean-high-rmse"]
+    recall = len(true_hits) / len(target_rows) if target_rows else 0.0
+    precision = len(true_hits) / len(hits) if hits else 0.0
+    false_rate = len(false_hits) / max(len(rows) - len(target_rows), 1)
+    utility = 100.0 * recall + 35.0 * precision - 12.0 * len(protected_false) - 4.0 * len(high_false) - 30.0 * false_rate
+    label = split or "all"
+    return {
+        f"{label}CoverageCount": len(rows),
+        f"{label}TargetCount": len(target_rows),
+        f"{label}HitCount": len(hits),
+        f"{label}TrueHitCount": len(true_hits),
+        f"{label}FalseHitCount": len(false_hits),
+        f"{label}ProtectedFalseHitCount": len(protected_false),
+        f"{label}HighFalseHitCount": len(high_false),
+        f"{label}TargetRecall": recall,
+        f"{label}Precision": precision,
+        f"{label}Utility": utility,
+        f"{label}HitGalaxies": "; ".join(sorted(row["galaxy"] for row in hits)),
+        f"{label}TrueHitGalaxies": "; ".join(sorted(row["galaxy"] for row in true_hits)),
+        f"{label}FalseHitGalaxies": "; ".join(sorted(row["galaxy"] for row in false_hits)),
+    }
+
+
+def legacy_build_rules(join_rows: list[dict]) -> list[dict]:
+    rules: list[dict] = []
+    groups: dict[tuple[str, str, str], list[dict]] = {}
+    for row in join_rows:
+        groups.setdefault((row["sourcePath"], str(row["tableId"]), row["column"]), []).append(row)
+    for (source_path, table_id, column), rows in groups.items():
+        by_galaxy: dict[str, dict] = {}
+        for row in rows:
+            by_galaxy.setdefault(row["galaxy"], row)
+        rows = list(by_galaxy.values())
+        if len(rows) < 5:
+            continue
+        numeric = [parse_float(row.get("valueNumeric")) for row in rows if math.isfinite(parse_float(row.get("valueNumeric")))]
+        if len(numeric) >= max(5, int(0.6 * len(rows))):
+            values = sorted(set(numeric))
+            quantiles = [0.20, 0.35, 0.50, 0.65, 0.80]
+            thresholds = sorted({values[min(len(values) - 1, max(0, round((len(values) - 1) * q)))] for q in quantiles})
+            for threshold in thresholds:
+                for direction in ["ge", "le"]:
+                    rules.append(
+                        {
+                            "ruleId": f"{safe_file_stem(Path(source_path).name)}__{safe_file_stem(str(table_id))}__{safe_file_stem(column)}__{direction}_{fmt_num(threshold).replace('-', 'm').replace('.', 'p')}",
+                            "ruleType": "numeric-threshold",
+                            "sourcePath": source_path,
+                            "tableId": table_id,
+                            "column": column,
+                            "direction": direction,
+                            "threshold": threshold,
+                            "category": "",
+                            "candidateUse": legacy_candidate_use(column, source_path),
+                            "stage": legacy_source_stage(source_path),
+                        }
+                    )
+        else:
+            categories = Counter(str(row.get("valueRaw", "")).strip() for row in rows if str(row.get("valueRaw", "")).strip())
+            if 1 < len(categories) <= 12:
+                for category, count in categories.items():
+                    if count < 2:
+                        continue
+                    rules.append(
+                        {
+                            "ruleId": f"{safe_file_stem(Path(source_path).name)}__{safe_file_stem(str(table_id))}__{safe_file_stem(column)}__is_{safe_file_stem(category)}",
+                            "ruleType": "categorical-match",
+                            "sourcePath": source_path,
+                            "tableId": table_id,
+                            "column": column,
+                            "direction": "is",
+                            "threshold": "",
+                            "category": category,
+                            "candidateUse": legacy_candidate_use(column, source_path),
+                            "stage": legacy_source_stage(source_path),
+                        }
+                    )
+    return rules
+
+
+def legacy_separator_scores(join_rows: list[dict]) -> list[dict]:
+    output: list[dict] = []
+    for rule in legacy_build_rules(join_rows):
+        for target_field in ["targetProtectedNfwGap", "gapSurvivesLocalStress"]:
+            scored = dict(rule)
+            scored["targetField"] = target_field
+            for split in [None, "train", "holdout"]:
+                scored.update(legacy_rule_metrics(rule, join_rows, target_field, split))
+            output.append(scored)
+    output.sort(
+        key=lambda row: (
+            -parse_float(row.get("holdoutUtility"), -999.0),
+            -parse_float(row.get("allUtility"), -999.0),
+            -parse_float(row.get("holdoutTargetRecall"), 0.0),
+            parse_float(row.get("holdoutProtectedFalseHitCount"), 999.0),
+        )
+    )
+    return output
+
+
+def legacy_null_controls(join_rows: list[dict], rules: list[dict], best_target_field: str) -> list[dict]:
+    clean_names = sorted({row["galaxy"] for row in join_rows if row.get("set") != "weak-systematics-excluded"})
+    true_targets = sorted({row["galaxy"] for row in join_rows if parse_bool(row.get(best_target_field))})
+    if not clean_names or not true_targets or not rules:
+        return []
+    top_rules = rules[:200]
+    rows: list[dict] = []
+    for seed in [20260523, 20260524, 271828, 314159, 42, 12345, 8675309, 19, 31, 73, 101, 211]:
+        rng = random.Random(seed)
+        shuffled_targets = set(rng.sample(clean_names, min(len(clean_names), len(true_targets))))
+        scored = []
+        for rule in top_rules:
+            item = {
+                "ruleId": rule["ruleId"],
+                "sourcePath": rule["sourcePath"],
+                "tableId": rule["tableId"],
+                "column": rule["column"],
+                "ruleType": rule["ruleType"],
+                "direction": rule.get("direction", ""),
+                "threshold": rule.get("threshold", ""),
+                "category": rule.get("category", ""),
+            }
+            item.update(legacy_rule_metrics(rule, join_rows, best_target_field, "holdout", shuffled_targets))
+            scored.append(item)
+        best = max(scored, key=lambda row: parse_float(row.get("holdoutUtility"), -999.0))
+        rows.append(
+            {
+                "nullType": "shuffled-legacy-target-label",
+                "seed": seed,
+                "targetField": best_target_field,
+                "targetCount": len(true_targets),
+                "bestRuleId": best["ruleId"],
+                "bestHoldoutUtility": best["holdoutUtility"],
+                "bestHoldoutRecall": best["holdoutTargetRecall"],
+                "bestHoldoutProtectedFalseHitCount": best["holdoutProtectedFalseHitCount"],
+            }
+        )
+    return rows
+
+
+def write_v18_legacy_variable_mine_artifacts(out_dir: Path, source_root: Path | None = None) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_legacy_variable_mine"
+    source_root = source_root or DEFAULT_LEGACY_SOURCE_REPOS
+    if not (DEFAULT_OBSERVED_STATE_V18_GAP_PROVENANCE_STRESS_OUT / "mts_v18_gap_provenance_case_ledger.csv").exists():
+        write_v18_gap_provenance_stress_artifacts(DEFAULT_OBSERVED_STATE_V18_GAP_PROVENANCE_STRESS_OUT)
+    base_rows = v18_competitor_gap_base_rows()
+    provenance_rows = {
+        row["galaxy"]: row for row in read_csv_rows(DEFAULT_OBSERVED_STATE_V18_GAP_PROVENANCE_STRESS_OUT / "mts_v18_gap_provenance_case_ledger.csv")
+    }
+    case_by_name: dict[str, dict] = {}
+    for row in base_rows:
+        item = dict(row)
+        prov = provenance_rows.get(row["galaxy"], {})
+        item["gapStressInterpretation"] = prov.get("interpretation", "")
+        item["bestAnyGapClosurePct"] = prov.get("bestAnyGapClosurePct", "")
+        case_by_name[row["galaxy"]] = item
+    inventory, table_catalog, raw_rows = legacy_extract_source_rows(source_root)
+    name_map = legacy_current_name_map()
+    join_rows, column_rows = legacy_join_rows(raw_rows, case_by_name, name_map)
+    separator_rows = legacy_separator_scores(join_rows)
+    diagnostic_best_rule = separator_rows[0] if separator_rows else {}
+    observable_separator_rows = [
+        row for row in separator_rows
+        if row.get("candidateUse") == "possible observable/proxy after source validation"
+    ]
+    credible_observable_rows = [
+        row for row in observable_separator_rows
+        if parse_float(row.get("allCoverageCount"), 0.0) >= 10
+        and parse_float(row.get("holdoutTargetCount"), 0.0) >= 2
+    ]
+    best_rule = (credible_observable_rows or observable_separator_rows or [{}])[0]
+    best_target = best_rule.get("targetField", "targetProtectedNfwGap")
+    null_rows = legacy_null_controls(join_rows, credible_observable_rows or observable_separator_rows, best_target)
+    best_null = max([parse_float(row.get("bestHoldoutUtility"), -999.0) for row in null_rows] or [-999.0])
+    best_margin = parse_float(best_rule.get("holdoutUtility"), -999.0) - best_null if best_rule else math.nan
+    machine_tables = [row for row in table_catalog if parse_float(row.get("rowCount"), 0.0) > 0]
+    useful_columns = [
+        row for row in column_rows
+        if row.get("candidateUse") == "possible observable/proxy after source validation"
+    ]
+    serious = (
+        bool(best_rule)
+        and parse_float(best_rule.get("holdoutTargetCount"), 0.0) >= 2
+        and parse_float(best_rule.get("holdoutTargetRecall"), 0.0) >= 0.50
+        and parse_float(best_rule.get("holdoutProtectedFalseHitCount"), 999.0) <= 2
+        and math.isfinite(best_margin)
+        and best_margin >= 10.0
+        and best_rule.get("candidateUse") == "possible observable/proxy after source validation"
+    )
+    if serious:
+        verdict = "legacy variable candidate found"
+    elif useful_columns:
+        verdict = "legacy variables are provenance-only"
+    elif machine_tables:
+        verdict = "legacy sources not machine-readable enough for current hard cases"
+    else:
+        verdict = "no useful legacy variable found"
+    summary = {
+        "analysisName": "mts-v18-legacy-variable-mine-v1",
+        "verdict": verdict,
+        "sourceRoot": str(source_root),
+        "sourceFilesScanned": len(inventory),
+        "galaxyTablesFound": len(machine_tables),
+        "rawGalaxyRowsParsed": len(raw_rows),
+        "joinedFeatureRows": len(join_rows),
+        "matchedGalaxies": len({row["galaxy"] for row in join_rows}),
+        "candidateColumns": len(column_rows),
+        "observableProxyColumns": len(useful_columns),
+        "separatorRuleCount": len(separator_rows),
+        "observableSeparatorRuleCount": len(observable_separator_rows),
+        "credibleObservableSeparatorRuleCount": len(credible_observable_rows),
+        "diagnosticBestRuleId": diagnostic_best_rule.get("ruleId", ""),
+        "diagnosticBestRuleColumn": diagnostic_best_rule.get("column", ""),
+        "diagnosticBestCandidateUse": diagnostic_best_rule.get("candidateUse", ""),
+        "bestRuleId": best_rule.get("ruleId", ""),
+        "bestRuleTarget": best_target,
+        "bestRuleColumn": best_rule.get("column", ""),
+        "bestRuleSource": best_rule.get("sourcePath", ""),
+        "bestHoldoutRecall": best_rule.get("holdoutTargetRecall", ""),
+        "bestHoldoutUtility": best_rule.get("holdoutUtility", ""),
+        "bestHoldoutProtectedFalseHitCount": best_rule.get("holdoutProtectedFalseHitCount", ""),
+        "bestNullHoldoutUtility": best_null if null_rows else "",
+        "bestNullMargin": best_margin if null_rows else "",
+        "weakSystematicsLeakage": 0,
+        "lawChanged": False,
+    }
+    write_csv(out_dir / f"{prefix}_source_inventory.csv", inventory)
+    write_csv(out_dir / f"{prefix}_table_catalog.csv", table_catalog)
+    write_csv(out_dir / f"{prefix}_column_hits.csv", column_rows)
+    write_csv(out_dir / f"{prefix}_case_join.csv", join_rows)
+    write_csv(out_dir / f"{prefix}_separator_scores.csv", separator_rows[:800])
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    report = [
+        "# MTS v18 Legacy Variable Mine",
+        "",
+        "This mode mines the older local galaxy-work repos for machine-readable or table-like per-galaxy variables, then tests whether any joined variable separates the remaining v18/NFW hard cases. It does not change v18, update the browser, or create a law.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Source files scanned: `{summary['sourceFilesScanned']}`.",
+        f"- Galaxy tables found: `{summary['galaxyTablesFound']}`.",
+        f"- Raw per-galaxy rows parsed: `{summary['rawGalaxyRowsParsed']}`.",
+        f"- Joined feature rows: `{summary['joinedFeatureRows']}` across `{summary['matchedGalaxies']}` current SPARC galaxies.",
+        f"- Observable/proxy columns: `{summary['observableProxyColumns']}`.",
+        f"- Separator rules tested: `{summary['separatorRuleCount']}` total; `{summary['observableSeparatorRuleCount']}` observable/proxy rules.",
+        f"- Credible observable/proxy rules with enough coverage: `{summary['credibleObservableSeparatorRuleCount']}`.",
+        f"- Best observable/proxy rule: `{summary['bestRuleId'] or 'none'}`.",
+        f"- Best observable/proxy target: `{summary['bestRuleTarget']}`.",
+        f"- Best holdout recall: `{fmt(parse_float(summary['bestHoldoutRecall']))}`.",
+        f"- Best holdout utility: `{fmt(parse_float(summary['bestHoldoutUtility']))}`.",
+        f"- Best null utility: `{fmt(parse_float(summary['bestNullHoldoutUtility']))}`; margin `{fmt(parse_float(summary['bestNullMargin']))}`.",
+        f"- Best diagnostic-only rule, not eligible for formula use: `{summary['diagnosticBestRuleId'] or 'none'}` (`{summary['diagnosticBestCandidateUse']}`).",
+        "",
+        "## Top Observable/Proxy Separator Rules",
+        "",
+        "| Rule | Target | Column | Holdout recall | Holdout utility | Protected false hits | Candidate use |",
+        "| --- | --- | --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in (credible_observable_rows or observable_separator_rows)[:20]:
+        report.append(
+            f"| {row['ruleId']} | {row['targetField']} | {row['column']} | {fmt(row['holdoutTargetRecall'])} | {fmt(row['holdoutUtility'])} | {row['holdoutProtectedFalseHitCount']} | {row['candidateUse']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Diagnostic Rules Kept Out Of Candidate Use",
+            "",
+            "Legacy columns that encode old fit outputs, residual-like diagnostics, NFW-gap labels, or notebook model recipes are retained in the CSV for provenance, but they are not eligible as transport-law inputs.",
+            "",
+            "| Rule | Target | Column | Holdout recall | Holdout utility | Candidate use |",
+            "| --- | --- | --- | ---: | ---: | --- |",
+        ]
+    )
+    for row in [item for item in separator_rows if item.get("candidateUse") != "possible observable/proxy after source validation"][:10]:
+        report.append(
+            f"| {row['ruleId']} | {row['targetField']} | {row['column']} | {fmt(row['holdoutTargetRecall'])} | {fmt(row['holdoutUtility'])} | {row['candidateUse']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "A legacy variable can only move into a future framework test if it maps to current galaxies, behaves as an observable/proxy rather than a residual or fit output, survives holdout/null scoring, and has source provenance clear enough to rederive in the current harness.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": summary["analysisName"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_source_inventory.csv",
+            f"{prefix}_table_catalog.csv",
+            f"{prefix}_column_hits.csv",
+            f"{prefix}_case_join.csv",
+            f"{prefix}_separator_scores.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18legacyvariablemine(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_LEGACY_VARIABLE_MINE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_root = Path(args.source_dir) if args.source_dir else DEFAULT_LEGACY_SOURCE_REPOS
+    capsule = write_v18_legacy_variable_mine_artifacts(out_dir, source_root)
+    summary = capsule["summary"]
+    print("MTS v18 legacy variable mine")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"files={summary['sourceFilesScanned']}",
+                f"tables={summary['galaxyTablesFound']}",
+                f"joined={summary['joinedFeatureRows']}",
+                f"galaxies={summary['matchedGalaxies']}",
+                f"best={summary['bestRuleId']}",
+                f"recall={fmt(parse_float(summary['bestHoldoutRecall']))}",
+                f"null_margin={fmt(parse_float(summary['bestNullMargin']))}",
+            ]
+        )
+    )
+    print(f"Wrote v18 legacy variable mine to {out_dir.resolve()}")
+
+
 def write_observed_state_v18_release_compression_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_11_compression"
@@ -90884,6 +91791,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18competitorgapcandidate",
             "v18gapprovenancestress",
             "observedstatev18gapprovenancestress",
+            "v18legacyvariablemine",
+            "observedstatev18legacyvariablemine",
             "v18lawspec",
             "observedstatev18lawspec",
             "v18competitorfigures",
@@ -91234,6 +92143,8 @@ def main() -> None:
         cmd_v18competitorgapcandidate(args)
     elif args.mode in {"v18gapprovenancestress", "observedstatev18gapprovenancestress"}:
         cmd_v18gapprovenancestress(args)
+    elif args.mode in {"v18legacyvariablemine", "observedstatev18legacyvariablemine"}:
+        cmd_v18legacyvariablemine(args)
     elif args.mode in {"v18lawspec", "observedstatev18lawspec"}:
         cmd_v18lawspec(args)
     elif args.mode in {"v18competitorfigures", "observedstatev18competitorfigures"}:
