@@ -225,6 +225,7 @@ DEFAULT_OBSERVED_STATE_V18_ML_TABLE_HUNT_CACHE = Path(r"D:\Users\ollet\Desktop\g
 DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-catalog-benchmark-v1"
 DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-ml-catalog-benchmark-v1")
 DEFAULT_OBSERVED_STATE_V18_ML_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-sensitivity-discriminator-v1"
+DEFAULT_OBSERVED_STATE_V18_EXTERNAL_ML_GAP_TEST_OUT = OUTPUT_PACK_ROOT / "mts-v18-external-ml-gap-test-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -77034,6 +77035,515 @@ def cmd_v18mldiscriminator(args: argparse.Namespace) -> None:
     print(f"Wrote v18 M/L discriminator to {out_dir.resolve()}")
 
 
+V18_EXTERNAL_ML_GAP_SEEDS = [20260523, 20260524, 271828, 314159, 42, 12345, 8675309, 19, 31, 73, 101]
+
+
+def v18_external_ml_gap_catalog_rows(source_cache: Path | None = None, offline: bool = True) -> list[dict]:
+    path = DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_OUT / "mts_v18_ml_catalog_case_ledger.csv"
+    if not path.exists():
+        write_v18_ml_catalog_benchmark_artifacts(
+            DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_OUT,
+            source_cache or DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE,
+            offline,
+        )
+    return read_csv_rows(path)
+
+
+def v18_external_ml_gap_nominal_rows(catalog_rows: list[dict]) -> dict[str, dict]:
+    rows: dict[str, dict] = {}
+    for row in catalog_rows:
+        rows.setdefault(row["galaxy"], row)
+    return rows
+
+
+def v18_external_ml_gap_variant_ids(catalog_rows: list[dict]) -> list[str]:
+    return sorted({row["variantId"] for row in catalog_rows})
+
+
+_V18_EXTERNAL_ML_GAP_BASE_BY_NAME_CACHE: dict[str, dict] | None = None
+
+
+def v18_external_ml_gap_base_by_name() -> dict[str, dict]:
+    global _V18_EXTERNAL_ML_GAP_BASE_BY_NAME_CACHE
+    if _V18_EXTERNAL_ML_GAP_BASE_BY_NAME_CACHE is None:
+        _V18_EXTERNAL_ML_GAP_BASE_BY_NAME_CACHE = {row["galaxy"]: row for row in v18_competitor_gap_base_rows()}
+    return _V18_EXTERNAL_ML_GAP_BASE_BY_NAME_CACHE
+
+
+def v18_external_ml_gap_support_status(row: dict, active: bool, variant_row: dict | None) -> tuple[float, str, str, str, str, str]:
+    nominal = parse_float(row.get("nominalV1830Rmse"))
+    if active and variant_row:
+        return (
+            parse_float(variant_row.get("v1830SupportSourceMlRmse"), nominal),
+            variant_row.get("v1830CandidateRouteSourceMl", ""),
+            variant_row.get("Ydisk", ""),
+            variant_row.get("Ybul", ""),
+            variant_row.get("variantId", ""),
+            variant_row.get("sourceModel", ""),
+        )
+    return (
+        nominal,
+        row.get("lockedRouteNominal", ""),
+        ML_DISK,
+        ML_BULGE,
+        "nominal-fixed-sparc-ml",
+        "fixed SPARC M/L",
+    )
+
+
+def v18_external_ml_gap_build_rows(
+    catalog_rows: list[dict],
+    track_id: str,
+    variant_id: str | None,
+    active_names: set[str] | None = None,
+    oracle: bool = False,
+    rule_id: str = "",
+    rule_desc: str = "",
+) -> list[dict]:
+    active_names = active_names or set()
+    nominal_by_name = v18_external_ml_gap_nominal_rows(catalog_rows)
+    by_variant_name = {(row["variantId"], row["galaxy"]): row for row in catalog_rows}
+    by_name_variants: dict[str, list[dict]] = {}
+    for row in catalog_rows:
+        by_name_variants.setdefault(row["galaxy"], []).append(row)
+    base_by_name = v18_external_ml_gap_base_by_name()
+    rows: list[dict] = []
+    for name, nominal in sorted(nominal_by_name.items()):
+        base = base_by_name.get(name, {})
+        if oracle:
+            options = by_name_variants.get(name, [])
+            variant_row = min(options, key=lambda item: parse_float(item.get("v1830SupportSourceMlRmse"), math.inf), default=None)
+            active = variant_row is not None
+        else:
+            variant_row = by_variant_name.get((variant_id or "", name))
+            active = (variant_id is not None and (active_names == {"__ALL__"} or name in active_names) and variant_row is not None)
+        candidate_rmse, candidate_route, ydisk, ybul, applied_variant, source_model = v18_external_ml_gap_support_status(nominal, active, variant_row)
+        nominal_rmse = parse_float(nominal.get("nominalV1830Rmse"))
+        set_name = nominal.get("set", "")
+        target_gap = parse_bool(base.get("targetProtectedNfwGap"))
+        rows.append(
+            {
+                "galaxy": name,
+                "trackId": track_id,
+                "variantId": applied_variant,
+                "ruleId": rule_id,
+                "ruleDescription": rule_desc,
+                "sourceModel": source_model,
+                "set": set_name,
+                "split": nominal.get("split", ""),
+                "lockedRoute": nominal.get("lockedRouteNominal", ""),
+                "candidateRoute": candidate_route,
+                "routeChanged": candidate_route != nominal.get("lockedRouteNominal", ""),
+                "targetProtectedNfwGap": target_gap,
+                "cleanHighRmse": set_name == "clean-high-rmse",
+                "nominalV1830Rmse": nominal_rmse,
+                "candidateRmse": candidate_rmse,
+                "candidateDeltaVsNominalKmS": candidate_rmse - nominal_rmse,
+                "candidateGainVsNominalPct": pct_improvement(nominal_rmse, candidate_rmse),
+                "nominalNfwPriorRmse": parse_float(nominal.get("nominalNfwPriorRmse"), parse_float(base.get("nfwPriorRmse"))),
+                "candidateMinusNfwPriorKmS": candidate_rmse - parse_float(nominal.get("nominalNfwPriorRmse"), parse_float(base.get("nfwPriorRmse"))),
+                "Ydisk": ydisk,
+                "Ybul": ybul,
+                "sourceMlActive": active,
+                "usableAsMtsFormulaInput": nominal.get("usableAsMtsFormulaInput", "False"),
+                "sourceClassification": nominal.get("classification", ""),
+                "forbiddenAsFormulaInput": True,
+            }
+        )
+    return rows
+
+
+def v18_external_ml_gap_metric(rows: list[dict], split: str = "all") -> dict:
+    selected = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+    if split != "all":
+        selected = [row for row in selected if row.get("split") == split]
+    high = [row for row in selected if row["set"] == "clean-high-rmse"]
+    protected = [row for row in selected if row["set"] == "clean-protected"]
+    targets = [row for row in selected if parse_bool(row.get("targetProtectedNfwGap"))]
+    active = [row for row in selected if parse_bool(row.get("sourceMlActive"))]
+    nominal_clean = safe_mean(parse_float(row["nominalV1830Rmse"]) for row in selected)
+    candidate_clean = safe_mean(parse_float(row["candidateRmse"]) for row in selected)
+    nominal_high = safe_mean(parse_float(row["nominalV1830Rmse"]) for row in high)
+    candidate_high = safe_mean(parse_float(row["candidateRmse"]) for row in high)
+    nominal_target = safe_mean(parse_float(row["nominalV1830Rmse"]) for row in targets)
+    candidate_target = safe_mean(parse_float(row["candidateRmse"]) for row in targets)
+    protected_regs = [parse_float(row["candidateRmse"]) - parse_float(row["nominalV1830Rmse"]) for row in protected]
+    high_regs = [parse_float(row["candidateRmse"]) - parse_float(row["nominalV1830Rmse"]) for row in high]
+    return {
+        "split": split,
+        "galaxyCount": len(selected),
+        "activeCount": len(active),
+        "activeHighCount": sum(1 for row in active if row["set"] == "clean-high-rmse"),
+        "activeProtectedCount": sum(1 for row in active if row["set"] == "clean-protected"),
+        "activeTargetProtectedGapCount": sum(1 for row in active if parse_bool(row.get("targetProtectedNfwGap"))),
+        "nominalCleanMeanRmse": nominal_clean,
+        "candidateCleanMeanRmse": candidate_clean,
+        "cleanGainVsNominalPct": pct_improvement(nominal_clean, candidate_clean),
+        "nominalHighMeanRmse": nominal_high,
+        "candidateHighMeanRmse": candidate_high,
+        "highGainVsNominalPct": pct_improvement(nominal_high, candidate_high),
+        "nominalTargetMeanRmse": nominal_target,
+        "candidateTargetMeanRmse": candidate_target,
+        "targetGainVsNominalPct": pct_improvement(nominal_target, candidate_target),
+        "targetGainVsNominalKmS": nominal_target - candidate_target if math.isfinite(nominal_target) and math.isfinite(candidate_target) else math.nan,
+        "protectedMaxRegressionKmS": max(protected_regs or [0.0]),
+        "protectedWorseOver3Count": sum(1 for value in protected_regs if value > 3.0),
+        "highMaxRegressionKmS": max(high_regs or [0.0]),
+        "highAbove20Count": sum(1 for row in high if parse_float(row["candidateRmse"]) >= 20.0),
+        "routeChangedCount": sum(1 for row in selected if parse_bool(row.get("routeChanged"))),
+        "activeGalaxies": "; ".join(row["galaxy"] for row in active),
+    }
+
+
+def v18_external_ml_gap_summary_row(rows: list[dict], track_id: str, track_type: str, promotable: bool, notes: str = "") -> dict:
+    row = {
+        "trackId": track_id,
+        "trackType": track_type,
+        "variantId": "",
+        "ruleId": "",
+        "ruleType": "",
+        "featureA": "",
+        "directionA": "",
+        "thresholdA": "",
+        "featureB": "",
+        "directionB": "",
+        "thresholdB": "",
+        "trainUtility": "",
+        "holdoutUtility": "",
+        "promotableAsTransportLaw": promotable,
+        "notes": notes,
+    }
+    for split in ["train", "holdout", "all"]:
+        metric = v18_external_ml_gap_metric(rows, split)
+        for key, value in metric.items():
+            row[f"{split}_{key}"] = value
+    row["trainUtility"] = v18_external_ml_gap_track_utility(row, "train")
+    row["holdoutUtility"] = v18_external_ml_gap_track_utility(row, "holdout")
+    return row
+
+
+def v18_external_ml_gap_track_utility(summary: dict, split: str = "train") -> float:
+    return (
+        parse_float(summary.get(f"{split}_targetGainVsNominalPct"), 0.0) * 1.6
+        + parse_float(summary.get(f"{split}_highGainVsNominalPct"), 0.0)
+        + parse_float(summary.get(f"{split}_cleanGainVsNominalPct"), 0.0) * 0.4
+        - max(0.0, parse_float(summary.get(f"{split}_protectedMaxRegressionKmS"), 0.0)) * 4.0
+        - max(0.0, parse_float(summary.get(f"{split}_highMaxRegressionKmS"), 0.0)) * 0.5
+        - parse_float(summary.get(f"{split}_routeChangedCount"), 0.0) * 0.25
+    )
+
+
+def v18_external_ml_gap_state_rule_scores(catalog_rows: list[dict], variant_ids: list[str]) -> tuple[list[dict], list[dict], dict]:
+    discriminator_rows = v18_ml_discriminator_case_rows()
+    existing_rule_rows = v18_ml_discriminator_rule_rows(discriminator_rows)
+    rule_pool = [
+        {
+            "ruleId": row["ruleId"],
+            "ruleType": row["ruleType"],
+            "featureA": row["featureA"],
+            "directionA": row["directionA"],
+            "thresholdA": parse_float(row["thresholdA"]),
+            "featureB": row.get("featureB", ""),
+            "directionB": row.get("directionB", ""),
+            "thresholdB": parse_float(row.get("thresholdB"), math.nan) if row.get("thresholdB", "") != "" else "",
+        }
+        for row in existing_rule_rows[:150]
+    ]
+    by_name = {row["galaxy"]: row for row in discriminator_rows}
+    rows: list[dict] = []
+    best_summary: dict = {}
+    best_case_rows: list[dict] = []
+    for variant_id in variant_ids:
+        for rule in rule_pool:
+            active_names = {name for name, item in by_name.items() if v18_ml_rule_active(item, rule)}
+            if not active_names:
+                continue
+            track_id = f"state-gated-{variant_id}-{rule['ruleId']}"
+            case_rows = v18_external_ml_gap_build_rows(
+                catalog_rows,
+                track_id,
+                variant_id,
+                active_names,
+                rule_id=rule["ruleId"],
+                rule_desc=f"{rule['featureA']} {rule['directionA']} {fmt(rule['thresholdA'])}"
+                + (f" AND {rule['featureB']} {rule['directionB']} {fmt(rule['thresholdB'])}" if rule.get("featureB") else ""),
+            )
+            summary = v18_external_ml_gap_summary_row(case_rows, track_id, "state-gated-external-ml", False, "train-selected state gate applying source M/L values")
+            summary["trainUtility"] = v18_external_ml_gap_track_utility(summary, "train")
+            summary["holdoutUtility"] = v18_external_ml_gap_track_utility(summary, "holdout")
+            summary["variantId"] = variant_id
+            summary["ruleId"] = rule["ruleId"]
+            summary["ruleType"] = rule["ruleType"]
+            summary["featureA"] = rule["featureA"]
+            summary["directionA"] = rule["directionA"]
+            summary["thresholdA"] = rule["thresholdA"]
+            summary["featureB"] = rule.get("featureB", "")
+            summary["directionB"] = rule.get("directionB", "")
+            summary["thresholdB"] = rule.get("thresholdB", "")
+            rows.append(summary)
+            if not best_summary or (
+                parse_float(summary["trainUtility"], -999.0),
+                parse_float(summary["holdoutUtility"], -999.0),
+                -parse_float(summary["all_protectedMaxRegressionKmS"], 999.0),
+            ) > (
+                parse_float(best_summary.get("trainUtility"), -999.0),
+                parse_float(best_summary.get("holdoutUtility"), -999.0),
+                -parse_float(best_summary.get("all_protectedMaxRegressionKmS"), 999.0),
+            ):
+                best_summary = summary
+                best_case_rows = case_rows
+    rows.sort(key=lambda row: (-parse_float(row.get("trainUtility"), -999.0), -parse_float(row.get("holdoutUtility"), -999.0)))
+    return rows, best_case_rows, best_summary
+
+
+def v18_external_ml_gap_null_rows(catalog_rows: list[dict], best_summary: dict, best_rows: list[dict]) -> list[dict]:
+    if not best_summary or not best_rows:
+        return []
+    variant_id = best_summary.get("variantId", "")
+    active_count = sum(1 for row in best_rows if row["set"] != "weak-systematics-excluded" and parse_bool(row.get("sourceMlActive")))
+    active_by_set = Counter(row["set"] for row in best_rows if row["set"] != "weak-systematics-excluded" and parse_bool(row.get("sourceMlActive")))
+    clean_names = sorted({row["galaxy"] for row in best_rows if row["set"] != "weak-systematics-excluded"})
+    by_set_names: dict[str, list[str]] = {}
+    for row in best_rows:
+        if row["set"] != "weak-systematics-excluded":
+            by_set_names.setdefault(row["set"], []).append(row["galaxy"])
+    rows: list[dict] = []
+    for seed in V18_EXTERNAL_ML_GAP_SEEDS:
+        rng = random.Random(seed)
+        random_names = set(rng.sample(clean_names, min(active_count, len(clean_names)))) if active_count else set()
+        random_case_rows = v18_external_ml_gap_build_rows(catalog_rows, f"same-active-random-{seed}", variant_id, random_names)
+        summary = v18_external_ml_gap_summary_row(random_case_rows, f"same-active-random-{seed}", "same-active-count-random", False, "null control")
+        rows.append(
+            {
+                "nullType": "same-active-count-random",
+                "seed": seed,
+                "variantId": variant_id,
+                "activeCount": active_count,
+                "holdoutUtility": v18_external_ml_gap_track_utility(summary, "holdout"),
+                "holdoutHighGainVsNominalPct": summary["holdout_highGainVsNominalPct"],
+                "holdoutTargetGainVsNominalPct": summary["holdout_targetGainVsNominalPct"],
+                "holdoutProtectedMaxRegressionKmS": summary["holdout_protectedMaxRegressionKmS"],
+                "allHighGainVsNominalPct": summary["all_highGainVsNominalPct"],
+                "allTargetGainVsNominalPct": summary["all_targetGainVsNominalPct"],
+                "allProtectedMaxRegressionKmS": summary["all_protectedMaxRegressionKmS"],
+            }
+        )
+        stratified_names: set[str] = set()
+        for set_name, count in active_by_set.items():
+            pool = sorted(set(by_set_names.get(set_name, [])))
+            stratified_names.update(rng.sample(pool, min(count, len(pool)))) if pool else None
+        strat_case_rows = v18_external_ml_gap_build_rows(catalog_rows, f"set-stratified-random-{seed}", variant_id, stratified_names)
+        summary = v18_external_ml_gap_summary_row(strat_case_rows, f"set-stratified-random-{seed}", "set-stratified-active-random", False, "null control")
+        rows.append(
+            {
+                "nullType": "set-stratified-active-random",
+                "seed": seed,
+                "variantId": variant_id,
+                "activeCount": len(stratified_names),
+                "holdoutUtility": v18_external_ml_gap_track_utility(summary, "holdout"),
+                "holdoutHighGainVsNominalPct": summary["holdout_highGainVsNominalPct"],
+                "holdoutTargetGainVsNominalPct": summary["holdout_targetGainVsNominalPct"],
+                "holdoutProtectedMaxRegressionKmS": summary["holdout_protectedMaxRegressionKmS"],
+                "allHighGainVsNominalPct": summary["all_highGainVsNominalPct"],
+                "allTargetGainVsNominalPct": summary["all_targetGainVsNominalPct"],
+                "allProtectedMaxRegressionKmS": summary["all_protectedMaxRegressionKmS"],
+            }
+        )
+    return rows
+
+
+def write_v18_external_ml_gap_test_artifacts(out_dir: Path, source_cache: Path | None = None, offline: bool = True) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_external_ml_gap"
+    catalog_rows = v18_external_ml_gap_catalog_rows(source_cache, offline)
+    variant_ids = v18_external_ml_gap_variant_ids(catalog_rows)
+
+    track_rows: list[dict] = []
+    all_case_rows: list[dict] = []
+    nominal_rows = v18_external_ml_gap_build_rows(catalog_rows, "nominal-v18-30-fixed-sparc-ml", None, set())
+    all_case_rows.extend(nominal_rows)
+    track_rows.append(v18_external_ml_gap_summary_row(nominal_rows, "nominal-v18-30-fixed-sparc-ml", "locked-v18-reference", True, "current fixed SPARC M/L reference"))
+
+    fixed_variant_summaries: list[dict] = []
+    for variant_id in variant_ids:
+        case_rows = v18_external_ml_gap_build_rows(catalog_rows, f"fixed-source-ml-{variant_id}", variant_id, {"__ALL__"})
+        all_case_rows.extend(case_rows)
+        summary = v18_external_ml_gap_summary_row(case_rows, f"fixed-source-ml-{variant_id}", "fixed-source-ml-variant", False, "source-backed numerical M/L variant; not a transport law")
+        summary["variantId"] = variant_id
+        summary["trainUtility"] = v18_external_ml_gap_track_utility(summary, "train")
+        summary["holdoutUtility"] = v18_external_ml_gap_track_utility(summary, "holdout")
+        fixed_variant_summaries.append(summary)
+        track_rows.append(summary)
+    best_fixed = max(fixed_variant_summaries, key=lambda row: parse_float(row.get("trainUtility"), -999.0), default={})
+
+    oracle_rows = v18_external_ml_gap_build_rows(catalog_rows, "best-source-ml-per-galaxy-oracle", None, oracle=True)
+    all_case_rows.extend(oracle_rows)
+    oracle_summary = v18_external_ml_gap_summary_row(oracle_rows, "best-source-ml-per-galaxy-oracle", "per-galaxy-source-ml-oracle", False, "non-promotable ceiling: chooses best source M/L variant per galaxy")
+    oracle_summary["trainUtility"] = v18_external_ml_gap_track_utility(oracle_summary, "train")
+    oracle_summary["holdoutUtility"] = v18_external_ml_gap_track_utility(oracle_summary, "holdout")
+    track_rows.append(oracle_summary)
+
+    state_rule_rows, state_case_rows, best_state = v18_external_ml_gap_state_rule_scores(catalog_rows, variant_ids)
+    all_case_rows.extend(state_case_rows)
+    if best_state:
+        track_rows.append(best_state)
+    null_rows = v18_external_ml_gap_null_rows(catalog_rows, best_state, state_case_rows)
+    best_null_holdout = max([parse_float(row.get("holdoutUtility"), -999.0) for row in null_rows] or [-999.0])
+    best_state_holdout = parse_float(best_state.get("holdoutUtility"), -999.0) if best_state else math.nan
+    null_margin = best_state_holdout - best_null_holdout if math.isfinite(best_state_holdout) and math.isfinite(best_null_holdout) else math.nan
+
+    best_track = max(track_rows, key=lambda row: parse_float(row.get("holdoutUtility"), -999.0), default={})
+    verdict = "external M/L closes useful gap but is not transport law"
+    if not catalog_rows:
+        verdict = "external M/L source rows missing"
+    elif best_state and null_margin >= 10.0 and parse_float(best_state.get("holdout_protectedMaxRegressionKmS"), 999.0) <= 3.0:
+        verdict = "state-gated external M/L candidate for review"
+    elif best_fixed and parse_float(best_fixed.get("holdout_highGainVsNominalPct"), 0.0) > 1.0:
+        verdict = "external M/L sensitivity only"
+    elif oracle_summary and parse_float(oracle_summary.get("holdout_highGainVsNominalPct"), 0.0) > 5.0:
+        verdict = "external M/L oracle only"
+    else:
+        verdict = "external M/L does not close current gap"
+
+    target_rows = [
+        row for row in all_case_rows
+        if row["trackId"] in {best_track.get("trackId"), best_state.get("trackId", ""), "nominal-v18-30-fixed-sparc-ml"}
+        and (parse_bool(row.get("targetProtectedNfwGap")) or row["set"] == "clean-high-rmse")
+    ]
+    protected_rows = [
+        row for row in all_case_rows
+        if row["trackId"] in {best_track.get("trackId"), best_state.get("trackId", ""), "nominal-v18-30-fixed-sparc-ml"}
+        and row["set"] == "clean-protected"
+        and (parse_bool(row.get("sourceMlActive")) or parse_float(row.get("candidateDeltaVsNominalKmS"), 0.0) > 0.0 or parse_bool(row.get("targetProtectedNfwGap")))
+    ]
+    summary = {
+        "analysisName": "mts-v18-external-ml-gap-test-v1",
+        "verdict": verdict,
+        "source": "Li+ 2020 CDS/VizieR J/ApJS/247/31 Ydisk/Ybul values",
+        "sourceClassification": "dynamical halo-fit M/L; benchmark/context only unless independently validated",
+        "catalogRows": len(catalog_rows),
+        "variantCount": len(variant_ids),
+        "bestFixedVariant": best_fixed.get("variantId", ""),
+        "bestFixedHoldoutHighGainPct": best_fixed.get("holdout_highGainVsNominalPct", ""),
+        "bestStateTrackId": best_state.get("trackId", ""),
+        "bestStateRuleId": best_state.get("ruleId", ""),
+        "bestStateVariantId": best_state.get("variantId", ""),
+        "bestStateHoldoutHighGainPct": best_state.get("holdout_highGainVsNominalPct", ""),
+        "bestStateHoldoutTargetGainPct": best_state.get("holdout_targetGainVsNominalPct", ""),
+        "bestStateHoldoutProtectedMaxRegressionKmS": best_state.get("holdout_protectedMaxRegressionKmS", ""),
+        "bestStateHoldoutUtility": best_state_holdout,
+        "bestNullHoldoutUtility": best_null_holdout,
+        "nullMargin": null_margin,
+        "oracleHoldoutHighGainPct": oracle_summary.get("holdout_highGainVsNominalPct", ""),
+        "weakSystematicsLeakage": 0,
+        "lawChanged": False,
+        "browserChanged": False,
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", track_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", all_case_rows)
+    write_csv(out_dir / f"{prefix}_variant_scores.csv", fixed_variant_summaries)
+    write_csv(out_dir / f"{prefix}_state_rule_scores.csv", state_rule_rows[:500])
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", target_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    formula = {
+        "candidateId": "observed-state-response-v18-external-ml-gap-test",
+        "status": verdict,
+        "lawChanged": False,
+        "browserChanged": False,
+        "baseLaw": "locked v18.30/v18.26 observed-state candidate support cache",
+        "mechanismTested": "replace fixed SPARC disk/bulge M/L with source numeric Ydisk/Ybul before scoring the locked support field",
+        "source": summary["source"],
+        "sourceClassification": summary["sourceClassification"],
+        "bestFixedVariant": summary["bestFixedVariant"],
+        "bestStateVariantId": summary["bestStateVariantId"],
+        "bestStateRuleId": summary["bestStateRuleId"],
+        "forbiddenInputsUsedInFormula": False,
+        "notTransportLawBecause": "Li+ 2020 Ydisk/Ybul are dynamical halo-fit outputs; useful for sensitivity and gap diagnosis, not direct MTS law inputs.",
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18 External M/L Gap Test",
+        "",
+        "This mode tests whether source numeric stellar M/L values close the remaining v18 competitor-gap cases. It does not change the MTS law, q, Gamma0, the support cache, or the browser preset.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Source rows: `{len(catalog_rows)}`.",
+        f"- M/L variants tested: `{len(variant_ids)}`.",
+        f"- Best fixed source-M/L variant: `{summary['bestFixedVariant']}`.",
+        f"- Best fixed holdout high-RMSE gain: `{fmt(parse_float(summary['bestFixedHoldoutHighGainPct']))}%`.",
+        f"- Best state-gated source-M/L rule: `{summary['bestStateRuleId'] or 'none'}`.",
+        f"- Best state-gated variant: `{summary['bestStateVariantId'] or 'none'}`.",
+        f"- State-gated holdout high-RMSE gain: `{fmt(parse_float(summary['bestStateHoldoutHighGainPct']))}%`.",
+        f"- State-gated holdout target-gap gain: `{fmt(parse_float(summary['bestStateHoldoutTargetGainPct']))}%`.",
+        f"- State-gated protected max regression: `{fmt(parse_float(summary['bestStateHoldoutProtectedMaxRegressionKmS']))}` km/s.",
+        f"- Best state/null holdout utility: `{fmt(best_state_holdout)}` / `{fmt(best_null_holdout)}`; margin `{fmt(null_margin)}`.",
+        f"- Per-galaxy source-M/L oracle holdout high-RMSE gain: `{fmt(parse_float(summary['oracleHoldoutHighGainPct']))}%`.",
+        "",
+        "## Track Scores",
+        "",
+        "| Track | Type | Holdout high gain | Holdout target gain | Holdout protected max regression | Holdout utility |",
+        "| --- | --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in sorted(track_rows, key=lambda item: -parse_float(item.get("holdoutUtility"), -999.0))[:20]:
+        report.append(
+            f"| {row['trackId']} | {row['trackType']} | {fmt(row['holdout_highGainVsNominalPct'])}% | {fmt(row['holdout_targetGainVsNominalPct'])}% | {fmt(row['holdout_protectedMaxRegressionKmS'])} | {fmt(row.get('holdoutUtility', v18_external_ml_gap_track_utility(row, 'holdout')))} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Guard",
+            "",
+            "These M/L values are source-backed numerical values, but the Li+ 2020 catalogue values are fitted together with halo models. They are therefore allowed as sensitivity evidence and competitor-gap diagnosis, not as direct MTS transport-law formula inputs.",
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": summary["analysisName"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_variant_scores.csv",
+            f"{prefix}_state_rule_scores.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18externalmlgaptest(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_EXTERNAL_ML_GAP_TEST_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE
+    capsule = write_v18_external_ml_gap_test_artifacts(out_dir, source_cache, args.offline)
+    summary = capsule["summary"]
+    print("MTS v18 external M/L gap test")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"variants={summary['variantCount']}",
+                f"best_fixed={summary['bestFixedVariant']}",
+                f"fixed_holdout_high_gain={fmt(parse_float(summary['bestFixedHoldoutHighGainPct']))}%",
+                f"best_state={summary['bestStateRuleId']}",
+                f"state_holdout_high_gain={fmt(parse_float(summary['bestStateHoldoutHighGainPct']))}%",
+                f"state_target_gain={fmt(parse_float(summary['bestStateHoldoutTargetGainPct']))}%",
+                f"null_margin={fmt(parse_float(summary['nullMargin']))}",
+            ]
+        )
+    )
+    print(f"Wrote v18 external M/L gap test to {out_dir.resolve()}")
+
+
 V18_COMPETITOR_GAP_TARGET_THRESHOLD_KMS = 8.0
 V18_COMPETITOR_GAP_COMPLETION_GRID = [0.0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.65]
 V18_COMPETITOR_GAP_SUPPRESSION_GRID = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
@@ -91861,6 +92371,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18mlcatalogbenchmark",
             "v18mldiscriminator",
             "observedstatev18mldiscriminator",
+            "v18externalmlgaptest",
+            "observedstatev18externalmlgaptest",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -92213,6 +92725,8 @@ def main() -> None:
         cmd_v18mlcatalogbenchmark(args)
     elif args.mode in {"v18mldiscriminator", "observedstatev18mldiscriminator"}:
         cmd_v18mldiscriminator(args)
+    elif args.mode in {"v18externalmlgaptest", "observedstatev18externalmlgaptest"}:
+        cmd_v18externalmlgaptest(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
