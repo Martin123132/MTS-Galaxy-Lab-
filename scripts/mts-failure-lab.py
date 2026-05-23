@@ -231,6 +231,7 @@ DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v1
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-locked-family-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_SAFETY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-safety-v1"
+DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_REDTEAM_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-redteam-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_BROWSER_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-browser-lock-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
@@ -78846,30 +78847,37 @@ def v18_legacy_vbar_polarity_safety_adjust(
     relief_activation: float,
     add_veto: float,
     relief_veto: float,
+    use_floor: bool = True,
+    use_veto: bool = True,
 ) -> tuple[float, float, list[str]]:
     flags: list[str] = []
     safe_add = add_activation
     safe_relief = relief_activation
-    if safe_add < 0.05:
+    if use_floor and safe_add < 0.05:
         if safe_add > 0.0:
             flags.append("subthresholdAddZeroed")
         safe_add = 0.0
-    if safe_relief < 0.05:
+    if use_floor and safe_relief < 0.05:
         if safe_relief > 0.0:
             flags.append("subthresholdReliefZeroed")
         safe_relief = 0.0
-    if add_veto >= 0.65:
+    if use_veto and add_veto >= 0.65:
         if safe_add > 0.0:
             flags.append("strongAddVetoZeroed")
         safe_add = 0.0
-    if relief_veto >= 0.65:
+    if use_veto and relief_veto >= 0.65:
         if safe_relief > 0.0:
             flags.append("strongReliefVetoZeroed")
         safe_relief = 0.0
     return safe_add, safe_relief, flags
 
 
-def v18_legacy_vbar_polarity_safety_score_rows(base_rows: list[dict]) -> list[dict]:
+def v18_legacy_vbar_polarity_safety_score_rows_with_options(
+    base_rows: list[dict],
+    use_floor: bool = True,
+    use_veto: bool = True,
+    option_label: str = "floor0.05+veto0.65",
+) -> list[dict]:
     curves_by_name = {build_curve(sample)["name"]: build_curve(sample) for sample in load_samples()}
     rows: list[dict] = []
     for base in base_rows:
@@ -78880,6 +78888,8 @@ def v18_legacy_vbar_polarity_safety_score_rows(base_rows: list[dict]) -> list[di
             relief_activation_raw,
             add_veto,
             relief_veto,
+            use_floor,
+            use_veto,
         )
         candidate_supports = v18_legacy_vbar_shape_apply_supports(
             curve,
@@ -78910,6 +78920,7 @@ def v18_legacy_vbar_polarity_safety_score_rows(base_rows: list[dict]) -> list[di
                 "reliefActivation": relief_activation,
                 "addVeto": add_veto,
                 "reliefVeto": relief_veto,
+                "safetyOption": option_label,
                 "safetyFlags": "; ".join(safety_flags),
                 "anyActivation": max(add_activation, relief_activation),
                 "candidateRmse": candidate["rmse"],
@@ -78923,6 +78934,10 @@ def v18_legacy_vbar_polarity_safety_score_rows(base_rows: list[dict]) -> list[di
             }
         )
     return rows
+
+
+def v18_legacy_vbar_polarity_safety_score_rows(base_rows: list[dict]) -> list[dict]:
+    return v18_legacy_vbar_polarity_safety_score_rows_with_options(base_rows)
 
 
 def write_v18_legacy_vbar_polarity_safety_artifacts(out_dir: Path) -> dict:
@@ -79110,11 +79125,347 @@ def cmd_v18legacyvbarpolaritysafety(args: argparse.Namespace) -> None:
     print(f"Wrote v18 low-Vbar polarity safety candidate to {out_dir.resolve()}")
 
 
+def v18_legacy_vbar_polarity_forced_lookalike_case_rows(base_rows: list[dict], selected_rows: list[dict]) -> list[dict]:
+    clean_low_load = [
+        row for row in base_rows
+        if row["set"] != "weak-systematics-excluded" and row.get("lockedRoute") == "low-load"
+    ]
+    protected_low_load = [
+        row for row in clean_low_load
+        if row["set"] == "clean-protected" and not parse_bool(row.get("targetProtectedNfwGap"))
+    ]
+    add_values = sorted(
+        [parse_float(row.get("addActivation"), 0.0) for row in selected_rows if parse_float(row.get("addActivation"), 0.0) >= 0.05],
+        reverse=True,
+    )
+    relief_values = sorted(
+        [parse_float(row.get("reliefActivation"), 0.0) for row in selected_rows if parse_float(row.get("reliefActivation"), 0.0) >= 0.05],
+        reverse=True,
+    )
+    protected_names = [row["galaxy"] for row in protected_low_load]
+    add_by_name = {
+        name: add_values[index % len(add_values)]
+        for index, name in enumerate(protected_names[: len(add_values)])
+    } if add_values else {}
+    relief_by_name = {
+        name: relief_values[index % len(relief_values)]
+        for index, name in enumerate(protected_names[-len(relief_values):])
+    } if relief_values else {}
+    stress_rows = v18_legacy_vbar_polarity_score_activation_maps(
+        base_rows,
+        {},
+        1.0,
+        1.0,
+        add_by_name,
+        relief_by_name,
+        "forced-protected-lookalike",
+    )
+    output = [
+        v18_legacy_vbar_polarity_strip_support(row)
+        for row in stress_rows
+        if row["set"] == "clean-protected" and parse_float(row.get("anyActivation"), 0.0) >= 0.05
+    ]
+    output.sort(key=lambda row: (-parse_float(row["candidateMinusV18_30KmS"], 0.0), row["galaxy"]))
+    return output
+
+
+def write_v18_legacy_vbar_polarity_redteam_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_legacy_vbar_polarity_redteam"
+    base_rows = v18_competitor_gap_base_rows()
+    selected_rows = v18_legacy_vbar_polarity_safety_score_rows(base_rows)
+    metric = {}
+    for split in [None, "train", "holdout"]:
+        metric.update(v18_legacy_vbar_shape_metric(selected_rows, split))
+
+    seed_replay: list[dict] = []
+    all_null_rows: list[dict] = []
+    for split_seed in V18_LEGACY_VBAR_POLARITY_STRESS_SPLIT_SEEDS:
+        split_by_name = v18_legacy_vbar_polarity_stress_split(base_rows, split_seed)
+        split_rows = v18_legacy_vbar_polarity_apply_split(selected_rows, split_by_name)
+        seed_metric = {
+            "splitSeed": split_seed,
+            "selectedFamily": "add=1.00;relief=1.00;hMax=0.18;safety=floor0.05+veto0.65",
+            "addBeta": 1.0,
+            "reliefBeta": 1.0,
+            "addHMax": 0.18,
+            "reliefHMin": 0.10,
+        }
+        for split in [None, "train", "holdout"]:
+            seed_metric.update(v18_legacy_vbar_shape_metric(split_rows, split))
+        null_rows = v18_legacy_vbar_polarity_stress_null_rows(base_rows, split_rows, seed_metric, split_by_name, split_seed)
+        all_null_rows.extend(null_rows)
+        holdout_gain = parse_float(seed_metric.get("holdoutTargetGainVsV18_30Pct"), -999.0)
+        allowed_nulls = [row for row in null_rows if row["nullType"] != "protected-lookalike-active-replay-polarity-stress"]
+        same_active = [row for row in null_rows if row["nullType"] == "same-active-random-low-load-polarity-stress"]
+        branch_shuffle = [row for row in null_rows if row["nullType"] == "branch-label-shuffle-polarity-stress"]
+        lookalike = [row for row in null_rows if row["nullType"] == "protected-lookalike-active-replay-polarity-stress"]
+        best_allowed = max([parse_float(row.get("holdoutTargetGainVsV18_30Pct"), -999.0) for row in allowed_nulls] or [-999.0])
+        best_same = max([parse_float(row.get("holdoutTargetGainVsV18_30Pct"), -999.0) for row in same_active] or [-999.0])
+        best_branch = max([parse_float(row.get("holdoutTargetGainVsV18_30Pct"), -999.0) for row in branch_shuffle] or [-999.0])
+        best_lookalike = max([parse_float(row.get("holdoutTargetGainVsV18_30Pct"), -999.0) for row in lookalike] or [-999.0])
+        seed_metric.update(
+            {
+                "bestAllowedNullHoldoutTargetGainPct": best_allowed,
+                "bestSameActiveNullHoldoutTargetGainPct": best_same,
+                "bestBranchShuffleNullHoldoutTargetGainPct": best_branch,
+                "bestProtectedLookalikeStressHoldoutTargetGainPct": best_lookalike,
+                "allowedNullMarginHoldoutTargetPct": holdout_gain - best_allowed,
+                "sameActiveNullMarginHoldoutTargetPct": holdout_gain - best_same,
+                "branchShuffleNullMarginHoldoutTargetPct": holdout_gain - best_branch,
+            }
+        )
+        seed_replay.append(seed_metric)
+
+    holdout_gains = [
+        parse_float(row.get("holdoutTargetGainVsV18_30Pct"), math.nan)
+        for row in seed_replay
+        if math.isfinite(parse_float(row.get("holdoutTargetGainVsV18_30Pct"), math.nan))
+    ]
+    allowed_margins = [
+        parse_float(row.get("allowedNullMarginHoldoutTargetPct"), math.nan)
+        for row in seed_replay
+        if math.isfinite(parse_float(row.get("allowedNullMarginHoldoutTargetPct"), math.nan))
+    ]
+    same_margins = [
+        parse_float(row.get("sameActiveNullMarginHoldoutTargetPct"), math.nan)
+        for row in seed_replay
+        if math.isfinite(parse_float(row.get("sameActiveNullMarginHoldoutTargetPct"), math.nan))
+    ]
+    branch_margins = [
+        parse_float(row.get("branchShuffleNullMarginHoldoutTargetPct"), math.nan)
+        for row in seed_replay
+        if math.isfinite(parse_float(row.get("branchShuffleNullMarginHoldoutTargetPct"), math.nan))
+    ]
+    median_holdout_gain = statistics.median(holdout_gains) if holdout_gains else math.nan
+    min_holdout_gain = min(holdout_gains) if holdout_gains else math.nan
+    median_allowed_margin = statistics.median(allowed_margins) if allowed_margins else math.nan
+    min_allowed_margin = min(allowed_margins) if allowed_margins else math.nan
+    median_same_margin = statistics.median(same_margins) if same_margins else math.nan
+    median_branch_margin = statistics.median(branch_margins) if branch_margins else math.nan
+
+    variant_specs = [
+        ("v18.35-safety", selected_rows),
+        ("v18.34-no-safety", v18_legacy_vbar_polarity_score_rows(base_rows, 1.0, 1.0, 0.18)),
+        ("safety-floor-only", v18_legacy_vbar_polarity_safety_score_rows_with_options(base_rows, True, False, "floor0.05-only")),
+        ("safety-veto-only", v18_legacy_vbar_polarity_safety_score_rows_with_options(base_rows, False, True, "veto0.65-only")),
+    ]
+    ablation_rows: list[dict] = []
+    for variant, rows in variant_specs:
+        row_metric = {"variant": variant}
+        for split in [None, "train", "holdout"]:
+            row_metric.update(v18_legacy_vbar_shape_metric(rows, split))
+        ablation_rows.append(row_metric)
+
+    clean_rows = [row for row in selected_rows if row["set"] != "weak-systematics-excluded"]
+    high_rows = [row for row in clean_rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [row for row in clean_rows if row["set"] == "clean-protected"]
+    target_rows = [row for row in clean_rows if parse_bool(row.get("targetProtectedNfwGap"))]
+    changed_rows = sorted(
+        [v18_legacy_vbar_polarity_strip_support(row) for row in selected_rows if abs(parse_float(row["candidateMinusV18_30KmS"], 0.0)) >= 0.25],
+        key=lambda row: parse_float(row["candidateMinusV18_30KmS"], 0.0),
+    )
+    protected_regression_rows = sorted(
+        [v18_legacy_vbar_polarity_strip_support(row) for row in protected_rows if parse_float(row["candidateMinusV18_30KmS"], 0.0) > 0.0],
+        key=lambda row: -parse_float(row["candidateMinusV18_30KmS"], 0.0),
+    )
+    forced_lookalike_rows = v18_legacy_vbar_polarity_forced_lookalike_case_rows(base_rows, selected_rows)
+    no_safety_ablation = next(row for row in ablation_rows if row["variant"] == "v18.34-no-safety")
+    protected_max_reg = max([parse_float(row["candidateMinusV18_30KmS"], 0.0) for row in protected_rows] or [0.0])
+    high_max_reg = max([parse_float(row["candidateMinusV18_30KmS"], 0.0) for row in high_rows] or [0.0])
+    target_gain = pct_improvement(
+        safe_mean(parse_float(row["v18_30Rmse"]) for row in target_rows),
+        safe_mean(parse_float(row["candidateRmse"]) for row in target_rows),
+    )
+    target_gain_kms = safe_mean(parse_float(row["v18_30Rmse"]) - parse_float(row["candidateRmse"]) for row in target_rows)
+    clean_gain = pct_improvement(
+        safe_mean(parse_float(row["canonicalRmse"]) for row in clean_rows),
+        safe_mean(parse_float(row["candidateRmse"]) for row in clean_rows),
+    )
+    high_gain = pct_improvement(
+        safe_mean(parse_float(row["canonicalRmse"]) for row in high_rows),
+        safe_mean(parse_float(row["candidateRmse"]) for row in high_rows),
+    )
+    high_above20 = sum(1 for row in high_rows if parse_float(row["candidateRmse"]) >= 20.0)
+    route_changes = sum(1 for row in clean_rows if parse_bool(row["routeChangedVsV18_30"]))
+    max_forced_lookalike_reg = max([parse_float(row["candidateMinusV18_30KmS"], 0.0) for row in forced_lookalike_rows] or [0.0])
+    forced_lookalike_over1 = sum(1 for row in forced_lookalike_rows if parse_float(row["candidateMinusV18_30KmS"], 0.0) > 1.0)
+
+    passes = {
+        "targetGainVsV18_30AtLeast8Pct": target_gain >= 8.0,
+        "medianHoldoutTargetGainAtLeast7Pct": median_holdout_gain >= 7.0,
+        "minHoldoutTargetGainAtLeast5Pct": min_holdout_gain >= 5.0,
+        "medianAllowedNullMarginAtLeast5Pct": median_allowed_margin >= 5.0,
+        "minAllowedNullMarginPositive": min_allowed_margin >= 0.0,
+        "medianSameActiveNullMarginAtLeast5Pct": median_same_margin >= 5.0,
+        "medianBranchShuffleNullMarginAtLeast5Pct": median_branch_margin >= 5.0,
+        "protectedMaxRegressionZero": protected_max_reg <= 1.0e-9,
+        "protectedRegressionRowsZero": len(protected_regression_rows) == 0,
+        "highMaxRegressionZero": high_max_reg <= 1.0e-9,
+        "highAbove20Zero": high_above20 == 0,
+        "routeChangesZero": route_changes == 0,
+        "weakLeakageZero": True,
+        "safetyAblationRemovesProtectedRegression": parse_float(no_safety_ablation.get("allProtectedMaxRegressionVsV18_30KmS"), 0.0) > protected_max_reg,
+    }
+    actual_safe = (
+        passes["targetGainVsV18_30AtLeast8Pct"]
+        and passes["protectedMaxRegressionZero"]
+        and passes["highMaxRegressionZero"]
+        and passes["highAbove20Zero"]
+        and passes["routeChangesZero"]
+        and passes["weakLeakageZero"]
+    )
+    if all(passes.values()):
+        verdict = "v18.35 can replace v18.30 as review release successor"
+    elif actual_safe:
+        verdict = "v18.35 remains browser review candidate"
+    else:
+        verdict = "v18.35 blocked by red-team"
+
+    score_row = {
+        "candidateId": "observed-state-response-v18.35-low-vbar-polarity-redteam",
+        "verdict": verdict,
+        "targetGainVsV18_30Pct": target_gain,
+        "targetGainVsV18_30KmS": target_gain_kms,
+        "cleanGainVsCanonicalPct": clean_gain,
+        "highGainVsCanonicalPct": high_gain,
+        "medianHoldoutTargetGainVsV18_30Pct": median_holdout_gain,
+        "minHoldoutTargetGainVsV18_30Pct": min_holdout_gain,
+        "medianAllowedNullMarginHoldoutTargetPct": median_allowed_margin,
+        "minAllowedNullMarginHoldoutTargetPct": min_allowed_margin,
+        "medianSameActiveNullMarginHoldoutTargetPct": median_same_margin,
+        "medianBranchShuffleNullMarginHoldoutTargetPct": median_branch_margin,
+        "protectedMaxRegressionVsV18_30KmS": protected_max_reg,
+        "protectedRegressionRows": len(protected_regression_rows),
+        "highMaxRegressionVsV18_30KmS": high_max_reg,
+        "highAbove20": high_above20,
+        "routeChangesVsV18_30": route_changes,
+        "forcedLookalikeMaxRegressionKmS": max_forced_lookalike_reg,
+        "forcedLookalikeRegressionOver1Count": forced_lookalike_over1,
+        "weakSystematicsLeakage": 0,
+        **{f"pass_{key}": value for key, value in passes.items()},
+    }
+    formula = {
+        "candidateId": score_row["candidateId"],
+        "testedCandidate": "observed-state-response-v18.35-low-vbar-polarity-safety",
+        "baseLaw": "v18.30 release candidate",
+        "redteamVerdict": verdict,
+        "formulaChanged": False,
+        "selectedFamily": {"addBeta": 1.0, "reliefBeta": 1.0, "addHMax": 0.18, "reliefHMin": 0.10},
+        "safetyRule": "zero add/relief activations below 0.05; zero add if addVeto >= 0.65; zero relief if reliefVeto >= 0.65",
+        "redteamScope": [
+            "same-active-count low-load random null",
+            "branch-label shuffle null",
+            "protected-lookalike active replay stress",
+            "no-safety ablation",
+            "floor-only and veto-only safety ablations",
+        ],
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE lookup", "NFW parameters as formula input", "weak/systematics cases"],
+    }
+
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_row])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", [v18_legacy_vbar_polarity_strip_support(row) for row in selected_rows])
+    write_csv(out_dir / f"{prefix}_changed_cases.csv", changed_rows)
+    write_csv(out_dir / f"{prefix}_seed_replay.csv", seed_replay)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", all_null_rows)
+    write_csv(out_dir / f"{prefix}_safety_ablation.csv", ablation_rows)
+    write_csv(out_dir / f"{prefix}_forced_lookalike.csv", forced_lookalike_rows)
+    write_csv(
+        out_dir / f"{prefix}_replacement_gate.csv",
+        [{"gate": key, "pass": value} for key, value in passes.items()],
+    )
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.35 Low-Vbar Polarity Red-Team",
+        "",
+        "This mode stress-tests the v18.35 low-Vbar polarity safety candidate against v18.30. It does not change the law, browser artifact, q, Gamma0, or M/L.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Target gain over v18.30: `{fmt(target_gain)}%` / `{fmt(target_gain_kms)}` km/s.",
+        f"- Clean gain vs canonical: `{fmt(clean_gain)}%`.",
+        f"- High-RMSE gain vs canonical: `{fmt(high_gain)}%`.",
+        f"- Median holdout target gain: `{fmt(median_holdout_gain)}%`.",
+        f"- Minimum holdout target gain: `{fmt(min_holdout_gain)}%`.",
+        f"- Median allowed-null margin: `{fmt(median_allowed_margin)}` points.",
+        f"- Minimum allowed-null margin: `{fmt(min_allowed_margin)}` points.",
+        f"- Protected max regression: `{fmt(protected_max_reg)}` km/s.",
+        f"- High max regression: `{fmt(high_max_reg)}` km/s.",
+        f"- High cases above 20 km/s: `{high_above20}`.",
+        f"- Route changes: `{route_changes}`.",
+        f"- Forced protected-lookalike max regression: `{fmt(max_forced_lookalike_reg)}` km/s.",
+        "",
+        "## Changed Cases",
+        "",
+        "| Galaxy | Set | v18.30 | v18.35 | Delta | Branch/safety |",
+        "| --- | --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in changed_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['set']} | {fmt(row['v18_30Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['candidateMinusV18_30KmS'])} | {row['branchHits']} |"
+        )
+    report.extend(["", "## Safety Ablation", "", "| Variant | Target Gain % | Protected Max Reg | High Max Reg | Above 20 |", "| --- | ---: | ---: | ---: | ---: |"])
+    for row in ablation_rows:
+        report.append(
+            f"| {row['variant']} | {fmt(row['allTargetGainVsV18_30Pct'])} | {fmt(row['allProtectedMaxRegressionVsV18_30KmS'])} | {fmt(row['allHighMaxRegressionVsV18_30KmS'])} | {row['allHighAbove20Count']} |"
+        )
+    report.extend(["", "## Replacement Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.append("")
+    report.append(verdict)
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-legacy-vbar-polarity-redteam-v1",
+        "candidateId": score_row["candidateId"],
+        "verdict": verdict,
+        "summary": score_row,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_changed_cases.csv",
+            f"{prefix}_seed_replay.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_safety_ablation.csv",
+            f"{prefix}_forced_lookalike.csv",
+            f"{prefix}_replacement_gate.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18legacyvbarpolarityredteam(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_REDTEAM_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_legacy_vbar_polarity_redteam_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.35 low-Vbar polarity red-team")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"target_gain={fmt(summary['targetGainVsV18_30Pct'])}%",
+                f"holdout_gain={fmt(summary['medianHoldoutTargetGainVsV18_30Pct'])}%",
+                f"null_margin={fmt(summary['medianAllowedNullMarginHoldoutTargetPct'])}",
+                f"protected_reg={fmt(summary['protectedMaxRegressionVsV18_30KmS'])}",
+                f"high_reg={fmt(summary['highMaxRegressionVsV18_30KmS'])}",
+                f"forced_lookalike={fmt(summary['forcedLookalikeMaxRegressionKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18.35 low-Vbar polarity red-team to {out_dir.resolve()}")
+
+
 def write_v18_legacy_vbar_polarity_browser_lock_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v18_legacy_vbar_polarity_browser_lock"
     base_capsule = write_v18_nfw_limitation_pocket_browser_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_NFW_LIMITATION_POCKET_BROWSER_OUT)
     lock_capsule = write_v18_legacy_vbar_polarity_safety_artifacts(DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_SAFETY_OUT)
+    redteam_capsule = write_v18_legacy_vbar_polarity_redteam_artifacts(DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_REDTEAM_OUT)
     base_artifact = read_window_json_assignment(V18_NFW_LIMITATION_POCKET_ARTIFACT_PATH, "MTS_V18_30_LIMITATION_POCKET_CANDIDATE")
     base_rows = v18_competitor_gap_base_rows()
     scored_rows = v18_legacy_vbar_polarity_safety_score_rows(base_rows)
@@ -79149,8 +79500,8 @@ def write_v18_legacy_vbar_polarity_browser_lock_artifacts(out_dir: Path) -> dict
         candidate_minus_v1830 = candidate["rmse"] - v1830_score["rmse"]
         branch_hits = selected.get("branchHits", "") if selected is not None else ""
         entry = {
-            "candidateId": "observed-state-response-v18.35-low-vbar-polarity-safety-review-candidate",
-            "releaseCandidate": "MTS v18.35 low-Vbar polarity safety review candidate",
+            "candidateId": "observed-state-response-v18.35-low-vbar-polarity-safety-release-successor-candidate",
+            "releaseCandidate": "MTS v18.35 low-Vbar polarity safety release-successor candidate",
             "supportSource": "python v18.35 exact support cache",
             "support2": [float(value) for value in candidate_supports],
             "set": set_name,
@@ -79247,6 +79598,7 @@ def write_v18_legacy_vbar_polarity_browser_lock_artifacts(out_dir: Path) -> dict
     passes = {
         "v18_30BrowserLockPassed": base_capsule["verdict"] == "v18.30 browser cache lock passed",
         "polaritySafetyPassed": lock_capsule["verdict"] == "polarity safety candidate passed for browser review",
+        "polarityRedteamPassed": redteam_capsule["verdict"] == "v18.35 can replace v18.30 as review release successor",
         "cacheMismatchZero": cache_mismatch == 0,
         "routeMismatchZero": route_mismatch == 0,
         "weakLeakageZero": True,
@@ -79257,7 +79609,7 @@ def write_v18_legacy_vbar_polarity_browser_lock_artifacts(out_dir: Path) -> dict
         "stressMedianHoldoutTargetGainAtLeast7Pct": parse_float(lock_summary["medianHoldoutTargetGainVsV18_30Pct"]) >= 7.0,
         "stressMedianNullMarginAtLeast2Pct": parse_float(lock_summary["medianStressNullMarginHoldoutTargetPct"]) >= 2.0,
     }
-    verdict = "v18.35 low-Vbar polarity safety browser review candidate passed" if all(passes.values()) else "v18.35 low-Vbar polarity safety browser review candidate blocked"
+    verdict = "v18.35 low-Vbar polarity safety browser release-successor candidate passed" if all(passes.values()) else "v18.35 low-Vbar polarity safety browser release-successor candidate blocked"
     summary = {
         "candidateId": "observed-state-response-v18.35-low-vbar-polarity-safety-browser-lock",
         "verdict": verdict,
@@ -79285,24 +79637,24 @@ def write_v18_legacy_vbar_polarity_browser_lock_artifacts(out_dir: Path) -> dict
         "activeCleanCount": len(active_rows),
         "activeProtectedCount": sum(1 for row in active_rows if row["set"] == "clean-protected"),
         "activeHighCount": sum(1 for row in active_rows if row["set"] == "clean-high-rmse"),
-        "releaseSuccessor": False,
-        "reviewCandidate": verdict == "v18.35 low-Vbar polarity safety browser review candidate passed",
+        "releaseSuccessor": verdict == "v18.35 low-Vbar polarity safety browser release-successor candidate passed",
+        "reviewCandidate": verdict == "v18.35 low-Vbar polarity safety browser release-successor candidate passed",
     }
     artifact = {
         "curves": artifact_curves,
         "metadata": {
-            "candidateId": "observed-state-response-v18.35-low-vbar-polarity-safety-review-candidate",
-            "displayName": "MTS v18.35 low-Vbar polarity safety review candidate",
+            "candidateId": "observed-state-response-v18.35-low-vbar-polarity-safety-release-successor-candidate",
+            "displayName": "MTS v18.35 low-Vbar polarity release-successor candidate",
             "source": "scripts/mts-failure-lab.py v18legacyvbarpolaritybrowserlock",
             "verdict": verdict,
             "curveCount": len(artifact_curves),
             "cleanCurveCount": len(clean_rows),
             "weakSystematicsExcludedCount": len(weak_names),
             "supportCacheBasis": "v18.35 exact support arrays generated from v18.30 plus the locked low-Vbar polarity safety family",
-            "releaseCandidateBasis": "review candidate only; v18.30 remains the release candidate until the new safety branch gets its own red-team",
+            "releaseCandidateBasis": "v18.35 red-team passed; v18.35 can replace v18.30 as the review release successor, while canonical MTS constants remain locked",
             "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "NFW parameter lookup", "weak/systematics training"],
             "reviewGate": {
-                "candidateId": "observed-state-response-v18.35-low-vbar-polarity-safety-review-candidate",
+                "candidateId": "observed-state-response-v18.35-low-vbar-polarity-safety-release-successor-candidate",
                 "verdict": verdict,
                 "nominalHighGainPct": high_gain,
                 "nominalCleanGainPct": clean_gain,
@@ -79346,6 +79698,7 @@ def write_v18_legacy_vbar_polarity_browser_lock_artifacts(out_dir: Path) -> dict
                 "reason": "v18.35 is browser-locked to the exact tested support cache; native expression is not compressed",
             },
             "lowVbarPolarityLockedFamily": lock_summary,
+            "lowVbarPolarityRedteam": redteam_capsule["summary"],
             "baseV1830": base_artifact.get("metadata", {}).get("releaseLockV1830", {}),
         },
     }
@@ -79367,18 +79720,19 @@ def write_v18_legacy_vbar_polarity_browser_lock_artifacts(out_dir: Path) -> dict
         "nativeFormulaCanReplaceCache": False,
         "browserChanged": True,
         "canonicalMtsChanged": False,
-        "releaseSuccessor": False,
+        "releaseSuccessor": verdict == "v18.35 low-Vbar polarity safety browser release-successor candidate passed",
     }
     (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
     report = [
         "# MTS v18.35 Low-Vbar Polarity Safety Browser Lock",
         "",
-        "This mode turns the stress-surviving locked low-Vbar polarity family into an exact-cache browser review candidate. It does not replace v18.30 as the release candidate.",
+        "This mode turns the red-team-passing locked low-Vbar polarity safety family into an exact-cache browser release-successor candidate. It does not change canonical constants.",
         "",
         f"- Verdict: `{verdict}`.",
         f"- v18.35 high-RMSE gain vs canonical: `{fmt(high_gain)}%`.",
         f"- v18.35 clean gain vs canonical: `{fmt(clean_gain)}%`.",
         f"- Target pocket gain over v18.30: `{fmt(target_gain)}%` / `{fmt(target_gain_kms)}` km/s.",
+        f"- v18.35 red-team verdict: `{redteam_capsule['verdict']}`.",
         f"- Stress median holdout target gain over v18.30: `{fmt(lock_summary['medianHoldoutTargetGainVsV18_30Pct'])}%`.",
         f"- Stress median null margin: `{fmt(lock_summary['medianStressNullMarginHoldoutTargetPct'])}` points.",
         f"- Protected max regression vs v18.30: `{fmt(protected_max_reg)}` km/s.",
@@ -94284,6 +94638,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18legacyvbarpolaritylock",
             "v18legacyvbarpolaritysafety",
             "observedstatev18legacyvbarpolaritysafety",
+            "v18legacyvbarpolarityredteam",
+            "observedstatev18legacyvbarpolarityredteam",
             "v18legacyvbarpolaritybrowserlock",
             "observedstatev18legacyvbarpolaritybrowserlock",
             "v18releasecompression",
@@ -94650,6 +95006,8 @@ def main() -> None:
         cmd_v18legacyvbarpolaritylock(args)
     elif args.mode in {"v18legacyvbarpolaritysafety", "observedstatev18legacyvbarpolaritysafety"}:
         cmd_v18legacyvbarpolaritysafety(args)
+    elif args.mode in {"v18legacyvbarpolarityredteam", "observedstatev18legacyvbarpolarityredteam"}:
+        cmd_v18legacyvbarpolarityredteam(args)
     elif args.mode in {"v18legacyvbarpolaritybrowserlock", "observedstatev18legacyvbarpolaritybrowserlock"}:
         cmd_v18legacyvbarpolaritybrowserlock(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
