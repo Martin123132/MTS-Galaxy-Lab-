@@ -226,6 +226,7 @@ DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v1
 DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-ml-catalog-benchmark-v1")
 DEFAULT_OBSERVED_STATE_V18_ML_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-sensitivity-discriminator-v1"
 DEFAULT_OBSERVED_STATE_V18_EXTERNAL_ML_GAP_TEST_OUT = OUTPUT_PACK_ROOT / "mts-v18-external-ml-gap-test-v1"
+DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_MTS_LAW_DOCX = GALAXY_WORK_ROOT / "g project" / "MTS_Galaxy_Law_v16.docx"
 V18_BROWSER_ARTIFACT_PATH = ROOT / "data" / "v18-01-review-candidate.js"
 V18_RELEASE_CANDIDATE_ARTIFACT_PATH = ROOT / "data" / "v18-05-release-candidate.js"
@@ -77544,6 +77545,388 @@ def cmd_v18externalmlgaptest(args: argparse.Namespace) -> None:
     print(f"Wrote v18 external M/L gap test to {out_dir.resolve()}")
 
 
+V18_LEGACY_VBAR_SHAPE_SEEDS = [20260523, 20260524, 271828, 314159, 42, 12345, 8675309, 19, 31]
+V18_LEGACY_VBAR_SHAPE_ADD_BETAS = [0.25, 0.35, 0.45, 0.60, 0.75]
+V18_LEGACY_VBAR_SHAPE_RELIEF_BETAS = [0.15, 0.25, 0.35, 0.45, 0.60]
+V18_LEGACY_VBAR_SHAPE_ADD_H_MAX = [0.18, 0.20, 0.22]
+V18_LEGACY_VBAR_SHAPE_RELIEF_H_MIN = [0.10, 0.16]
+
+
+def v18_legacy_vbar_shape_log_vbar_max(curve: dict) -> float:
+    values = [math.sqrt(max(0.0, point.get("bar2", 0.0))) for point in curve.get("points", [])]
+    return math.log10(max(max(values or [0.0]), 1.0e-9))
+
+
+def v18_legacy_vbar_shape_profile_shape(x_value: float) -> float:
+    return 0.20 + 0.80 * v18_nfw_gap_candidate_smooth(x_value, 0.20, 0.80)
+
+
+def v18_legacy_vbar_shape_activations(base_row: dict, curve: dict, add_h_max: float, relief_h_min: float) -> tuple[float, float, float]:
+    log_vbar_max = v18_legacy_vbar_shape_log_vbar_max(curve)
+    if base_row.get("lockedRoute") != "low-load":
+        return log_vbar_max, 0.0, 0.0
+    h_over_rout = parse_float(base_row.get("hOverRout"), 0.0)
+    outer_gas = parse_float(base_row.get("outerGasShare"), 0.0)
+    add_activation = min(
+        v18_nfw_gap_candidate_smooth(log_vbar_max, 1.45, 1.70),
+        v18_nfw_gap_candidate_smooth(add_h_max - h_over_rout, 0.0, 0.08),
+        v18_nfw_gap_candidate_smooth(outer_gas, 0.65, 0.85),
+    )
+    relief_activation = min(
+        v18_nfw_gap_candidate_smooth(1.35 - log_vbar_max, 0.0, 0.20),
+        v18_nfw_gap_candidate_smooth(0.80 - outer_gas, 0.0, 0.25),
+        v18_nfw_gap_candidate_smooth(h_over_rout, relief_h_min, 0.38),
+    )
+    return log_vbar_max, clamp(add_activation, 0.0, 1.0), clamp(relief_activation, 0.0, 1.0)
+
+
+def v18_legacy_vbar_shape_apply_supports(
+    curve: dict,
+    base_supports: list[float],
+    add_beta: float,
+    relief_beta: float,
+    add_activation: float,
+    relief_activation: float,
+) -> list[float]:
+    output: list[float] = []
+    for point, support in zip(curve["points"], base_supports):
+        x_value = point.get("x", point["r"] / max(curve["rOut"], 1.0e-9))
+        shape = v18_legacy_vbar_shape_profile_shape(x_value)
+        factor = 1.0 + add_beta * add_activation * shape - relief_beta * relief_activation * shape
+        output.append(max(0.0, support * clamp(factor, 0.25, 2.20)))
+    return output
+
+
+def v18_legacy_vbar_shape_score_rows(
+    base_rows: list[dict],
+    add_beta: float,
+    relief_beta: float,
+    add_h_max: float,
+    relief_h_min: float,
+) -> list[dict]:
+    curves_by_name = {build_curve(sample)["name"]: build_curve(sample) for sample in load_samples()}
+    rows: list[dict] = []
+    for base in base_rows:
+        curve = curves_by_name[base["galaxy"]]
+        log_vbar_max, add_activation, relief_activation = v18_legacy_vbar_shape_activations(base, curve, add_h_max, relief_h_min)
+        candidate_supports = v18_legacy_vbar_shape_apply_supports(
+            curve,
+            base["baseSupport2"],
+            add_beta,
+            relief_beta,
+            add_activation,
+            relief_activation,
+        )
+        candidate = v18_competitor_support_score(curve, candidate_supports)
+        branch_hits = []
+        if add_activation >= 0.05 and add_beta > 0.0:
+            branch_hits.append("lowVbarCompactCompletion")
+        if relief_activation >= 0.05 and relief_beta > 0.0:
+            branch_hits.append("lowVbarDiffuseRelief")
+        rows.append(
+            {
+                **{key: value for key, value in base.items() if key != "baseSupport2"},
+                "addBeta": add_beta,
+                "reliefBeta": relief_beta,
+                "addHMax": add_h_max,
+                "reliefHMin": relief_h_min,
+                "logVbarMax": log_vbar_max,
+                "addActivation": add_activation,
+                "reliefActivation": relief_activation,
+                "anyActivation": max(add_activation, relief_activation),
+                "candidateRmse": candidate["rmse"],
+                "candidateMinusV18_30KmS": candidate["rmse"] - parse_float(base["v18_30Rmse"]),
+                "candidateGainVsV18_30Pct": pct_improvement(parse_float(base["v18_30Rmse"]), candidate["rmse"]),
+                "candidateGainVsCanonicalPct": pct_improvement(parse_float(base["canonicalRmse"]), candidate["rmse"]),
+                "candidateRoute": candidate["candidateRoute"],
+                "routeChangedVsV18_30": False,
+                "branchHits": "; ".join(branch_hits),
+                "support2": candidate_supports,
+            }
+        )
+    return rows
+
+
+def v18_legacy_vbar_shape_metric(rows: list[dict], split_filter: str | None = None) -> dict:
+    clean_rows = [
+        row for row in rows
+        if row["set"] != "weak-systematics-excluded" and (split_filter is None or row.get("split") == split_filter)
+    ]
+    target_rows = [row for row in clean_rows if parse_bool(row["targetProtectedNfwGap"])]
+    high_rows = [row for row in clean_rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [row for row in clean_rows if row["set"] == "clean-protected"]
+    active_rows = [row for row in clean_rows if parse_float(row.get("anyActivation"), 0.0) >= 0.05]
+    label = split_filter or "all"
+    return {
+        f"{label}CleanCount": len(clean_rows),
+        f"{label}TargetCount": len(target_rows),
+        f"{label}ActiveCleanCount": len(active_rows),
+        f"{label}ActiveHighCount": sum(1 for row in active_rows if row["set"] == "clean-high-rmse"),
+        f"{label}ActiveProtectedCount": sum(1 for row in active_rows if row["set"] == "clean-protected"),
+        f"{label}TargetGainVsV18_30Pct": pct_improvement(
+            safe_mean(parse_float(row["v18_30Rmse"]) for row in target_rows),
+            safe_mean(parse_float(row["candidateRmse"]) for row in target_rows),
+        ),
+        f"{label}TargetGainVsV18_30KmS": safe_mean(
+            parse_float(row["v18_30Rmse"]) - parse_float(row["candidateRmse"]) for row in target_rows
+        ),
+        f"{label}CleanGainVsCanonicalPct": pct_improvement(
+            safe_mean(parse_float(row["canonicalRmse"]) for row in clean_rows),
+            safe_mean(parse_float(row["candidateRmse"]) for row in clean_rows),
+        ),
+        f"{label}HighMaxRegressionVsV18_30KmS": max(
+            [parse_float(row["candidateRmse"]) - parse_float(row["v18_30Rmse"]) for row in high_rows] or [0.0]
+        ),
+        f"{label}ProtectedMaxRegressionVsV18_30KmS": max(
+            [parse_float(row["candidateRmse"]) - parse_float(row["v18_30Rmse"]) for row in protected_rows] or [0.0]
+        ),
+        f"{label}HighAbove20Count": sum(1 for row in high_rows if parse_float(row["candidateRmse"]) >= 20.0),
+        f"{label}RouteChangedCount": sum(1 for row in clean_rows if parse_bool(row["routeChangedVsV18_30"])),
+    }
+
+
+def v18_legacy_vbar_shape_selection_utility(metric: dict, label: str) -> float:
+    return (
+        4.0 * parse_float(metric.get(f"{label}TargetGainVsV18_30Pct"), -999.0)
+        + 12.0 * parse_float(metric.get(f"{label}TargetGainVsV18_30KmS"), -999.0)
+        + parse_float(metric.get(f"{label}CleanGainVsCanonicalPct"), -999.0)
+        - 40.0 * max(0.0, parse_float(metric.get(f"{label}ProtectedMaxRegressionVsV18_30KmS"), 999.0) - 1.0)
+        - 25.0 * parse_float(metric.get(f"{label}HighAbove20Count"), 999.0)
+        - 20.0 * max(0.0, parse_float(metric.get(f"{label}HighMaxRegressionVsV18_30KmS"), 999.0) - 1.0)
+    )
+
+
+def v18_legacy_vbar_shape_null_rows(selected_rows: list[dict], selected: dict) -> list[dict]:
+    base_rows = v18_competitor_gap_base_rows()
+    curves_by_name = {build_curve(sample)["name"]: build_curve(sample) for sample in load_samples()}
+    low_load_clean = [row for row in base_rows if row["set"] != "weak-systematics-excluded" and row.get("lockedRoute") == "low-load"]
+    add_values = sorted([parse_float(row.get("addActivation"), 0.0) for row in selected_rows if parse_float(row.get("addActivation"), 0.0) >= 0.05], reverse=True)
+    relief_values = sorted([parse_float(row.get("reliefActivation"), 0.0) for row in selected_rows if parse_float(row.get("reliefActivation"), 0.0) >= 0.05], reverse=True)
+    add_beta = parse_float(selected["addBeta"])
+    relief_beta = parse_float(selected["reliefBeta"])
+    rows: list[dict] = []
+    for seed in V18_LEGACY_VBAR_SHAPE_SEEDS:
+        rng = random.Random(seed)
+        names = [row["galaxy"] for row in low_load_clean]
+        add_names = set(rng.sample(names, min(len(names), len(add_values)))) if add_values else set()
+        relief_names = set(rng.sample(names, min(len(names), len(relief_values)))) if relief_values else set()
+        add_by_name = {name: add_values[index % len(add_values)] for index, name in enumerate(sorted(add_names))} if add_values else {}
+        relief_by_name = {
+            name: relief_values[index % len(relief_values)] for index, name in enumerate(sorted(relief_names))
+        } if relief_values else {}
+        trial_rows: list[dict] = []
+        for base in base_rows:
+            curve = curves_by_name[base["galaxy"]]
+            add_activation = add_by_name.get(base["galaxy"], 0.0)
+            relief_activation = relief_by_name.get(base["galaxy"], 0.0)
+            candidate_supports = v18_legacy_vbar_shape_apply_supports(
+                curve,
+                base["baseSupport2"],
+                add_beta,
+                relief_beta,
+                add_activation,
+                relief_activation,
+            )
+            candidate = v18_competitor_support_score(curve, candidate_supports)
+            trial_rows.append(
+                {
+                    **{key: value for key, value in base.items() if key != "baseSupport2"},
+                    "candidateRmse": candidate["rmse"],
+                    "routeChangedVsV18_30": False,
+                    "anyActivation": max(add_activation, relief_activation),
+                    "candidateRoute": candidate["candidateRoute"],
+                }
+            )
+        metric = {}
+        for split in [None, "train", "holdout"]:
+            metric.update(v18_legacy_vbar_shape_metric(trial_rows, split))
+        rows.append(
+            {
+                "nullType": "same-active-random-low-load",
+                "seed": seed,
+                "addActiveCount": len(add_values),
+                "reliefActiveCount": len(relief_values),
+                **metric,
+            }
+        )
+    return rows
+
+
+def write_v18_legacy_vbar_shape_candidate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_legacy_vbar_shape_candidate"
+    base_rows = v18_competitor_gap_base_rows()
+    grid_rows: list[dict] = []
+    trial_cache: dict[tuple[float, float, float, float], list[dict]] = {}
+    for add_beta in V18_LEGACY_VBAR_SHAPE_ADD_BETAS:
+        for relief_beta in V18_LEGACY_VBAR_SHAPE_RELIEF_BETAS:
+            for add_h_max in V18_LEGACY_VBAR_SHAPE_ADD_H_MAX:
+                for relief_h_min in V18_LEGACY_VBAR_SHAPE_RELIEF_H_MIN:
+                    key = (add_beta, relief_beta, add_h_max, relief_h_min)
+                    rows = v18_legacy_vbar_shape_score_rows(base_rows, add_beta, relief_beta, add_h_max, relief_h_min)
+                    trial_cache[key] = rows
+                    metric = {
+                        "addBeta": add_beta,
+                        "reliefBeta": relief_beta,
+                        "addHMax": add_h_max,
+                        "reliefHMin": relief_h_min,
+                    }
+                    for split in [None, "train", "holdout"]:
+                        metric.update(v18_legacy_vbar_shape_metric(rows, split))
+                    metric["trainUtility"] = v18_legacy_vbar_shape_selection_utility(metric, "train")
+                    metric["holdoutUtility"] = v18_legacy_vbar_shape_selection_utility(metric, "holdout")
+                    grid_rows.append(metric)
+    viable = [
+        row for row in grid_rows
+        if parse_float(row["trainHighAbove20Count"], 999.0) == 0
+        and parse_float(row["allHighAbove20Count"], 999.0) == 0
+        and parse_float(row["allHighMaxRegressionVsV18_30KmS"], 999.0) <= 3.0
+        and parse_float(row["allProtectedMaxRegressionVsV18_30KmS"], 999.0) <= 3.0
+        and parse_float(row["allRouteChangedCount"], 999.0) == 0
+    ]
+    selected = max(
+        viable or grid_rows,
+        key=lambda row: (
+            parse_float(row["trainTargetGainVsV18_30Pct"], -999.0),
+            parse_float(row["holdoutTargetGainVsV18_30Pct"], -999.0),
+            parse_float(row["allTargetGainVsV18_30Pct"], -999.0),
+            -parse_float(row["allProtectedMaxRegressionVsV18_30KmS"], 999.0),
+        ),
+    )
+    key = (
+        parse_float(selected["addBeta"]),
+        parse_float(selected["reliefBeta"]),
+        parse_float(selected["addHMax"]),
+        parse_float(selected["reliefHMin"]),
+    )
+    selected_case_rows = trial_cache[key]
+    null_rows = v18_legacy_vbar_shape_null_rows(selected_case_rows, selected)
+    best_null_holdout = max([parse_float(row["holdoutTargetGainVsV18_30Pct"], -999.0) for row in null_rows] or [-999.0])
+    null_margin = parse_float(selected["holdoutTargetGainVsV18_30Pct"], -999.0) - best_null_holdout
+    passes = {
+        "allTargetGainAtLeast5Pct": parse_float(selected["allTargetGainVsV18_30Pct"], 0.0) >= 5.0,
+        "holdoutTargetGainAtLeast5Pct": parse_float(selected["holdoutTargetGainVsV18_30Pct"], 0.0) >= 5.0,
+        "highAbove20Zero": parse_float(selected["allHighAbove20Count"], 999.0) == 0,
+        "highMaxRegressionBelow3": parse_float(selected["allHighMaxRegressionVsV18_30KmS"], 999.0) <= 3.0,
+        "protectedMaxRegressionBelow3": parse_float(selected["allProtectedMaxRegressionVsV18_30KmS"], 999.0) <= 3.0,
+        "routeChangesZero": parse_float(selected["allRouteChangedCount"], 999.0) == 0,
+        "beatsSameActiveNullBy5Pct": null_margin >= 5.0,
+        "weakLeakageZero": True,
+    }
+    verdict = "legacy low-Vbar shape candidate for review" if all(passes.values()) else "legacy low-Vbar shape not promoted"
+    target_rows = [row for row in selected_case_rows if parse_bool(row["targetProtectedNfwGap"])]
+    protected_rows = [row for row in selected_case_rows if row["set"] == "clean-protected"]
+    active_rows = [row for row in selected_case_rows if parse_float(row["anyActivation"], 0.0) >= 0.05]
+    formula = {
+        "candidateId": "observed-state-response-v18.32-legacy-low-vbar-shape-candidate",
+        "baseLaw": "locked v18.30 release candidate",
+        "status": verdict,
+        "lawChanged": False,
+        "selected": {
+            "addBeta": selected["addBeta"],
+            "reliefBeta": selected["reliefBeta"],
+            "addHMax": selected["addHMax"],
+            "reliefHMin": selected["reliefHMin"],
+        },
+        "inputs": ["locked route", "log10(max Vbar)", "h/rOut", "outer gas share", "radius/rOut"],
+        "mechanism": "low-Vbar two-way radial support shape: compact gas-rich systems get mid/outer completion; diffuse low-Vbar systems get mid/outer relief",
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE lookup", "NFW parameters as formula input", "weak/systematics cases"],
+    }
+    score_row = {
+        "candidateId": formula["candidateId"],
+        "verdict": verdict,
+        "baseLaw": "v18.30 release candidate",
+        "bestNullHoldoutTargetGainPct": best_null_holdout,
+        "nullMarginHoldoutTargetPct": null_margin,
+        **selected,
+        **{f"pass_{key}": value for key, value in passes.items()},
+        "weakSystematicsLeakage": 0,
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_row])
+    write_csv(out_dir / f"{prefix}_grid_scores.csv", grid_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", selected_case_rows)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", sorted(target_rows, key=lambda row: parse_float(row["candidateMinusV18_30KmS"])))
+    write_csv(out_dir / f"{prefix}_active_ledger.csv", sorted(active_rows, key=lambda row: -parse_float(row["anyActivation"])))
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18 Legacy Low-Vbar Shape Candidate",
+        "",
+        "This is a candidate-law test on top of locked v18.30. It uses the legacy-mined low-Vbar signal as a current baryonic-state variable, not as an old notebook lookup.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Selected add beta: `{fmt(selected['addBeta'])}`; relief beta: `{fmt(selected['reliefBeta'])}`.",
+        f"- Selected add h/rOut max: `{fmt(selected['addHMax'])}`; relief h/rOut min: `{fmt(selected['reliefHMin'])}`.",
+        f"- All target gain vs v18.30: `{fmt(selected['allTargetGainVsV18_30Pct'])}%` / `{fmt(selected['allTargetGainVsV18_30KmS'])}` km/s.",
+        f"- Holdout target gain vs v18.30: `{fmt(selected['holdoutTargetGainVsV18_30Pct'])}%` / `{fmt(selected['holdoutTargetGainVsV18_30KmS'])}` km/s.",
+        f"- Clean gain vs canonical: `{fmt(selected['allCleanGainVsCanonicalPct'])}%`.",
+        f"- High max regression vs v18.30: `{fmt(selected['allHighMaxRegressionVsV18_30KmS'])}` km/s.",
+        f"- Protected max regression vs v18.30: `{fmt(selected['allProtectedMaxRegressionVsV18_30KmS'])}` km/s.",
+        f"- High cases above 20 km/s: `{selected['allHighAbove20Count']}`.",
+        f"- Same-active null holdout target gain: `{fmt(best_null_holdout)}%`; margin `{fmt(null_margin)}` points.",
+        "",
+        "## Main Changed Cases",
+        "",
+        "| Galaxy | Set | Branch | v18.30 | Candidate | Delta | add | relief | logVbarMax |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    changed_rows = sorted(
+        [row for row in selected_case_rows if abs(parse_float(row["candidateMinusV18_30KmS"], 0.0)) >= 0.25],
+        key=lambda row: parse_float(row["candidateMinusV18_30KmS"]),
+    )
+    for row in changed_rows[:30]:
+        report.append(
+            f"| {row['galaxy']} | {row['set']} | {row['branchHits']} | {fmt(row['v18_30Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['candidateMinusV18_30KmS'])} | {fmt(row['addActivation'])} | {fmt(row['reliefActivation'])} | {fmt(row['logVbarMax'])} |"
+        )
+    report.extend(["", "## Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.append("")
+    report.append(verdict)
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-legacy-vbar-shape-candidate-v1",
+        "candidateId": formula["candidateId"],
+        "verdict": verdict,
+        "summary": score_row,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_grid_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_active_ledger.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18legacyvbarshape(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_legacy_vbar_shape_candidate_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18 legacy low-Vbar shape candidate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"all_target_gain={fmt(summary['allTargetGainVsV18_30Pct'])}%",
+                f"holdout_target_gain={fmt(summary['holdoutTargetGainVsV18_30Pct'])}%",
+                f"protected_reg={fmt(summary['allProtectedMaxRegressionVsV18_30KmS'])}",
+                f"high_reg={fmt(summary['allHighMaxRegressionVsV18_30KmS'])}",
+                f"null_margin={fmt(summary['nullMarginHoldoutTargetPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18 legacy low-Vbar shape candidate to {out_dir.resolve()}")
+
+
 V18_COMPETITOR_GAP_TARGET_THRESHOLD_KMS = 8.0
 V18_COMPETITOR_GAP_COMPLETION_GRID = [0.0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.65]
 V18_COMPETITOR_GAP_SUPPRESSION_GRID = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
@@ -92373,6 +92756,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18mldiscriminator",
             "v18externalmlgaptest",
             "observedstatev18externalmlgaptest",
+            "v18legacyvbarshape",
+            "observedstatev18legacyvbarshape",
             "v18releasecompression",
             "observedstatev18releasecompression",
             "observedstatev18lawcompression",
@@ -92727,6 +93112,8 @@ def main() -> None:
         cmd_v18mldiscriminator(args)
     elif args.mode in {"v18externalmlgaptest", "observedstatev18externalmlgaptest"}:
         cmd_v18externalmlgaptest(args)
+    elif args.mode in {"v18legacyvbarshape", "observedstatev18legacyvbarshape"}:
+        cmd_v18legacyvbarshape(args)
     elif args.mode in {"v18releasecompression", "observedstatev18releasecompression", "observedstatev18lawcompression"}:
         cmd_v18releasecompression(args)
     elif args.mode in {"v18familynative", "observedstatev18familynative"}:
