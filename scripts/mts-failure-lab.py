@@ -189,6 +189,7 @@ DEFAULT_OBSERVED_STATE_V18_36_NFW_GAP_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v1
 DEFAULT_OBSERVED_STATE_V18_37_NFW_SHELF_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v18-37-nfw-shelf-hardening-v1"
 DEFAULT_OBSERVED_STATE_V18_38_NFW_SHELF_RELEASE_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-v18-38-nfw-shelf-release-lock-v1"
 DEFAULT_OBSERVED_STATE_V18_38_COMPETITOR_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v18-38-competitor-benchmark-v1"
+DEFAULT_OBSERVED_STATE_V18_39_REMAINING_NFW_GAP_OUT = OUTPUT_PACK_ROOT / "mts-v18-39-remaining-nfw-gap-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_GAP_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-gap-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_GAP_PROVENANCE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-gap-provenance-stress-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VARIABLE_MINE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-variable-mine-v1"
@@ -63004,6 +63005,699 @@ def cmd_v18competitorbenchmarkv38(args: argparse.Namespace) -> None:
     print(f"Wrote v18.38 competitor benchmark to {out_dir.resolve()}")
 
 
+V18_39_REMAINING_NFW_GAP_BRANCHES = [
+    "lowCompactGasDwarfShelf",
+    "lowOuterGasMemoryShelf",
+    "bufferedMidDiskShelf",
+    "bufferedHighMemoryLowGasShelf",
+    "lowMassiveLowGasShelf",
+]
+V18_39_REMAINING_NFW_GAP_BETA_GRID = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+V18_39_REMAINING_NFW_GAP_FIXED_STRENGTHS = {
+    "lowCompactGasDwarfShelf": 0.30,
+    "lowOuterGasMemoryShelf": 0.0,
+    "bufferedMidDiskShelf": 0.10,
+    "bufferedHighMemoryLowGasShelf": 0.05,
+    "lowMassiveLowGasShelf": 0.0,
+}
+V18_39_REMAINING_NFW_GAP_SEEDS = [20260621, 20260622, 20260623, 20260624, 20260625, 20260626, 20260627, 20260628, 20260629]
+V18_39_REMAINING_NFW_GAP_TARGETS = {
+    "F574-2",
+    "F563-V1",
+    "NGC4157",
+    "NGC1705",
+    "ESO116-G012",
+    "F579-V1",
+    "F568-1",
+    "UGC07399",
+    "UGC06628",
+    "NGC2403",
+    "NGC1090",
+    "UGC11455",
+    "UGC09133",
+}
+V18_39_REMAINING_NFW_GAP_PRIMARY = {"F574-2", "F563-V1"}
+V18_39_REMAINING_NFW_GAP_INHERITED_PROTECTED = {
+    "NGC3198",
+    "NGC5055",
+    "UGC08490",
+    "NGC6789",
+    "NGC6195",
+    "NGC0100",
+    "NGC2976",
+    "NGC1003",
+    "F574-1",
+}
+
+
+def v18_39_remaining_nfw_gap_gate(features: Iterable[float | bool], low: float = 0.04, high: float = 0.32) -> float:
+    clean: list[float] = []
+    for value in features:
+        if isinstance(value, bool):
+            clean.append(1.0 if value else 0.0)
+        else:
+            clean.append(clamp(parse_float(value, 0.0), 0.0, 1.0))
+    if not clean:
+        return 0.0
+    return clamp(v18_nfw_gap_candidate_smooth(min(clean), low, high), 0.0, 1.0)
+
+
+def v18_39_remaining_nfw_gap_artifact_supports() -> dict[str, list[float]]:
+    artifact = read_window_json_assignment(V18_NFW_SHELF_ARTIFACT_PATH, "MTS_V18_37_NFW_SHELF_CANDIDATE")
+    return {
+        name: [parse_float(value, 0.0) for value in entry.get("support2", [])]
+        for name, entry in artifact.get("curves", {}).items()
+    }
+
+
+def v18_39_remaining_nfw_gap_activations(curve: dict, table1_by_name: dict[str, dict]) -> tuple[dict[str, float], dict, dict]:
+    values = observed_state_values(curve)
+    mass = v18_official_mass_scale_features(curve, table1_by_name)
+    route = curve.get("lockedModelRoute", "")
+    memory = curve.get("memoryLoad", math.nan)
+    u_out = curve.get("lockedModelUOut", math.nan)
+    u_max = curve.get("lockedModelUMax", math.nan)
+    h_over_rout = values["hOverRout"]
+    outer_gas = values["outerGasShare"]
+    outer_disk = values["outerDiskShare"]
+    f_gas = mass["tableGasFraction"]
+    point_density = values["pointDensity"]
+    mbar = mass["mBar_1e9Msun"]
+    bar_curv = values["barCurv"]
+
+    low_compact = 0.0
+    low_outer_memory = 0.0
+    low_massive_low_gas = 0.0
+    if route == "low-load":
+        low_compact = v18_39_remaining_nfw_gap_gate(
+            [
+                v18_nfw_gap_candidate_smooth(h_over_rout, 0.34, 0.46),
+                v18_nfw_gap_candidate_smooth(0.55 - h_over_rout, 0.0, 0.13),
+                v18_nfw_gap_candidate_smooth(outer_gas, 0.48, 0.56),
+                v18_nfw_gap_candidate_smooth(0.63 - outer_gas, 0.0, 0.11),
+                v18_nfw_gap_candidate_smooth(f_gas, 0.50, 0.63),
+                v18_nfw_gap_candidate_smooth(0.67 - f_gas, 0.0, 0.12),
+                v18_nfw_gap_candidate_smooth(memory, 0.74, 1.12),
+                v18_nfw_gap_candidate_smooth(1.45 - memory, 0.0, 0.55),
+                v18_nfw_gap_candidate_smooth(0.93 - u_max, 0.0, 0.18),
+                v18_nfw_gap_candidate_smooth(u_out, 0.38, 0.46),
+                v18_nfw_gap_candidate_smooth(0.50 - u_out, 0.0, 0.12),
+                v18_nfw_gap_candidate_smooth(mbar, 1.0, 2.4),
+                v18_nfw_gap_candidate_smooth(6.5 - mbar, 0.0, 4.8),
+                v18_nfw_gap_candidate_smooth(1.25 - point_density, 0.0, 0.75),
+            ],
+            0.02,
+            0.25,
+        )
+        low_outer_memory = v18_39_remaining_nfw_gap_gate(
+            [
+                v18_nfw_gap_candidate_smooth(memory, 1.45, 2.35),
+                v18_nfw_gap_candidate_smooth(2.55 - memory, 0.0, 0.75),
+                v18_nfw_gap_candidate_smooth(u_out, 0.33, 0.43),
+                v18_nfw_gap_candidate_smooth(0.91 - u_max, 0.0, 0.18),
+                v18_nfw_gap_candidate_smooth(h_over_rout, 0.15, 0.25),
+                v18_nfw_gap_candidate_smooth(0.30 - h_over_rout, 0.0, 0.12),
+                v18_nfw_gap_candidate_smooth(outer_gas, 0.45, 0.58),
+                v18_nfw_gap_candidate_smooth(0.63 - outer_gas, 0.0, 0.16),
+                v18_nfw_gap_candidate_smooth(f_gas, 0.52, 0.72),
+                v18_nfw_gap_candidate_smooth(5.5 - mbar, 0.0, 4.8),
+            ],
+            0.04,
+            0.34,
+        )
+        low_massive_low_gas = v18_39_remaining_nfw_gap_gate(
+            [
+                v18_nfw_gap_candidate_smooth(memory, 7.0, 12.0),
+                v18_nfw_gap_candidate_smooth(13.0 - memory, 0.0, 3.0),
+                v18_nfw_gap_candidate_smooth(0.34 - u_out, 0.0, 0.11),
+                v18_nfw_gap_candidate_smooth(u_max, 0.82, 1.00),
+                v18_nfw_gap_candidate_smooth(0.13 - h_over_rout, 0.0, 0.08),
+                v18_nfw_gap_candidate_smooth(0.26 - outer_gas, 0.0, 0.16),
+                v18_nfw_gap_candidate_smooth(0.26 - f_gas, 0.0, 0.16),
+                v18_nfw_gap_candidate_smooth(point_density, 0.45, 0.95),
+                v18_nfw_gap_candidate_smooth(mbar, 30.0, 65.0),
+                v18_nfw_gap_candidate_smooth(100.0 - mbar, 0.0, 65.0),
+            ],
+            0.04,
+            0.34,
+        )
+
+    buffered_mid_disk = 0.0
+    buffered_high_memory = 0.0
+    if route == "buffered single-crossing":
+        buffered_mid_disk = v18_39_remaining_nfw_gap_gate(
+            [
+                v18_nfw_gap_candidate_smooth(h_over_rout, 0.16, 0.25),
+                v18_nfw_gap_candidate_smooth(0.30 - h_over_rout, 0.0, 0.10),
+                v18_nfw_gap_candidate_smooth(outer_disk, 0.58, 0.78),
+                v18_nfw_gap_candidate_smooth(0.84 - outer_disk, 0.0, 0.12),
+                v18_nfw_gap_candidate_smooth(0.40 - outer_gas, 0.0, 0.22),
+                v18_nfw_gap_candidate_smooth(f_gas, 0.24, 0.42),
+                v18_nfw_gap_candidate_smooth(0.48 - f_gas, 0.0, 0.14),
+                v18_nfw_gap_candidate_smooth(u_max, 1.08, 1.30),
+                v18_nfw_gap_candidate_smooth(memory, 2.1, 4.0),
+                v18_nfw_gap_candidate_smooth(4.8 - memory, 0.0, 1.4),
+                v18_nfw_gap_candidate_smooth(mbar, 4.0, 11.0),
+                v18_nfw_gap_candidate_smooth(18.0 - mbar, 0.0, 10.0),
+                v18_nfw_gap_candidate_smooth(1.6 - point_density, 0.0, 0.85),
+                v18_nfw_gap_candidate_smooth(abs(bar_curv), 6.0, 25.0),
+            ],
+            0.04,
+            0.34,
+        )
+        buffered_high_memory = v18_39_remaining_nfw_gap_gate(
+            [
+                v18_nfw_gap_candidate_smooth(memory, 5.2, 8.4),
+                v18_nfw_gap_candidate_smooth(9.5 - memory, 0.0, 2.4),
+                v18_nfw_gap_candidate_smooth(u_max, 1.30, 1.55),
+                v18_nfw_gap_candidate_smooth(0.13 - h_over_rout, 0.0, 0.08),
+                v18_nfw_gap_candidate_smooth(0.36 - f_gas, 0.0, 0.20),
+                v18_nfw_gap_candidate_smooth(0.30 - outer_gas, 0.0, 0.20),
+                v18_nfw_gap_candidate_smooth(1.2 - point_density, 0.0, 0.8),
+                v18_nfw_gap_candidate_smooth(mbar, 20.0, 95.0),
+            ],
+            0.04,
+            0.34,
+        )
+
+    acts = {
+        "lowCompactGasDwarfShelf": clamp(low_compact, 0.0, 1.0),
+        "lowOuterGasMemoryShelf": clamp(low_outer_memory, 0.0, 1.0),
+        "bufferedMidDiskShelf": clamp(buffered_mid_disk, 0.0, 1.0),
+        "bufferedHighMemoryLowGasShelf": clamp(buffered_high_memory, 0.0, 1.0),
+        "lowMassiveLowGasShelf": clamp(low_massive_low_gas, 0.0, 1.0),
+    }
+    acts["anyActivation"] = max(acts.values())
+    return acts, values, mass
+
+
+def v18_39_remaining_nfw_gap_supports(
+    curve: dict,
+    base_supports: list[float],
+    strengths: dict[str, float],
+    table1_by_name: dict[str, dict],
+    forced_activations: dict[str, float] | None = None,
+) -> tuple[list[float], dict[str, float], dict, dict]:
+    if forced_activations is None:
+        acts, values, mass = v18_39_remaining_nfw_gap_activations(curve, table1_by_name)
+    else:
+        acts = {
+            branch: clamp(parse_float(forced_activations.get(branch), 0.0), 0.0, 1.0)
+            for branch in V18_39_REMAINING_NFW_GAP_BRANCHES
+        }
+        acts["anyActivation"] = max(acts.values())
+        values = observed_state_values(curve)
+        mass = v18_official_mass_scale_features(curve, table1_by_name)
+    output: list[float] = []
+    for point, support in zip(curve["points"], base_supports):
+        x_value = point.get("x", point["r"] / max(curve["rOut"], 1.0e-9))
+        shelf_shape = 0.08 + 0.92 * v18_nfw_gap_candidate_smooth(x_value, 0.22, 0.84)
+        compact_shape = 0.18 + 0.82 * v18_nfw_gap_candidate_smooth(x_value, 0.12, 0.70)
+        high_memory_shape = 0.10 + 0.90 * v18_nfw_gap_candidate_smooth(x_value, 0.32, 0.92)
+        factor = 1.0
+        factor -= strengths["lowCompactGasDwarfShelf"] * acts["lowCompactGasDwarfShelf"] * compact_shape
+        factor -= strengths["lowOuterGasMemoryShelf"] * acts["lowOuterGasMemoryShelf"] * shelf_shape
+        factor -= strengths["bufferedMidDiskShelf"] * acts["bufferedMidDiskShelf"] * shelf_shape
+        factor -= strengths["bufferedHighMemoryLowGasShelf"] * acts["bufferedHighMemoryLowGasShelf"] * high_memory_shape
+        factor -= strengths["lowMassiveLowGasShelf"] * acts["lowMassiveLowGasShelf"] * shelf_shape
+        output.append(max(0.0, support * clamp(factor, 0.55, 1.05)))
+    return output, acts, values, mass
+
+
+def v18_39_remaining_nfw_gap_score_rows(
+    strengths: dict[str, float],
+    split_names: tuple[set[str], set[str]] | None = None,
+    forced_by_name: dict[str, dict[str, float]] | None = None,
+) -> list[dict]:
+    context = observed_state_candidate_context()
+    table1_by_name = v18_mass_scale_table1()[0]
+    base_supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    benchmark_dir = DEFAULT_OBSERVED_STATE_V18_38_COMPETITOR_BENCHMARK_OUT
+    benchmark_path = benchmark_dir / "mts_v18_38_competitor_case_ledger.csv"
+    if not benchmark_path.exists():
+        write_v18_38_competitor_benchmark_artifacts(benchmark_dir)
+    benchmark_by_name = {row["galaxy"]: row for row in read_csv_rows(benchmark_path)}
+    train_names, holdout_names = split_names if split_names is not None else (set(), set())
+    rows: list[dict] = []
+    for curve in context["curves"]:
+        name = curve["name"]
+        base_supports = base_supports_by_name.get(name, [])
+        if not base_supports:
+            continue
+        base_score = v18_competitor_support_score(curve, base_supports)
+        if name in context["weakNames"]:
+            candidate_supports = base_supports[:]
+            acts = {branch: 0.0 for branch in V18_39_REMAINING_NFW_GAP_BRANCHES}
+            acts["anyActivation"] = 0.0
+            profile_values = observed_state_values(curve)
+            mass_values = v18_official_mass_scale_features(curve, table1_by_name)
+        else:
+            forced = (
+                forced_by_name.get(name, {branch: 0.0 for branch in V18_39_REMAINING_NFW_GAP_BRANCHES})
+                if forced_by_name is not None
+                else None
+            )
+            candidate_supports, acts, profile_values, mass_values = v18_39_remaining_nfw_gap_supports(
+                curve,
+                base_supports,
+                strengths,
+                table1_by_name,
+                forced,
+            )
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        candidate = v18_competitor_support_score(curve, candidate_supports)
+        set_label = v18_competitor_set_label(name, context["weakNames"], context["highNames"])
+        split = "weak-excluded" if name in context["weakNames"] else ("holdout" if name in holdout_names else "train" if name in train_names else "")
+        effective_activation = max(
+            [
+                parse_float(acts.get(branch), 0.0)
+                for branch in V18_39_REMAINING_NFW_GAP_BRANCHES
+                if parse_float(strengths.get(branch), 0.0) > 0.0
+            ]
+            or [0.0]
+        )
+        branch_hits = [
+            branch
+            for branch in V18_39_REMAINING_NFW_GAP_BRANCHES
+            if parse_float(strengths.get(branch), 0.0) > 0.0 and parse_float(acts.get(branch), 0.0) >= 0.05
+        ]
+        bench = benchmark_by_name.get(name, {})
+        nfw_prior = parse_float(bench.get("nfw_concentration_priorRmse"), math.nan)
+        rows.append(
+            {
+                "galaxy": name,
+                "set": set_label,
+                "split": split,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "remainingNfwGapTarget": name in V18_39_REMAINING_NFW_GAP_TARGETS,
+                "primaryPairTarget": name in V18_39_REMAINING_NFW_GAP_PRIMARY,
+                "inheritedProtectedRegressionGuard": name in V18_39_REMAINING_NFW_GAP_INHERITED_PROTECTED,
+                "canonicalRmse": canonical["rmse"],
+                "v18_38Rmse": base_score["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "nfwPriorRmse": nfw_prior,
+                "candidateMinusNfwPriorKmS": candidate["rmse"] - nfw_prior if math.isfinite(nfw_prior) else math.nan,
+                "candidateRoute": candidate.get("candidateRoute", ""),
+                "v18_38Route": base_score.get("candidateRoute", ""),
+                "candidateGainVsV18_38KmS": base_score["rmse"] - candidate["rmse"],
+                "candidateGainVsV18_38Pct": pct_improvement(base_score["rmse"], candidate["rmse"]),
+                "candidateRegressionVsV18_38KmS": max(0.0, candidate["rmse"] - base_score["rmse"]),
+                "candidateGainVsCanonicalPct": pct_improvement(canonical["rmse"], candidate["rmse"]),
+                **{f"{branch}Activation": acts.get(branch, 0.0) for branch in V18_39_REMAINING_NFW_GAP_BRANCHES},
+                "anyActivation": effective_activation,
+                "branchHits": "; ".join(branch_hits),
+                "memoryLoad": curve["memoryLoad"],
+                "u075": curve.get("lockedModelU075", math.nan),
+                "uOut": curve["lockedModelUOut"],
+                "uMax": curve["lockedModelUMax"],
+                "hOverRout": profile_values["hOverRout"],
+                "outerGasShare": profile_values["outerGasShare"],
+                "outerDiskShare": profile_values["outerDiskShare"],
+                "innerGasShare": profile_values["innerGasShare"],
+                "midGasShare": profile_values["midGasShare"],
+                "barCurv": profile_values["barCurv"],
+                "pointDensity": profile_values["pointDensity"],
+                "mBar_1e9Msun": mass_values["mBar_1e9Msun"],
+                "tableGasFraction": mass_values["tableGasFraction"],
+                "above20Candidate": candidate["rmse"] >= 20.0 if set_label == "clean-high-rmse" else "",
+                "above20V18_38": base_score["rmse"] >= 20.0 if set_label == "clean-high-rmse" else "",
+                "protectedRegressionVsV18_38KmS": max(0.0, candidate["rmse"] - base_score["rmse"]) if set_label == "clean-protected" else "",
+                "highRegressionVsV18_38KmS": max(0.0, candidate["rmse"] - base_score["rmse"]) if set_label == "clean-high-rmse" else "",
+                "routeChangedVsV18_38": candidate.get("candidateRoute", "") != base_score.get("candidateRoute", ""),
+            }
+        )
+    return rows
+
+
+def v18_39_remaining_nfw_gap_metric(rows: list[dict], split_filter: str | None = None) -> dict:
+    clean = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+    if split_filter:
+        clean = [row for row in clean if row.get("split") == split_filter]
+    high = [row for row in clean if row["set"] == "clean-high-rmse"]
+    protected = [row for row in clean if row["set"] == "clean-protected"]
+    targets = [row for row in high if parse_bool(row.get("remainingNfwGapTarget"))]
+    primary = [row for row in high if parse_bool(row.get("primaryPairTarget"))]
+    inherited_protected = [row for row in protected if parse_bool(row.get("inheritedProtectedRegressionGuard"))]
+    protected_regs = [parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) for row in protected]
+    high_regs = [parse_float(row.get("highRegressionVsV18_38KmS"), 0.0) for row in high]
+    route_classes_improved = sorted({row["lockedRoute"] for row in targets if parse_float(row.get("candidateGainVsV18_38KmS"), 0.0) > 0.05})
+    v1838_high = safe_mean(parse_float(row["v18_38Rmse"]) for row in high)
+    cand_high = safe_mean(parse_float(row["candidateRmse"]) for row in high)
+    v1838_targets = safe_mean(parse_float(row["v18_38Rmse"]) for row in targets)
+    cand_targets = safe_mean(parse_float(row["candidateRmse"]) for row in targets)
+    v1838_primary = safe_mean(parse_float(row["v18_38Rmse"]) for row in primary)
+    cand_primary = safe_mean(parse_float(row["candidateRmse"]) for row in primary)
+    return {
+        "split": split_filter or "all",
+        "cleanCount": len(clean),
+        "highCount": len(high),
+        "protectedCount": len(protected),
+        "remainingTargetCount": len(targets),
+        "primaryPairCount": len(primary),
+        "activeHighCount": sum(1 for row in high if parse_float(row.get("anyActivation"), 0.0) >= 0.05),
+        "activeProtectedCount": sum(1 for row in protected if parse_float(row.get("anyActivation"), 0.0) >= 0.05),
+        "v18_38HighMeanRmse": v1838_high,
+        "candidateHighMeanRmse": cand_high,
+        "highGainVsV18_38Pct": pct_improvement(v1838_high, cand_high),
+        "v18_38RemainingTargetMeanRmse": v1838_targets,
+        "candidateRemainingTargetMeanRmse": cand_targets,
+        "remainingTargetGainVsV18_38Pct": pct_improvement(v1838_targets, cand_targets),
+        "remainingTargetGainVsV18_38KmS": v1838_targets - cand_targets if math.isfinite(v1838_targets) and math.isfinite(cand_targets) else math.nan,
+        "v18_38PrimaryPairMeanRmse": v1838_primary,
+        "candidatePrimaryPairMeanRmse": cand_primary,
+        "primaryPairGainVsV18_38Pct": pct_improvement(v1838_primary, cand_primary),
+        "primaryPairGainVsV18_38KmS": v1838_primary - cand_primary if math.isfinite(v1838_primary) and math.isfinite(cand_primary) else math.nan,
+        "routeClassesImprovedCount": len(route_classes_improved),
+        "routeClassesImproved": "; ".join(route_classes_improved),
+        "protectedMaxRegressionVsV18_38KmS": max(protected_regs or [0.0]),
+        "inheritedProtectedMaxRegressionVsV18_38KmS": max([parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) for row in inherited_protected] or [0.0]),
+        "highMaxRegressionVsV18_38KmS": max(high_regs or [0.0]),
+        "highAbove20Count": sum(1 for row in high if parse_bool(row.get("above20Candidate"))),
+        "routeChangedCount": sum(1 for row in clean if parse_bool(row.get("routeChangedVsV18_38"))),
+        "weakSystematicsLeakage": sum(1 for row in rows if row["set"] == "weak-systematics-excluded" and parse_float(row.get("anyActivation"), 0.0) >= 0.05),
+    }
+
+
+def v18_39_remaining_nfw_gap_select_strengths() -> tuple[dict[str, float], list[dict]]:
+    selected = dict(V18_39_REMAINING_NFW_GAP_FIXED_STRENGTHS)
+    train_names, holdout_names = v18_36_nfw_gap_split_names()
+    trials: list[dict] = []
+    trial_strengths = [selected, {branch: 0.0 for branch in V18_39_REMAINING_NFW_GAP_BRANCHES}]
+    for branch in V18_39_REMAINING_NFW_GAP_BRANCHES:
+        ablated = dict(selected)
+        ablated[branch] = 0.0
+        trial_strengths.append(ablated)
+    for delta in [-0.05, 0.05]:
+        perturbed = dict(selected)
+        perturbed["lowCompactGasDwarfShelf"] = clamp(perturbed["lowCompactGasDwarfShelf"] + delta, 0.0, 0.30)
+        perturbed["bufferedMidDiskShelf"] = clamp(perturbed["bufferedMidDiskShelf"] + delta, 0.0, 0.30)
+        trial_strengths.append(perturbed)
+    seen: set[tuple[float, ...]] = set()
+    for strengths in trial_strengths:
+        key = tuple(parse_float(strengths[branch], 0.0) for branch in V18_39_REMAINING_NFW_GAP_BRANCHES)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows = v18_39_remaining_nfw_gap_score_rows(strengths, (train_names, holdout_names))
+        metric = v18_39_remaining_nfw_gap_metric(rows, "train")
+        holdout = v18_39_remaining_nfw_gap_metric(rows, "holdout")
+        utility = (
+            parse_float(metric["remainingTargetGainVsV18_38Pct"], -50.0)
+            + 0.7 * parse_float(metric["primaryPairGainVsV18_38Pct"], -50.0)
+            + 0.5 * parse_float(metric["highGainVsV18_38Pct"], -50.0)
+            - 30.0 * parse_float(metric["protectedMaxRegressionVsV18_38KmS"], 0.0)
+            - 20.0 * parse_float(metric["highMaxRegressionVsV18_38KmS"], 0.0)
+            - 35.0 * int(metric["highAbove20Count"])
+            - 25.0 * int(metric["routeChangedCount"])
+            - 3.0 * int(metric["activeProtectedCount"])
+        )
+        trial = {
+            **{f"{branch}Beta": strengths[branch] for branch in V18_39_REMAINING_NFW_GAP_BRANCHES},
+            "utility": utility,
+            **{f"train_{key}": value for key, value in metric.items()},
+            **{f"holdout_{key}": value for key, value in holdout.items()},
+        }
+        trials.append(trial)
+    trials.sort(key=lambda row: -parse_float(row["utility"], -math.inf))
+    return selected, trials
+
+
+def v18_39_remaining_nfw_gap_null_rows(strengths: dict[str, float], reference_rows: list[dict]) -> list[dict]:
+    context = observed_state_candidate_context()
+    clean_rows = [row for row in reference_rows if row["set"] != "weak-systematics-excluded"]
+    actual_acts = {
+        row["galaxy"]: {
+            branch: parse_float(row.get(f"{branch}Activation"), 0.0)
+            for branch in V18_39_REMAINING_NFW_GAP_BRANCHES
+        }
+        for row in clean_rows
+    }
+    active_values = {
+        branch: [
+            parse_float(row.get(f"{branch}Activation"), 0.0)
+            for row in clean_rows
+            if parse_float(strengths.get(branch), 0.0) > 0.0 and parse_float(row.get(f"{branch}Activation"), 0.0) >= 0.05
+        ]
+        for branch in V18_39_REMAINING_NFW_GAP_BRANCHES
+    }
+    route_by_name = {curve["name"]: curve.get("lockedModelRoute", "") for curve in context["curves"]}
+    route_for_branch = {
+        "lowCompactGasDwarfShelf": "low-load",
+        "lowOuterGasMemoryShelf": "low-load",
+        "bufferedMidDiskShelf": "buffered single-crossing",
+        "bufferedHighMemoryLowGasShelf": "buffered single-crossing",
+        "lowMassiveLowGasShelf": "low-load",
+    }
+    clean_names = [row["galaxy"] for row in clean_rows]
+    null_rows: list[dict] = []
+    for seed in V18_39_REMAINING_NFW_GAP_SEEDS:
+        rng = random.Random(seed)
+        names = sorted(actual_acts)
+        shuffled = [actual_acts[name] for name in names]
+        rng.shuffle(shuffled)
+        rows = v18_39_remaining_nfw_gap_score_rows(strengths, forced_by_name=dict(zip(names, shuffled)))
+        null_rows.append({"nullType": "branch-label-shuffle", "seed": seed, **v18_39_remaining_nfw_gap_metric(rows)})
+
+        forced: dict[str, dict[str, float]] = {}
+        for branch, values in active_values.items():
+            pool = [name for name in clean_names if route_by_name.get(name) == route_for_branch[branch]]
+            rng.shuffle(pool)
+            for name, value in zip(pool, values):
+                forced.setdefault(name, {key: 0.0 for key in V18_39_REMAINING_NFW_GAP_BRANCHES})[branch] = value
+        rows = v18_39_remaining_nfw_gap_score_rows(strengths, forced_by_name=forced)
+        null_rows.append({"nullType": "same-active-count-route-random", "seed": seed, **v18_39_remaining_nfw_gap_metric(rows)})
+
+        forced = {}
+        for branch, values in active_values.items():
+            pool = [
+                row["galaxy"]
+                for row in clean_rows
+                if row["set"] == "clean-protected" and route_by_name.get(row["galaxy"]) == route_for_branch[branch]
+            ]
+            rng.shuffle(pool)
+            for name, value in zip(pool, values):
+                forced.setdefault(name, {key: 0.0 for key in V18_39_REMAINING_NFW_GAP_BRANCHES})[branch] = value
+        rows = v18_39_remaining_nfw_gap_score_rows(strengths, forced_by_name=forced)
+        null_rows.append({"nullType": "protected-lookalike-branch-stress", "seed": seed, **v18_39_remaining_nfw_gap_metric(rows)})
+    return null_rows
+
+
+def write_v18_39_remaining_nfw_gap_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_39_remaining_nfw_gap_candidate"
+    release_capsule_path = DEFAULT_OBSERVED_STATE_V18_38_NFW_SHELF_RELEASE_LOCK_OUT / "mts_v18_38_nfw_shelf_release_lock_capsule.json"
+    if release_capsule_path.exists():
+        release_capsule = read_json_if_exists(release_capsule_path)
+    else:
+        release_capsule = write_v18_38_nfw_shelf_release_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_38_NFW_SHELF_RELEASE_LOCK_OUT)
+    selected_strengths, trial_rows = v18_39_remaining_nfw_gap_select_strengths()
+    rows = v18_39_remaining_nfw_gap_score_rows(selected_strengths, v18_36_nfw_gap_split_names())
+    metric = v18_39_remaining_nfw_gap_metric(rows)
+    train_metric = v18_39_remaining_nfw_gap_metric(rows, "train")
+    holdout_metric = v18_39_remaining_nfw_gap_metric(rows, "holdout")
+    null_rows = v18_39_remaining_nfw_gap_null_rows(selected_strengths, rows)
+    best_primary_null = max([parse_float(row.get("primaryPairGainVsV18_38Pct"), 0.0) for row in null_rows] or [0.0])
+    best_remaining_null = max([parse_float(row.get("remainingTargetGainVsV18_38Pct"), 0.0) for row in null_rows] or [0.0])
+    primary_null_margin = metric["primaryPairGainVsV18_38Pct"] - best_primary_null
+    remaining_null_margin = metric["remainingTargetGainVsV18_38Pct"] - best_remaining_null
+    high_rows = [row for row in rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [row for row in rows if row["set"] == "clean-protected"]
+    changed_high_rows = sorted(
+        [row for row in high_rows if abs(parse_float(row.get("candidateGainVsV18_38KmS"), 0.0)) >= 0.03],
+        key=lambda row: -parse_float(row.get("candidateGainVsV18_38KmS"), 0.0),
+    )
+    target_rows = sorted(
+        [row for row in high_rows if parse_bool(row.get("remainingNfwGapTarget"))],
+        key=lambda row: -parse_float(row.get("candidateGainVsV18_38KmS"), 0.0),
+    )
+    protected_hit_rows = sorted(
+        [
+            row for row in protected_rows
+            if parse_float(row.get("anyActivation"), 0.0) >= 0.05 or parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) > 0.0
+        ],
+        key=lambda row: (-parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0), row["galaxy"]),
+    )
+    branch_rows: list[dict] = []
+    for branch in V18_39_REMAINING_NFW_GAP_BRANCHES:
+        active = [
+            row for row in rows
+            if parse_float(selected_strengths.get(branch), 0.0) > 0.0 and parse_float(row.get(f"{branch}Activation"), 0.0) >= 0.05
+        ]
+        active_high = [row for row in active if row["set"] == "clean-high-rmse"]
+        active_target = [row for row in active_high if parse_bool(row.get("remainingNfwGapTarget"))]
+        active_primary = [row for row in active_high if parse_bool(row.get("primaryPairTarget"))]
+        active_protected = [row for row in active if row["set"] == "clean-protected"]
+        branch_rows.append(
+            {
+                "branch": branch,
+                "selectedBeta": selected_strengths[branch],
+                "activeCleanCount": sum(1 for row in active if row["set"] != "weak-systematics-excluded"),
+                "activeHighCount": len(active_high),
+                "activeRemainingTargetCount": len(active_target),
+                "activePrimaryPairCount": len(active_primary),
+                "activeProtectedCount": len(active_protected),
+                "remainingTargetGainVsV18_38Pct": pct_improvement(
+                    safe_mean(parse_float(row["v18_38Rmse"]) for row in active_target),
+                    safe_mean(parse_float(row["candidateRmse"]) for row in active_target),
+                ),
+                "primaryPairGainVsV18_38Pct": pct_improvement(
+                    safe_mean(parse_float(row["v18_38Rmse"]) for row in active_primary),
+                    safe_mean(parse_float(row["candidateRmse"]) for row in active_primary),
+                ),
+                "protectedMaxRegressionVsV18_38KmS": max([parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) for row in active_protected] or [0.0]),
+            }
+        )
+    passes = {
+        "v18_38ReleaseLocked": release_capsule["verdict"] == "v18.38 NFW-shelf browser release candidate locked",
+        "primaryPairGainAtLeast10Pct": parse_float(metric["primaryPairGainVsV18_38Pct"]) >= 10.0,
+        "remainingTargetGainPositive": parse_float(metric["remainingTargetGainVsV18_38Pct"]) > 0.0,
+        "cleanHighMeanImproves": parse_float(metric["highGainVsV18_38Pct"]) > 0.0,
+        "twoRouteClassesImproved": int(metric["routeClassesImprovedCount"]) >= 2,
+        "protectedRegressionZero": parse_float(metric["protectedMaxRegressionVsV18_38KmS"]) == 0.0,
+        "inheritedProtectedRegressionZero": parse_float(metric["inheritedProtectedMaxRegressionVsV18_38KmS"]) == 0.0,
+        "highRegressionBelow1": parse_float(metric["highMaxRegressionVsV18_38KmS"]) <= 1.0,
+        "highAbove20Zero": int(metric["highAbove20Count"]) == 0,
+        "routeChangesZero": int(metric["routeChangedCount"]) == 0,
+        "weakLeakageZero": int(metric["weakSystematicsLeakage"]) == 0,
+        "primaryNullMarginAtLeast10Pct": math.isfinite(primary_null_margin) and primary_null_margin >= 10.0,
+    }
+    verdict = "v18.39 remaining NFW-gap cleanup candidate for review" if all(passes.values()) else "v18.39 remaining NFW-gap cleanup not promoted"
+    score_row = {
+        "candidateId": "observed-state-response-v18.39-remaining-nfw-gap-cleanup-candidate",
+        "verdict": verdict,
+        **{f"selected{branch}Beta": selected_strengths[branch] for branch in V18_39_REMAINING_NFW_GAP_BRANCHES},
+        "v18_38HighGainPct": release_capsule["summary"]["v18_38HighGainPct"],
+        "v18_38CleanGainPct": release_capsule["summary"]["v18_38CleanGainPct"],
+        "candidateHighGainVsV18_38Pct": metric["highGainVsV18_38Pct"],
+        "candidateRemainingTargetGainVsV18_38Pct": metric["remainingTargetGainVsV18_38Pct"],
+        "candidateRemainingTargetGainVsV18_38KmS": metric["remainingTargetGainVsV18_38KmS"],
+        "candidatePrimaryPairGainVsV18_38Pct": metric["primaryPairGainVsV18_38Pct"],
+        "candidatePrimaryPairGainVsV18_38KmS": metric["primaryPairGainVsV18_38KmS"],
+        "trainRemainingTargetGainVsV18_38Pct": train_metric["remainingTargetGainVsV18_38Pct"],
+        "holdoutRemainingTargetGainVsV18_38Pct": holdout_metric["remainingTargetGainVsV18_38Pct"],
+        "candidateProtectedMaxRegressionVsV18_38KmS": metric["protectedMaxRegressionVsV18_38KmS"],
+        "candidateInheritedProtectedMaxRegressionVsV18_38KmS": metric["inheritedProtectedMaxRegressionVsV18_38KmS"],
+        "candidateHighMaxRegressionVsV18_38KmS": metric["highMaxRegressionVsV18_38KmS"],
+        "candidateHighAbove20": metric["highAbove20Count"],
+        "routeChangedCount": metric["routeChangedCount"],
+        "routeClassesImproved": metric["routeClassesImproved"],
+        "weakSystematicsLeakage": metric["weakSystematicsLeakage"],
+        "bestPrimaryPairNullGainVsV18_38Pct": best_primary_null,
+        "primaryPairNullMarginPct": primary_null_margin,
+        "bestRemainingTargetNullGainVsV18_38Pct": best_remaining_null,
+        "remainingTargetNullMarginPct": remaining_null_margin,
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_row])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", rows)
+    write_csv(out_dir / f"{prefix}_branch_ledger.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", target_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_hit_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_strength_trials.csv", trial_rows[:120])
+    formula = {
+        "candidateId": score_row["candidateId"],
+        "status": verdict,
+        "baseLaw": "locked v18.38 NFW-shelf browser release candidate",
+        "selectedBetas": selected_strengths,
+        "mechanism": "radial support reshaping: S_v18.39(r) = S_v18.38(r) * (1 - beta * activation * shelf_shape(x)); support is clamped nonnegative",
+        "branches": {
+            "lowCompactGasDwarfShelf": "compact gas-heavy low-load dwarf shelf suppression",
+            "lowOuterGasMemoryShelf": "low-load outer-gas memory-boundary shelf suppression",
+            "bufferedMidDiskShelf": "buffered mid-disk shelf suppression",
+            "bufferedHighMemoryLowGasShelf": "buffered high-memory low-gas shelf suppression",
+            "lowMassiveLowGasShelf": "massive low-gas low-load shelf suppression",
+        },
+        "allowedInputs": [
+            "locked route",
+            "memoryLoad",
+            "uOut",
+            "uMax",
+            "h/rOut",
+            "gas fraction",
+            "outer gas/disk shares",
+            "bar curvature",
+            "point density",
+            "baryonic mass scale",
+        ],
+        "forbiddenInputs": ["galaxy names in formula", "NFW parameters in formula", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.39 Remaining NFW-Gap Cleanup Candidate",
+        "",
+        "This is a narrow candidate-law test on top of locked v18.38. It tries to close the remaining NFW-prior shelf gap without touching protected inherited-regression cases.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Primary pair gain over v18.38: `{fmt(score_row['candidatePrimaryPairGainVsV18_38Pct'])}%` / `{fmt(score_row['candidatePrimaryPairGainVsV18_38KmS'])}` km/s.",
+        f"- Remaining target gain over v18.38: `{fmt(score_row['candidateRemainingTargetGainVsV18_38Pct'])}%` / `{fmt(score_row['candidateRemainingTargetGainVsV18_38KmS'])}` km/s.",
+        f"- Clean high-RMSE mean gain over v18.38: `{fmt(score_row['candidateHighGainVsV18_38Pct'])}%`.",
+        f"- Protected max regression vs v18.38: `{fmt(score_row['candidateProtectedMaxRegressionVsV18_38KmS'])}` km/s.",
+        f"- Inherited protected max regression vs v18.38: `{fmt(score_row['candidateInheritedProtectedMaxRegressionVsV18_38KmS'])}` km/s.",
+        f"- High max regression vs v18.38: `{fmt(score_row['candidateHighMaxRegressionVsV18_38KmS'])}` km/s.",
+        f"- Route classes improved: `{score_row['routeClassesImproved']}`.",
+        f"- Primary null margin: `{fmt(score_row['primaryPairNullMarginPct'])}` points.",
+        f"- Remaining-target null margin: `{fmt(score_row['remainingTargetNullMarginPct'])}` points.",
+        "",
+        "## Changed High-RMSE Cases",
+        "",
+        "| Galaxy | Route | v18.38 | candidate | gain | branch |",
+        "| --- | --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in changed_high_rows[:30]:
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | {fmt(parse_float(row['v18_38Rmse']))} | {fmt(parse_float(row['candidateRmse']))} | {fmt(parse_float(row['candidateGainVsV18_38KmS']))} | {row['branchHits']} |"
+        )
+    report.extend(["", "## Acceptance Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.append("")
+    report.append(verdict)
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-39-remaining-nfw-gap-candidate-v1",
+        "candidateId": score_row["candidateId"],
+        "verdict": verdict,
+        "selectedStrengths": selected_strengths,
+        "summary": {**score_row, "passes": passes},
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_branch_ledger.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_strength_trials.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18remainingnfwgapcandidate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_39_REMAINING_NFW_GAP_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_39_remaining_nfw_gap_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.39 remaining NFW-gap cleanup candidate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"primary_pair_gain={fmt(summary['candidatePrimaryPairGainVsV18_38Pct'])}%",
+                f"remaining_target_gain={fmt(summary['candidateRemainingTargetGainVsV18_38Pct'])}%",
+                f"high_gain={fmt(summary['candidateHighGainVsV18_38Pct'])}%",
+                f"protected={fmt(summary['candidateProtectedMaxRegressionVsV18_38KmS'])}",
+                f"null_margin={fmt(summary['primaryPairNullMarginPct'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18.39 remaining NFW-gap cleanup candidate to {out_dir.resolve()}")
+
+
 V18_36_NFW_GAP_BRANCHES = [
     "compactGasDwarfShelfSuppression",
     "bufferedDiskShelfSuppression",
@@ -96719,6 +97413,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18competitorbenchmarkv35",
             "v18competitorbenchmarkv38",
             "observedstatev18competitorbenchmarkv38",
+            "v18remainingnfwgapcandidate",
+            "observedstatev18remainingnfwgapcandidate",
             "v18nfwgapv35candidate",
             "observedstatev18nfwgapv35candidate",
             "v18nfwgapshelfharden",
@@ -97101,6 +97797,8 @@ def main() -> None:
         cmd_v18competitorbenchmarkv35(args)
     elif args.mode in {"v18competitorbenchmarkv38", "observedstatev18competitorbenchmarkv38"}:
         cmd_v18competitorbenchmarkv38(args)
+    elif args.mode in {"v18remainingnfwgapcandidate", "observedstatev18remainingnfwgapcandidate"}:
+        cmd_v18remainingnfwgapcandidate(args)
     elif args.mode in {"v18nfwgapv35candidate", "observedstatev18nfwgapv35candidate"}:
         cmd_v18nfwgapv35candidate(args)
     elif args.mode in {"v18nfwgapshelfharden", "observedstatev18nfwgapshelfharden"}:
