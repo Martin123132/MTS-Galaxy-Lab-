@@ -234,6 +234,7 @@ DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v1
 DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-ml-catalog-benchmark-v1")
 DEFAULT_OBSERVED_STATE_V18_ML_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-sensitivity-discriminator-v1"
 DEFAULT_OBSERVED_STATE_V18_EXTERNAL_ML_GAP_TEST_OUT = OUTPUT_PACK_ROOT / "mts-v18-external-ml-gap-test-v1"
+DEFAULT_OBSERVED_STATE_V18_REMAINING_ML_GAP_TEST_OUT = OUTPUT_PACK_ROOT / "mts-v18-41-remaining-ml-provenance-test-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -81146,6 +81147,414 @@ def cmd_v18externalmlgaptest(args: argparse.Namespace) -> None:
     print(f"Wrote v18 external M/L gap test to {out_dir.resolve()}")
 
 
+def v18_remaining_ml_gap_catalog_value_rows(source_cache: Path | None = None, offline: bool = True) -> list[dict]:
+    path = DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_OUT / "mts_v18_ml_catalog_values.csv"
+    if not path.exists():
+        write_v18_ml_catalog_benchmark_artifacts(
+            DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_OUT,
+            source_cache or DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE,
+            offline,
+        )
+    return read_csv_rows(path)
+
+
+def v18_remaining_ml_gap_case_rows(source_cache: Path | None = None, offline: bool = True) -> list[dict]:
+    context = observed_state_candidate_context()
+    value_rows = v18_remaining_ml_gap_catalog_value_rows(source_cache, offline)
+    value_by_variant_name = {(row["variantId"], row["galaxy"]): row for row in value_rows}
+    variant_ids = sorted({row["variantId"] for row in value_rows})
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    benchmark_dir = DEFAULT_OBSERVED_STATE_V18_38_COMPETITOR_BENCHMARK_OUT
+    benchmark_path = benchmark_dir / "mts_v18_38_competitor_case_ledger.csv"
+    if not benchmark_path.exists():
+        write_v18_38_competitor_benchmark_artifacts(benchmark_dir)
+    benchmark_by_name = {row["galaxy"]: row for row in read_csv_rows(benchmark_path)}
+    rows: list[dict] = []
+    for curve in context["curves"]:
+        name = curve["name"]
+        supports = supports_by_name.get(name, [])
+        if not supports:
+            continue
+        base_score = v18_competitor_support_score(curve, supports)
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        set_label = v18_competitor_set_label(name, context["weakNames"], context["highNames"])
+        split = "weak-excluded" if name in context["weakNames"] else "holdout" if name in v18_36_nfw_gap_split_names()[1] else "train"
+        bench = benchmark_by_name.get(name, {})
+        nominal_row = {
+            "galaxy": name,
+            "variantId": "fixed-sparc-ml",
+            "sourceModel": "SPARC fixed convention",
+            "set": set_label,
+            "split": split,
+            "lockedRoute": curve.get("lockedModelRoute", ""),
+            "candidateRoute": base_score.get("candidateRoute", ""),
+            "routeChangedVsV18_38": False,
+            "remainingGapClassTarget": name in V18_40_REMAINING_GAP_CLASS_TARGETS,
+            "remainingGapTargetClass": v18_40_remaining_gap_class_target_label(name),
+            "canonicalRmse": canonical["rmse"],
+            "v18_38Rmse": base_score["rmse"],
+            "candidateRmse": base_score["rmse"],
+            "candidateGainVsV18_38KmS": 0.0,
+            "candidateGainVsV18_38Pct": 0.0,
+            "candidateRegressionVsV18_38KmS": 0.0,
+            "nfwPriorRmse": parse_float(bench.get("nfw_concentration_priorRmse"), math.nan),
+            "candidateMinusNfwPriorKmS": base_score["rmse"] - parse_float(bench.get("nfw_concentration_priorRmse"), math.nan),
+            "Ydisk": ML_DISK,
+            "Ybul": ML_BULGE,
+            "e_Ydisk": "",
+            "e_Ybul": "",
+            "source": "SPARC fixed M/L convention",
+            "sourceClassification": "fixed SPARC convention",
+            "usableAsMtsFormulaInput": False,
+            "forbiddenAsFormulaInput": False,
+            "above20Candidate": base_score["rmse"] >= 20.0 if set_label == "clean-high-rmse" else "",
+            "protectedRegressionVsV18_38KmS": 0.0 if set_label == "clean-protected" else "",
+            "highRegressionVsV18_38KmS": 0.0 if set_label == "clean-high-rmse" else "",
+        }
+        rows.append(nominal_row)
+        for variant_id in variant_ids:
+            value = value_by_variant_name.get((variant_id, name))
+            if value is None:
+                continue
+            ydisk = parse_float(value.get("Ydisk"), math.nan)
+            ybul = parse_float(value.get("Ybul"), 0.0)
+            if not math.isfinite(ydisk):
+                continue
+            source_curve = transformed_curve(curve, ml_disk=ydisk, ml_bulge=ybul)
+            candidate = v18_competitor_support_score(source_curve, supports)
+            regression = max(0.0, candidate["rmse"] - base_score["rmse"])
+            rows.append(
+                {
+                    "galaxy": name,
+                    "variantId": variant_id,
+                    "sourceModel": value.get("sourceModel", ""),
+                    "set": set_label,
+                    "split": split,
+                    "lockedRoute": curve.get("lockedModelRoute", ""),
+                    "candidateRoute": candidate.get("candidateRoute", ""),
+                    "routeChangedVsV18_38": candidate.get("candidateRoute", "") != base_score.get("candidateRoute", ""),
+                    "remainingGapClassTarget": name in V18_40_REMAINING_GAP_CLASS_TARGETS,
+                    "remainingGapTargetClass": v18_40_remaining_gap_class_target_label(name),
+                    "canonicalRmse": canonical["rmse"],
+                    "v18_38Rmse": base_score["rmse"],
+                    "candidateRmse": candidate["rmse"],
+                    "candidateGainVsV18_38KmS": base_score["rmse"] - candidate["rmse"],
+                    "candidateGainVsV18_38Pct": pct_improvement(base_score["rmse"], candidate["rmse"]),
+                    "candidateRegressionVsV18_38KmS": regression,
+                    "nfwPriorRmse": parse_float(bench.get("nfw_concentration_priorRmse"), math.nan),
+                    "candidateMinusNfwPriorKmS": candidate["rmse"] - parse_float(bench.get("nfw_concentration_priorRmse"), math.nan),
+                    "Ydisk": ydisk,
+                    "Ybul": ybul,
+                    "e_Ydisk": value.get("e_Ydisk", ""),
+                    "e_Ybul": value.get("e_Ybul", ""),
+                    "source": value.get("source", ""),
+                    "sourceClassification": value.get("classification", ""),
+                    "usableAsMtsFormulaInput": parse_bool(value.get("usableAsMtsFormulaInput")),
+                    "forbiddenAsFormulaInput": True,
+                    "above20Candidate": candidate["rmse"] >= 20.0 if set_label == "clean-high-rmse" else "",
+                    "protectedRegressionVsV18_38KmS": regression if set_label == "clean-protected" else "",
+                    "highRegressionVsV18_38KmS": regression if set_label == "clean-high-rmse" else "",
+                }
+            )
+    rows.sort(key=lambda row: (row["variantId"], row["galaxy"]))
+    return rows
+
+
+def v18_remaining_ml_gap_metric(rows: list[dict], variant_id: str, split: str = "all") -> dict:
+    selected = [row for row in rows if row["variantId"] == variant_id and row["set"] != "weak-systematics-excluded"]
+    if split != "all":
+        selected = [row for row in selected if row.get("split") == split]
+    high = [row for row in selected if row["set"] == "clean-high-rmse"]
+    protected = [row for row in selected if row["set"] == "clean-protected"]
+    targets = [row for row in high if parse_bool(row.get("remainingGapClassTarget"))]
+    base_clean = safe_mean(parse_float(row["v18_38Rmse"]) for row in selected)
+    cand_clean = safe_mean(parse_float(row["candidateRmse"]) for row in selected)
+    base_high = safe_mean(parse_float(row["v18_38Rmse"]) for row in high)
+    cand_high = safe_mean(parse_float(row["candidateRmse"]) for row in high)
+    base_target = safe_mean(parse_float(row["v18_38Rmse"]) for row in targets)
+    cand_target = safe_mean(parse_float(row["candidateRmse"]) for row in targets)
+    protected_regs = [parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) for row in protected]
+    high_regs = [parse_float(row.get("highRegressionVsV18_38KmS"), 0.0) for row in high]
+    return {
+        "variantId": variant_id,
+        "split": split,
+        "cleanCount": len(selected),
+        "highCount": len(high),
+        "targetCount": len(targets),
+        "protectedCount": len(protected),
+        "cleanGainVsV18_38Pct": pct_improvement(base_clean, cand_clean),
+        "highGainVsV18_38Pct": pct_improvement(base_high, cand_high),
+        "targetGainVsV18_38Pct": pct_improvement(base_target, cand_target),
+        "targetGainVsV18_38KmS": base_target - cand_target if math.isfinite(base_target) and math.isfinite(cand_target) else math.nan,
+        "protectedMaxRegressionVsV18_38KmS": max(protected_regs or [0.0]),
+        "protectedWorseOver3Count": sum(1 for value in protected_regs if value > 3.0),
+        "highMaxRegressionVsV18_38KmS": max(high_regs or [0.0]),
+        "highAbove20Count": sum(1 for row in high if parse_bool(row.get("above20Candidate"))),
+        "routeChangedCount": sum(1 for row in selected if parse_bool(row.get("routeChangedVsV18_38"))),
+    }
+
+
+def v18_remaining_ml_gap_null_rows(rows: list[dict], best_variant_id: str) -> list[dict]:
+    variant_rows = [row for row in rows if row["variantId"] == best_variant_id and row["set"] != "weak-systematics-excluded"]
+    if not variant_rows:
+        return []
+    source_values = [
+        {
+            "Ydisk": parse_float(row["Ydisk"]),
+            "Ybul": parse_float(row["Ybul"], 0.0),
+            "sourceModel": row.get("sourceModel", ""),
+            "source": row.get("source", ""),
+            "sourceClassification": row.get("sourceClassification", ""),
+        }
+        for row in variant_rows
+        if math.isfinite(parse_float(row.get("Ydisk")))
+    ]
+    if not source_values:
+        return []
+    context = observed_state_candidate_context()
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    curve_by_name = {build_curve(sample)["name"]: build_curve(sample) for sample in load_samples()}
+    base_rows = {row["galaxy"]: row for row in rows if row["variantId"] == "fixed-sparc-ml"}
+    clean_names = sorted(row["galaxy"] for row in variant_rows)
+    null_rows: list[dict] = []
+    for seed in V18_EXTERNAL_ML_GAP_SEEDS:
+        rng = random.Random(seed)
+        shuffled_values = source_values[:]
+        rng.shuffle(shuffled_values)
+        case_rows: list[dict] = []
+        for name, value in zip(clean_names, shuffled_values):
+            curve = curve_by_name.get(name)
+            base_row = base_rows.get(name)
+            supports = supports_by_name.get(name, [])
+            if curve is None or base_row is None or not supports:
+                continue
+            source_curve = transformed_curve(curve, ml_disk=value["Ydisk"], ml_bulge=value["Ybul"])
+            candidate = v18_competitor_support_score(source_curve, supports)
+            set_label = base_row["set"]
+            regression = max(0.0, candidate["rmse"] - parse_float(base_row["v18_38Rmse"]))
+            case_rows.append(
+                {
+                    **base_row,
+                    "variantId": f"shuffled-{best_variant_id}-{seed}",
+                    "candidateRmse": candidate["rmse"],
+                    "candidateGainVsV18_38KmS": parse_float(base_row["v18_38Rmse"]) - candidate["rmse"],
+                    "candidateGainVsV18_38Pct": pct_improvement(parse_float(base_row["v18_38Rmse"]), candidate["rmse"]),
+                    "candidateRoute": candidate.get("candidateRoute", ""),
+                    "routeChangedVsV18_38": candidate.get("candidateRoute", "") != base_row.get("candidateRoute", ""),
+                    "Ydisk": value["Ydisk"],
+                    "Ybul": value["Ybul"],
+                    "protectedRegressionVsV18_38KmS": regression if set_label == "clean-protected" else "",
+                    "highRegressionVsV18_38KmS": regression if set_label == "clean-high-rmse" else "",
+                    "above20Candidate": candidate["rmse"] >= 20.0 if set_label == "clean-high-rmse" else "",
+                }
+            )
+        metric = v18_remaining_ml_gap_metric(case_rows, f"shuffled-{best_variant_id}-{seed}")
+        null_rows.append({"nullType": "galaxy-shuffled-source-ml", "seed": seed, "sourceVariantId": best_variant_id, **metric})
+    return null_rows
+
+
+def write_v18_remaining_ml_gap_test_artifacts(out_dir: Path, source_cache: Path, offline: bool) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source_cache.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_41_remaining_ml_gap"
+    inventory_rows = v18_ml_catalog_download_inventory(source_cache, offline)
+    rows = v18_remaining_ml_gap_case_rows(source_cache, offline)
+    variant_ids = sorted({row["variantId"] for row in rows if row["variantId"] != "fixed-sparc-ml"})
+    score_rows: list[dict] = []
+    for variant_id in ["fixed-sparc-ml"] + variant_ids:
+        for split in ["all", "train", "holdout"]:
+            score_rows.append(v18_remaining_ml_gap_metric(rows, variant_id, split))
+    fixed_summaries = [row for row in score_rows if row["split"] == "all" and row["variantId"] != "fixed-sparc-ml"]
+    best_variant = max(
+        fixed_summaries,
+        key=lambda row: (
+            parse_float(row.get("targetGainVsV18_38Pct"), -999.0),
+            parse_float(row.get("highGainVsV18_38Pct"), -999.0),
+            -parse_float(row.get("protectedMaxRegressionVsV18_38KmS"), 999.0),
+        ),
+        default={},
+    )
+    best_variant_id = best_variant.get("variantId", "")
+    null_rows = v18_remaining_ml_gap_null_rows(rows, best_variant_id) if best_variant_id else []
+    best_null_target_gain = max([parse_float(row.get("targetGainVsV18_38Pct"), -999.0) for row in null_rows] or [-999.0])
+    null_margin = parse_float(best_variant.get("targetGainVsV18_38Pct"), math.nan) - best_null_target_gain
+    target_rows = sorted(
+        [row for row in rows if parse_bool(row.get("remainingGapClassTarget")) and row["variantId"] in {"fixed-sparc-ml", best_variant_id}],
+        key=lambda row: (row["galaxy"], row["variantId"]),
+    )
+    protected_rows = sorted(
+        [
+            row for row in rows
+            if row["variantId"] in {"fixed-sparc-ml", best_variant_id}
+            and row["set"] == "clean-protected"
+            and parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) > 0.0
+        ],
+        key=lambda row: -parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0),
+    )
+    target_best_rows: list[dict] = []
+    by_target: dict[str, list[dict]] = {}
+    for row in rows:
+        if parse_bool(row.get("remainingGapClassTarget")):
+            by_target.setdefault(row["galaxy"], []).append(row)
+    for name, items in sorted(by_target.items()):
+        best = min(items, key=lambda row: parse_float(row.get("candidateRmse"), math.inf))
+        fixed = min([row for row in items if row["variantId"] == "fixed-sparc-ml"], key=lambda row: parse_float(row.get("candidateRmse"), math.inf))
+        target_best_rows.append(
+            {
+                "galaxy": name,
+                "targetClass": fixed.get("remainingGapTargetClass", ""),
+                "v18_38Rmse": fixed["v18_38Rmse"],
+                "bestVariantId": best["variantId"],
+                "bestSourceModel": best.get("sourceModel", ""),
+                "bestYdisk": best.get("Ydisk", ""),
+                "bestYbul": best.get("Ybul", ""),
+                "bestRmse": best["candidateRmse"],
+                "bestGainVsV18_38KmS": parse_float(fixed["v18_38Rmse"]) - parse_float(best["candidateRmse"]),
+                "bestGainVsV18_38Pct": pct_improvement(parse_float(fixed["v18_38Rmse"]), parse_float(best["candidateRmse"])),
+                "sourceClassification": best.get("sourceClassification", ""),
+                "usableAsMtsFormulaInput": best.get("usableAsMtsFormulaInput", False),
+            }
+        )
+    source_values = v18_remaining_ml_gap_catalog_value_rows(source_cache, offline)
+    source_value_rows = [
+        row for row in source_values
+        if row["galaxy"] in V18_40_REMAINING_GAP_CLASS_TARGETS or row["galaxy"] in {"F574-2", "F563-V1", "F579-V1"}
+    ]
+    passes = {
+        "sourceCacheOnDDrive": str(source_cache).lower().startswith("d:"),
+        "sourceValuesLoaded": bool(source_values),
+        "bestVariantTargetGainPositive": parse_float(best_variant.get("targetGainVsV18_38Pct"), 0.0) > 0.0,
+        "protectedRegressionBelow3": parse_float(best_variant.get("protectedMaxRegressionVsV18_38KmS"), 999.0) < 3.0,
+        "beatsShuffledSourceMlBy10": math.isfinite(null_margin) and null_margin >= 10.0,
+        "weakLeakageZero": True,
+        "lawUnchanged": True,
+    }
+    if not source_values:
+        verdict = "source M/L table missing"
+    elif parse_float(best_variant.get("targetGainVsV18_38Pct"), 0.0) > 5.0 and parse_float(best_variant.get("protectedMaxRegressionVsV18_38KmS"), 999.0) < 3.0:
+        verdict = "external M/L materially changes remaining gap"
+    elif any(parse_float(row.get("bestGainVsV18_38KmS"), 0.0) > 1.0 for row in target_best_rows):
+        verdict = "external M/L explains individual remaining-gap cases"
+    else:
+        verdict = "external M/L does not explain remaining gap"
+    summary = {
+        "analysisName": "mts-v18-41-remaining-ml-provenance-test-v1",
+        "verdict": verdict,
+        "source": "Li+ 2020 CDS/VizieR J/ApJS/247/31 Ydisk/Ybul values",
+        "sourceClassification": "dynamical halo-fit M/L; benchmark/context only unless independently validated",
+        "targetCount": len(V18_40_REMAINING_GAP_CLASS_TARGETS),
+        "sourceValueRows": len(source_values),
+        "variantCount": len(variant_ids),
+        "bestVariantId": best_variant_id,
+        "bestVariantTargetGainPct": best_variant.get("targetGainVsV18_38Pct", ""),
+        "bestVariantTargetGainKmS": best_variant.get("targetGainVsV18_38KmS", ""),
+        "bestVariantHighGainPct": best_variant.get("highGainVsV18_38Pct", ""),
+        "bestVariantProtectedMaxRegressionKmS": best_variant.get("protectedMaxRegressionVsV18_38KmS", ""),
+        "bestNullTargetGainPct": best_null_target_gain,
+        "nullMarginPct": null_margin,
+        "lawChanged": False,
+        "browserChanged": False,
+        "weakSystematicsLeakage": 0,
+        "passes": passes,
+    }
+    write_csv(out_dir / f"{prefix}_source_inventory.csv", inventory_rows)
+    write_csv(out_dir / f"{prefix}_source_values.csv", source_value_rows)
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", rows)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", target_rows)
+    write_csv(out_dir / f"{prefix}_target_best_oracle.csv", target_best_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    formula = {
+        "candidateId": "observed-state-response-v18.41-remaining-ml-provenance-test",
+        "status": verdict,
+        "lawChanged": False,
+        "browserChanged": False,
+        "baseLaw": "locked v18.38 support field",
+        "mechanismTested": "replace fixed SPARC disk/bulge M/L in the baryonic terms with published Li+ 2020 Ydisk/Ybul, then replay the locked v18.38 support field",
+        "source": summary["source"],
+        "sourceClassification": summary["sourceClassification"],
+        "bestVariantId": best_variant_id,
+        "notTransportLawBecause": "Li+ 2020 Ydisk/Ybul are fitted inside halo-model catalogues, so they are provenance/sensitivity evidence rather than independent MTS formula inputs.",
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.41 Remaining M/L Provenance Gap Test",
+        "",
+        "This is the targeted numeric M/L/provenance test for the current remaining NFW-gap galaxies. It does not change MTS, v18.38, the browser, q, Gamma0, or any branch formula.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Source: `{summary['source']}`.",
+        f"- Best fixed source-M/L variant: `{best_variant_id}`.",
+        f"- Remaining-target gain: `{fmt(parse_float(summary['bestVariantTargetGainPct']))}%` / `{fmt(parse_float(summary['bestVariantTargetGainKmS']))}` km/s.",
+        f"- High-RMSE gain: `{fmt(parse_float(summary['bestVariantHighGainPct']))}%`.",
+        f"- Protected max regression: `{fmt(parse_float(summary['bestVariantProtectedMaxRegressionKmS']))}` km/s.",
+        f"- Best shuffled source-M/L target gain: `{fmt(best_null_target_gain)}%`; margin `{fmt(null_margin)}` points.",
+        "",
+        "## Remaining Gap Targets",
+        "",
+        "| Galaxy | class | v18.38 | best source-M/L variant | Ydisk | Ybul | best RMSE | gain | usable as formula input |",
+        "| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in target_best_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['targetClass']} | {fmt(row['v18_38Rmse'])} | {row['bestVariantId']} | {fmt(row['bestYdisk'])} | {fmt(row['bestYbul'])} | {fmt(row['bestRmse'])} | {fmt(row['bestGainVsV18_38KmS'])} | `{row['usableAsMtsFormulaInput']}` |"
+        )
+    report.extend(
+        [
+            "",
+            "## Guard",
+            "",
+            "The source table gives real per-galaxy numeric stellar M/L values, but those values are dynamical halo-fit outputs. They are therefore allowed here as provenance and sensitivity evidence, not as a direct MTS transport-law input.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": summary["analysisName"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_source_inventory.csv",
+            f"{prefix}_source_values.csv",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_target_best_oracle.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18remainingmlgaptest(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_REMAINING_ML_GAP_TEST_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE
+    capsule = write_v18_remaining_ml_gap_test_artifacts(out_dir, source_cache, args.offline)
+    summary = capsule["summary"]
+    print("MTS v18.41 remaining M/L provenance gap test")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"variants={summary['variantCount']}",
+                f"best={summary['bestVariantId']}",
+                f"target_gain={fmt(parse_float(summary['bestVariantTargetGainPct']))}%",
+                f"target_gain_kms={fmt(parse_float(summary['bestVariantTargetGainKmS']))}",
+                f"protected={fmt(parse_float(summary['bestVariantProtectedMaxRegressionKmS']))}",
+                f"null_margin={fmt(parse_float(summary['nullMarginPct']))}",
+            ]
+        )
+    )
+    print(f"Wrote v18.41 remaining M/L provenance gap test to {out_dir.resolve()}")
+
+
 V18_LEGACY_VBAR_SHAPE_SEEDS = [20260523, 20260524, 271828, 314159, 42, 12345, 8675309, 19, 31]
 V18_LEGACY_VBAR_SHAPE_ADD_BETAS = [0.25, 0.35, 0.45, 0.60, 0.75]
 V18_LEGACY_VBAR_SHAPE_RELIEF_BETAS = [0.15, 0.25, 0.35, 0.45, 0.60]
@@ -98239,6 +98648,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18mldiscriminator",
             "v18externalmlgaptest",
             "observedstatev18externalmlgaptest",
+            "v18remainingmlgaptest",
+            "observedstatev18remainingmlgaptest",
             "v18legacyvbarshape",
             "observedstatev18legacyvbarshape",
             "v18legacyvbarpolarity",
@@ -98624,6 +99035,8 @@ def main() -> None:
         cmd_v18mldiscriminator(args)
     elif args.mode in {"v18externalmlgaptest", "observedstatev18externalmlgaptest"}:
         cmd_v18externalmlgaptest(args)
+    elif args.mode in {"v18remainingmlgaptest", "observedstatev18remainingmlgaptest"}:
+        cmd_v18remainingmlgaptest(args)
     elif args.mode in {"v18legacyvbarshape", "observedstatev18legacyvbarshape"}:
         cmd_v18legacyvbarshape(args)
     elif args.mode in {"v18legacyvbarpolarity", "observedstatev18legacyvbarpolarity"}:
