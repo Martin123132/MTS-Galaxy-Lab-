@@ -17,15 +17,18 @@
   var V18_RADIAL_TRANSFER_TOKEN = "__MTS_V18_26_RADIAL_TRANSFER_CANDIDATE__";
   var V18_LIMITATION_POCKET_TOKEN = "__MTS_V18_30_LIMITATION_POCKET_CANDIDATE__";
   var V18_LOW_VBAR_POLARITY_TOKEN = "__MTS_V18_34_LOW_VBAR_POLARITY_CANDIDATE__";
+  var V18_NFW_SHELF_TOKEN = "__MTS_V18_37_NFW_SHELF_CANDIDATE__";
   var V18_LEGACY_REVIEW_TOKEN = "__MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE__";
   var V18_RELEASE_DISPLAY_NAME = "MTS v18.21 radial-phase release candidate (exact cache gated)";
   var V18_RADIAL_TRANSFER_DISPLAY_NAME = "MTS v18.26 radial-transfer candidate (exact cache gated)";
   var V18_LIMITATION_POCKET_DISPLAY_NAME = "MTS v18.30 release candidate (exact cache gated)";
   var V18_LOW_VBAR_POLARITY_DISPLAY_NAME = "MTS v18.35 low-Vbar polarity release-successor candidate (exact cache gated)";
+  var V18_NFW_SHELF_DISPLAY_NAME = "MTS v18.38 NFW-shelf release candidate (exact cache gated)";
   var V18_RELEASE_ARTIFACT = window.MTS_V18_21_RADIAL_PHASE_CANDIDATE || window.MTS_V18_09_SURFACE_PERSISTENCE_CANDIDATE || window.MTS_V18_07_FAMILY_SURFACE_CANDIDATE || window.MTS_V18_05_RELEASE_CANDIDATE || window.MTS_V18_01_REVIEW_CANDIDATE;
   var V18_RADIAL_TRANSFER_ARTIFACT = window.MTS_V18_26_RADIAL_TRANSFER_CANDIDATE || null;
   var V18_LIMITATION_POCKET_ARTIFACT = window.MTS_V18_30_LIMITATION_POCKET_CANDIDATE || null;
   var V18_LOW_VBAR_POLARITY_ARTIFACT = window.MTS_V18_34_LOW_VBAR_POLARITY_CANDIDATE || null;
+  var V18_NFW_SHELF_ARTIFACT = window.MTS_V18_37_NFW_SHELF_CANDIDATE || null;
   var V18_REVIEW_GATE_FALLBACK = {
     candidateId: "observed-state-response-v18.10-native-gated-release",
     verdict: "v18.10 release-facing candidate passes",
@@ -83,6 +86,7 @@
     v18radialtransfer: V18_RADIAL_TRANSFER_TOKEN,
     v18limitationpocket: V18_LIMITATION_POCKET_TOKEN,
     v18lowvbarpolarity: V18_LOW_VBAR_POLARITY_TOKEN,
+    v18nfwshelf: V18_NFW_SHELF_TOKEN,
     baryon: "0",
     soft: "gamma0 * leff * (1 - exp(-r / leff))",
     outer: "gamma0 * leff * pow(max(0, x), 0.75) * (1 - exp(-memory / 2))",
@@ -96,6 +100,7 @@
     v18radialtransfer: V18_RADIAL_TRANSFER_DISPLAY_NAME,
     v18limitationpocket: V18_LIMITATION_POCKET_DISPLAY_NAME,
     v18lowvbarpolarity: V18_LOW_VBAR_POLARITY_DISPLAY_NAME,
+    v18nfwshelf: V18_NFW_SHELF_DISPLAY_NAME,
     baryon: "Baryon only",
     soft: "Soft radial support",
     outer: "Outer gate support",
@@ -1875,7 +1880,7 @@
   function compileFrameworkExpression(expression) {
     var source = String(expression || "").trim();
     if (!source) throw new Error("Framework formula is empty.");
-    if (source === V18REVIEW_TOKEN || source === V18_LEGACY_REVIEW_TOKEN || source === V18_RADIAL_TRANSFER_TOKEN || source === V18_LIMITATION_POCKET_TOKEN || source === V18_LOW_VBAR_POLARITY_TOKEN) {
+    if (source === V18REVIEW_TOKEN || source === V18_LEGACY_REVIEW_TOKEN || source === V18_RADIAL_TRANSFER_TOKEN || source === V18_LIMITATION_POCKET_TOKEN || source === V18_LOW_VBAR_POLARITY_TOKEN || source === V18_NFW_SHELF_TOKEN) {
       var artifact = v18ArtifactForSource(source) || null;
       var metadata = artifact && artifact.metadata ? artifact.metadata : {};
       var nativeMeta = v18NativeMetaForSource(source, metadata);
@@ -1954,6 +1959,7 @@
   }
 
   function v18ArtifactForSource(source) {
+    if (source === V18_NFW_SHELF_TOKEN) return V18_NFW_SHELF_ARTIFACT || null;
     if (source === V18_LOW_VBAR_POLARITY_TOKEN) return V18_LOW_VBAR_POLARITY_ARTIFACT || null;
     if (source === V18_LIMITATION_POCKET_TOKEN) return V18_LIMITATION_POCKET_ARTIFACT || null;
     if (source === V18_RADIAL_TRANSFER_TOKEN) return V18_RADIAL_TRANSFER_ARTIFACT || null;
@@ -1961,6 +1967,7 @@
   }
 
   function v18DisplayNameForSource(source) {
+    if (source === V18_NFW_SHELF_TOKEN) return V18_NFW_SHELF_DISPLAY_NAME;
     if (source === V18_LOW_VBAR_POLARITY_TOKEN) return V18_LOW_VBAR_POLARITY_DISPLAY_NAME;
     if (source === V18_LIMITATION_POCKET_TOKEN) return V18_LIMITATION_POCKET_DISPLAY_NAME;
     return source === V18_RADIAL_TRANSFER_TOKEN ? V18_RADIAL_TRANSFER_DISPLAY_NAME : V18_RELEASE_DISPLAY_NAME;
@@ -1968,6 +1975,7 @@
 
   function v18NativeMetaForSource(source, metadata) {
     metadata = metadata || {};
+    if (source === V18_NFW_SHELF_TOKEN) return metadata.nativeFormulaV1837 || {};
     if (source === V18_LOW_VBAR_POLARITY_TOKEN) return metadata.nativeFormulaV1834 || {};
     if (source === V18_LIMITATION_POCKET_TOKEN) return metadata.nativeFormulaV1830 || {};
     if (source === V18_RADIAL_TRANSFER_TOKEN) return metadata.nativeFormulaV1826 || {};
@@ -1976,6 +1984,7 @@
 
   function v18ReleaseLockForSource(source, metadata) {
     metadata = metadata || {};
+    if (source === V18_NFW_SHELF_TOKEN) return metadata.releaseLockV1837 || {};
     if (source === V18_LOW_VBAR_POLARITY_TOKEN) return metadata.releaseLockV1834 || {};
     if (source === V18_LIMITATION_POCKET_TOKEN) return metadata.releaseLockV1830 || {};
     if (source === V18_RADIAL_TRANSFER_TOKEN) return metadata.releaseLockV1826 || {};
@@ -1998,7 +2007,7 @@
   }
 
   function isV18ReviewActive() {
-    return !!(state.framework.compiled && (state.framework.compiled.source === V18REVIEW_TOKEN || state.framework.compiled.source === V18_LEGACY_REVIEW_TOKEN || state.framework.compiled.source === V18_RADIAL_TRANSFER_TOKEN || state.framework.compiled.source === V18_LIMITATION_POCKET_TOKEN || state.framework.compiled.source === V18_LOW_VBAR_POLARITY_TOKEN));
+    return !!(state.framework.compiled && (state.framework.compiled.source === V18REVIEW_TOKEN || state.framework.compiled.source === V18_LEGACY_REVIEW_TOKEN || state.framework.compiled.source === V18_RADIAL_TRANSFER_TOKEN || state.framework.compiled.source === V18_LIMITATION_POCKET_TOKEN || state.framework.compiled.source === V18_LOW_VBAR_POLARITY_TOKEN || state.framework.compiled.source === V18_NFW_SHELF_TOKEN));
   }
 
   function frameworkProfileBand(curve, xMin, xMax) {

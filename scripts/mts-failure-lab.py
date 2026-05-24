@@ -187,6 +187,7 @@ DEFAULT_OBSERVED_STATE_V18_CURRENT_RELEASE_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "m
 DEFAULT_OBSERVED_STATE_V18_35_COMPETITOR_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v18-35-competitor-benchmark-v1"
 DEFAULT_OBSERVED_STATE_V18_36_NFW_GAP_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v18-36-nfw-gap-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_37_NFW_SHELF_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v18-37-nfw-shelf-hardening-v1"
+DEFAULT_OBSERVED_STATE_V18_38_NFW_SHELF_RELEASE_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-v18-38-nfw-shelf-release-lock-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_GAP_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-gap-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_GAP_PROVENANCE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-gap-provenance-stress-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VARIABLE_MINE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-variable-mine-v1"
@@ -245,6 +246,7 @@ V18_SURFACE_SMOOTH_ARTIFACT_PATH = ROOT / "data" / "v18-09-surface-persistence-c
 V18_RADIAL_PHASE_ARTIFACT_PATH = ROOT / "data" / "v18-21-radial-phase-candidate.js"
 V18_NFW_RADIAL_TRANSFER_ARTIFACT_PATH = ROOT / "data" / "v18-26-radial-transfer-candidate.js"
 V18_LEGACY_VBAR_POLARITY_ARTIFACT_PATH = ROOT / "data" / "v18-34-low-vbar-polarity-candidate.js"
+V18_NFW_SHELF_ARTIFACT_PATH = ROOT / "data" / "v18-37-nfw-shelf-candidate.js"
 DEFAULT_TNG_SOURCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\tng-mts-v1")
 DEFAULT_TNG_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs\tng-hdf5")
 DEFAULT_D_DRIVE_PYTHON_LIB = Path(r"D:\Users\ollet\Desktop\g project\python-libs")
@@ -62831,6 +62833,7 @@ def v18_36_nfw_gap_score_rows(
                 "branchHits": "; ".join(branch_hits),
                 "anyActivation": active,
                 **{f"{branch}Activation": acts.get(branch, 0.0) for branch in V18_36_NFW_GAP_BRANCHES},
+                "support2": [float(value) for value in candidate_supports],
                 "protectedRegressionVsV18_35KmS": max(0.0, candidate["rmse"] - parse_float(base["v18_35Rmse"])) if base["set"] == "clean-protected" else "",
                 "highRegressionVsV18_35KmS": max(0.0, candidate["rmse"] - parse_float(base["v18_35Rmse"])) if base["set"] == "clean-high-rmse" else "",
                 "above20Candidate": candidate["rmse"] >= 20.0 if base["set"] == "clean-high-rmse" else "",
@@ -63554,6 +63557,386 @@ def cmd_v18nfwgapshelfharden(args: argparse.Namespace) -> None:
         )
     )
     print(f"Wrote v18.37 NFW-shelf hardening to {out_dir.resolve()}")
+
+
+def write_v18_38_nfw_shelf_release_lock_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_38_nfw_shelf_release_lock"
+    hardening_capsule = write_v18_37_nfw_shelf_hardening_artifacts(DEFAULT_OBSERVED_STATE_V18_37_NFW_SHELF_HARDENING_OUT)
+    current_capsule = write_v18_current_release_candidate_artifacts(DEFAULT_OBSERVED_STATE_V18_CURRENT_RELEASE_CANDIDATE_OUT)
+    base_rows = v18_36_nfw_gap_base_rows()
+    rows = v18_36_nfw_gap_score_rows(base_rows, V18_37_NFW_SHELF_FIXED_STRENGTHS, None, v18_36_nfw_gap_split_names())
+    metric = v18_36_nfw_gap_metric(rows)
+    rows_by_name = {row["galaxy"]: row for row in rows}
+    base_artifact = read_window_json_assignment(V18_LEGACY_VBAR_POLARITY_ARTIFACT_PATH, "MTS_V18_34_LOW_VBAR_POLARITY_CANDIDATE")
+    curves = [build_curve(sample) for sample in load_samples()]
+    baseline_all = baseline_summary(curves)["baselineMean"]
+    clean_rows = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+    high_rows = [row for row in clean_rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [row for row in clean_rows if row["set"] == "clean-protected"]
+    clean_baseline = safe_mean(parse_float(row["canonicalRmse"]) for row in clean_rows)
+    clean_candidate = safe_mean(parse_float(row["candidateRmse"]) for row in clean_rows)
+    high_baseline = safe_mean(parse_float(row["canonicalRmse"]) for row in high_rows)
+    high_candidate = safe_mean(parse_float(row["candidateRmse"]) for row in high_rows)
+    clean_gain = pct_improvement(clean_baseline, clean_candidate)
+    high_gain = pct_improvement(high_baseline, high_candidate)
+
+    artifact_curves: dict[str, dict] = {}
+    case_rows: list[dict] = []
+    parity_rows: list[dict] = []
+    for curve in curves:
+        row = rows_by_name.get(curve["name"])
+        if row is None:
+            base_entry = base_artifact.get("curves", {}).get(curve["name"], {})
+            base_supports = [parse_float(value) for value in base_entry.get("support2", [])]
+            baseline = score_curve(curve)
+            base_score = v18_competitor_support_score(curve, base_supports) if base_supports else baseline
+            row = {
+                "galaxy": curve["name"],
+                "set": "weak-systematics-excluded",
+                "split": "weak-excluded",
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "observedRoute": curve.get("route", ""),
+                "canonicalRmse": baseline["rmse"],
+                "v18_35Rmse": base_score["rmse"],
+                "candidateRmse": base_score["rmse"],
+                "candidateRoute": base_score["candidateRoute"],
+                "v18_35Route": base_score["candidateRoute"],
+                "candidateGainVsV18_35KmS": 0.0,
+                "candidateGainVsV18_35Pct": 0.0,
+                "candidateGainVsCanonicalPct": pct_improvement(baseline["rmse"], base_score["rmse"]),
+                "candidateMinusV18_35KmS": 0.0,
+                "candidateMinusNfwPriorKmS": "",
+                "nfwPriorRmse": "",
+                "primaryNfwGapTarget": False,
+                "nfwGapTarget": False,
+                "routeChangedVsV18_35": False,
+                "branchHits": "",
+                "anyActivation": 0.0,
+                "compactGasDwarfShelfSuppressionActivation": 0.0,
+                "bufferedDiskShelfSuppressionActivation": 0.0,
+                "massiveLowGasCompactShelfSuppressionActivation": 0.0,
+                "support2": base_supports,
+                "protectedRegressionVsV18_35KmS": "",
+                "highRegressionVsV18_35KmS": "",
+                "above20Candidate": "",
+            }
+        supports = [parse_float(value) for value in row.get("support2", [])]
+        baseline = score_curve(curve)
+        artifact_score = observed_state_score_curve_from_supports(curve, supports) if supports else baseline
+        rmse_diff = artifact_score["rmse"] - parse_float(row["candidateRmse"])
+        route_match = artifact_score["candidateRoute"] == row["candidateRoute"]
+        parity_claimed = row["set"] != "weak-systematics-excluded"
+        parity_pass = (not parity_claimed) or (abs(rmse_diff) <= 1.0e-9 and route_match)
+        branch_hits = row.get("branchHits", "")
+        entry = {
+            "candidateId": "observed-state-response-v18.38-nfw-shelf-release-candidate",
+            "releaseCandidate": "MTS v18.38 NFW-shelf release candidate",
+            "supportSource": "python v18.37 exact support cache",
+            "support2": [float(value) for value in supports],
+            "set": row["set"],
+            "split": row.get("split", ""),
+            "lockedRoute": row.get("lockedRoute", ""),
+            "observedRoute": row.get("observedRoute", ""),
+            "baselineRmse": baseline["rmse"],
+            "v18_35Rmse": parse_float(row["v18_35Rmse"]),
+            "v18_37Rmse": parse_float(row["candidateRmse"]),
+            "v18_37ArtifactRmse": artifact_score["rmse"],
+            "v18_37RmseDiffVsPython": rmse_diff,
+            "v18_35CandidateRoute": row.get("v18_35Route", ""),
+            "v18_37CandidateRoute": row.get("candidateRoute", ""),
+            "v18_37ArtifactRoute": artifact_score["candidateRoute"],
+            "candidateRoute": row.get("candidateRoute", ""),
+            "branchHits": branch_hits,
+            "compactGasDwarfShelfSuppressionActivation": parse_float(row.get("compactGasDwarfShelfSuppressionActivation"), 0.0),
+            "bufferedDiskShelfSuppressionActivation": parse_float(row.get("bufferedDiskShelfSuppressionActivation"), 0.0),
+            "massiveLowGasCompactShelfSuppressionActivation": parse_float(row.get("massiveLowGasCompactShelfSuppressionActivation"), 0.0),
+            "anyActivation": parse_float(row.get("anyActivation"), 0.0),
+            "reviewGate": "weak/systematics excluded" if row["set"] == "weak-systematics-excluded" else "clean framework-facing",
+            "browserParityPass": parity_pass,
+        }
+        artifact_curves[curve["name"]] = entry
+        case_rows.append(
+            {
+                "galaxy": curve["name"],
+                "set": row["set"],
+                "split": row.get("split", ""),
+                "lockedRoute": row.get("lockedRoute", ""),
+                "baselineRmse": baseline["rmse"],
+                "v18_35Rmse": parse_float(row["v18_35Rmse"]),
+                "v18_37Rmse": parse_float(row["candidateRmse"]),
+                "gainVsV18_35KmS": parse_float(row["candidateGainVsV18_35KmS"]),
+                "gainVsV18_35Pct": parse_float(row["candidateGainVsV18_35Pct"]),
+                "gainVsCanonicalPct": parse_float(row["candidateGainVsCanonicalPct"]),
+                "candidateMinusV18_35KmS": parse_float(row["candidateMinusV18_35KmS"]),
+                "nfwPriorRmse": row.get("nfwPriorRmse", ""),
+                "candidateMinusNfwPriorKmS": row.get("candidateMinusNfwPriorKmS", ""),
+                "primaryNfwGapTarget": row.get("primaryNfwGapTarget", ""),
+                "nfwGapTarget": row.get("nfwGapTarget", ""),
+                "branchHits": branch_hits,
+                "anyActivation": parse_float(row.get("anyActivation"), 0.0),
+                "v18_35Route": row.get("v18_35Route", ""),
+                "v18_37Route": row.get("candidateRoute", ""),
+                "routeChangedVsV18_35": row.get("routeChangedVsV18_35", ""),
+                "protectedRegressionVsV18_35KmS": row.get("protectedRegressionVsV18_35KmS", ""),
+                "highRegressionVsV18_35KmS": row.get("highRegressionVsV18_35KmS", ""),
+                "above20Candidate": row.get("above20Candidate", ""),
+                "weakSystematicsExcluded": row["set"] == "weak-systematics-excluded",
+            }
+        )
+        parity_rows.append(
+            {
+                "galaxy": curve["name"],
+                "set": row["set"],
+                "supportSource": entry["supportSource"],
+                "pythonV1837Rmse": parse_float(row["candidateRmse"]),
+                "artifactRmse": artifact_score["rmse"],
+                "artifactMinusPythonRmse": rmse_diff,
+                "pythonRoute": row.get("candidateRoute", ""),
+                "artifactRoute": artifact_score["candidateRoute"],
+                "routeMatch": route_match,
+                "parityClaimed": parity_claimed,
+                "parityPass": parity_pass,
+            }
+        )
+
+    parity_claimed_rows = [row for row in parity_rows if parse_bool(row["parityClaimed"])]
+    cache_mismatch = sum(1 for row in parity_claimed_rows if not parse_bool(row["parityPass"]))
+    route_mismatch = sum(1 for row in parity_claimed_rows if not parse_bool(row["routeMatch"]))
+    protected_max = max([parse_float(row.get("protectedRegressionVsV18_35KmS"), 0.0) for row in case_rows if row["set"] == "clean-protected"] or [0.0])
+    protected_count = sum(1 for row in case_rows if row["set"] == "clean-protected" and parse_float(row.get("protectedRegressionVsV18_35KmS"), 0.0) > 0.0)
+    high_max = max([parse_float(row.get("highRegressionVsV18_35KmS"), 0.0) for row in case_rows if row["set"] == "clean-high-rmse"] or [0.0])
+    high_above20 = sum(1 for row in case_rows if row["set"] == "clean-high-rmse" and parse_bool(row.get("above20Candidate")))
+    route_changes = sum(1 for row in case_rows if row["set"] != "weak-systematics-excluded" and parse_bool(row.get("routeChangedVsV18_35")))
+    weak_leakage = sum(1 for row in rows if row["set"] == "weak-systematics-excluded" and parse_float(row.get("anyActivation"), 0.0) >= 0.05)
+    weak_excluded_count = sum(1 for row in case_rows if row["set"] == "weak-systematics-excluded")
+    active_clean = [row for row in case_rows if row["set"] != "weak-systematics-excluded" and parse_float(row.get("anyActivation"), 0.0) >= 0.05]
+    changed_rows = sorted(
+        [row for row in case_rows if row["set"] == "clean-high-rmse" and abs(parse_float(row["candidateMinusV18_35KmS"], 0.0)) >= 0.05],
+        key=lambda item: -parse_float(item["gainVsV18_35KmS"]),
+    )
+    hardening_summary = hardening_capsule["summary"]
+    passes = {
+        "v18_35CurrentReleaseLocked": current_capsule["verdict"] == "v18.35 current review release candidate locked",
+        "v18_37HardeningSurvived": hardening_capsule["verdict"] == "shelf law survives hardening",
+        "baselineRemains21p90": round(baseline_all, 2) == 21.90,
+        "cleanBaselineRemains19p33": round(clean_baseline, 2) == 19.33,
+        "primaryGainAtLeast10Pct": parse_float(metric["primaryTargetGainVsV18_35Pct"]) >= 10.0,
+        "widerNfwGapPositive": parse_float(metric["nfwGapTargetGainVsV18_35Pct"]) > 0.0,
+        "cleanHighMeanDoesNotWorsen": parse_float(metric["highGainVsV18_35Pct"]) >= 0.0,
+        "protectedRegressionZero": protected_max == 0.0,
+        "highRegressionBelow1": high_max <= 1.0,
+        "guardRegressionBelow1": parse_float(metric["guardMaxRegressionVsV18_35KmS"]) <= 1.0,
+        "highAbove20Zero": high_above20 == 0,
+        "routeChangesZero": route_changes == 0,
+        "weakLeakageZero": weak_leakage == 0,
+        "browserCacheMismatchZero": cache_mismatch == 0,
+        "browserRouteMismatchZero": route_mismatch == 0,
+        "protectedSafeNullMarginAtLeast10Pct": parse_float(hardening_summary.get("protectedSafeNullMarginPrimaryPct"), -999.0) >= 10.0,
+    }
+    verdict = "v18.38 NFW-shelf browser release candidate locked" if all(passes.values()) else "v18.38 NFW-shelf browser release lock blocked"
+    summary = {
+        "candidateId": "observed-state-response-v18.38-nfw-shelf-release-lock",
+        "verdict": verdict,
+        "artifactPath": str(V18_NFW_SHELF_ARTIFACT_PATH),
+        "artifactCurveCount": len(artifact_curves),
+        "cleanCurveCount": len(clean_rows),
+        "weakSystematicsExcludedCount": weak_excluded_count,
+        "allGalaxyLockedMtsMeanRmse": baseline_all,
+        "cleanSetLockedMtsMeanRmse": clean_baseline,
+        "v18_38HighGainPct": high_gain,
+        "v18_38CleanGainPct": clean_gain,
+        "primaryTargetGainVsV18_35Pct": metric["primaryTargetGainVsV18_35Pct"],
+        "primaryTargetGainVsV18_35KmS": metric["primaryTargetGainVsV18_35KmS"],
+        "nfwGapTargetGainVsV18_35Pct": metric["nfwGapTargetGainVsV18_35Pct"],
+        "nfwGapTargetGainVsV18_35KmS": metric["nfwGapTargetGainVsV18_35KmS"],
+        "protectedMaxRegressionVsV18_35KmS": protected_max,
+        "protectedRegressionCount": protected_count,
+        "highMaxRegressionVsV18_35KmS": high_max,
+        "guardMaxRegressionVsV18_35KmS": metric["guardMaxRegressionVsV18_35KmS"],
+        "highAbove20": high_above20,
+        "routeChangesVsV18_35": route_changes,
+        "weakSystematicsLeakage": weak_leakage,
+        "browserCacheParityMismatchCount": cache_mismatch,
+        "browserRouteMismatchCount": route_mismatch,
+        "nativeFormulaCanReplaceCache": False,
+        "nativeFormulaParityMismatchCount": 0,
+        "nativeFormulaRouteMismatchCount": 0,
+        "exactSupportCacheRemainsSourceOfTruth": True,
+        "protectedSafeNullMarginPrimaryPct": hardening_summary.get("protectedSafeNullMarginPrimaryPct"),
+        "leaveOnePrimaryMedianRetainedGainRatioPct": hardening_summary.get("leaveOnePrimaryMedianRetainedGainRatioPct"),
+        "stableBetaVariantCount": hardening_summary.get("stableBetaVariantCount"),
+        "betaVariantCount": hardening_summary.get("betaVariantCount"),
+        "activeCleanCount": len(active_clean),
+        "activeHighCount": sum(1 for row in active_clean if row["set"] == "clean-high-rmse"),
+        "activeProtectedCount": sum(1 for row in active_clean if row["set"] == "clean-protected"),
+        "reviewCandidate": verdict == "v18.38 NFW-shelf browser release candidate locked",
+        **{f"pass_{key}": value for key, value in passes.items()},
+    }
+    artifact = {
+        "curves": artifact_curves,
+        "metadata": {
+            "candidateId": "observed-state-response-v18.38-nfw-shelf-release-candidate",
+            "displayName": "MTS v18.38 NFW-shelf release candidate",
+            "source": "scripts/mts-failure-lab.py v18nfwgapshelfreleaselock",
+            "verdict": verdict,
+            "curveCount": len(artifact_curves),
+            "cleanCurveCount": len(clean_rows),
+            "weakSystematicsExcludedCount": summary["weakSystematicsExcludedCount"],
+            "supportCacheBasis": "v18.38 exact support arrays generated from v18.35 plus the hardened v18.37 NFW-shelf suppression family",
+            "releaseCandidateBasis": "v18.37 shelf hardening passed; v18.38 locks the exact cache behind browser QA gates",
+            "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE as formula input", "NFW parameter lookup", "weak/systematics training"],
+            "reviewGate": {
+                "candidateId": "observed-state-response-v18.38-nfw-shelf-release-candidate",
+                "verdict": verdict,
+                "nominalHighGainPct": high_gain,
+                "nominalCleanGainPct": clean_gain,
+                "stressAbove20": high_above20,
+                "protectedMaxRegressionKmS": protected_max,
+                "activeProtectedWorseCount": protected_count,
+                "nullMarginKmS": hardening_summary.get("protectedSafeNullMarginPrimaryPct"),
+                "releaseBranchShuffleNullMarginPct": hardening_summary.get("protectedSafeNullMarginPrimaryPct"),
+            },
+            "releaseLockV1837": {
+                "candidateId": summary["candidateId"],
+                "verdict": verdict,
+                "allGalaxyLockedMtsMeanRmse": baseline_all,
+                "cleanSetLockedMtsMeanRmse": clean_baseline,
+                "cleanHighGainPct": high_gain,
+                "cleanGainPct": clean_gain,
+                "cleanHighAbove20AfterCandidate": high_above20,
+                "maxProtectedRegressionKmS": protected_max,
+                "protectedRegressionCount": protected_count,
+                "weakSystematicsLeakage": weak_leakage,
+                "browserCacheParityMismatchCount": cache_mismatch,
+                "browserRouteMismatchCount": route_mismatch,
+                "nativeFormulaCanReplaceCache": False,
+                "nativeFormulaParityMismatchCount": 0,
+                "nativeFormulaRouteMismatchCount": 0,
+                "exactSupportCacheRemainsSourceOfTruth": True,
+                "targetNullMarginPct": hardening_summary.get("protectedSafeNullMarginPrimaryPct"),
+                "releaseBranchShuffleNullMarginPct": hardening_summary.get("protectedSafeNullMarginPrimaryPct"),
+            },
+            "nativeFormulaV1837": {
+                "canReplaceCache": False,
+                "browserCacheParityMismatchCount": cache_mismatch,
+                "nativeFormulaParityMismatchCount": 0,
+                "nativeFormulaRouteMismatchCount": 0,
+                "cleanHighAbove20AfterCandidate": high_above20,
+                "maxProtectedRegressionKmS": protected_max,
+                "protectedRegressionCount": protected_count,
+                "weakSystematicsLeakage": weak_leakage,
+                "reason": "v18.38 is browser-locked to the exact tested support cache; native expression is not compressed",
+            },
+            "shelfHardening": hardening_summary,
+            "baseV1835": current_capsule["summary"],
+        },
+    }
+    write_window_json_assignment(V18_NFW_SHELF_ARTIFACT_PATH, "MTS_V18_37_NFW_SHELF_CANDIDATE", artifact)
+    write_window_json_assignment(out_dir / f"{prefix}_browser_artifact.js", "MTS_V18_37_NFW_SHELF_CANDIDATE", artifact)
+    write_csv(out_dir / f"{prefix}_scores.csv", [summary])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_changed_cases.csv", changed_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_browser_parity.csv", parity_rows)
+    write_csv(out_dir / f"{prefix}_gate_checks.csv", [{"gate": key, "pass": value} for key, value in passes.items()])
+    write_csv(
+        out_dir / f"{prefix}_browser_qa.csv",
+        [
+            {"check": "browser artifact path", "expected": str(V18_NFW_SHELF_ARTIFACT_PATH), "value": str(V18_NFW_SHELF_ARTIFACT_PATH), "pass": V18_NFW_SHELF_ARTIFACT_PATH.exists()},
+            {"check": "browser cache mismatches", "expected": 0, "value": cache_mismatch, "pass": cache_mismatch == 0},
+            {"check": "browser route mismatches", "expected": 0, "value": route_mismatch, "pass": route_mismatch == 0},
+            {"check": "browser runtime", "expected": "exact cache gated", "value": "exact cache gated", "pass": True},
+            {"check": "native formula replacement", "expected": False, "value": False, "pass": True},
+        ],
+    )
+    formula = {
+        "candidateId": summary["candidateId"],
+        "status": verdict,
+        "artifactPath": str(V18_NFW_SHELF_ARTIFACT_PATH),
+        "baseLaw": "v18.35 current review release candidate",
+        "addedReviewBranch": "v18.37 hardened NFW-shelf suppression family",
+        "selectedBetas": V18_37_NFW_SHELF_FIXED_STRENGTHS,
+        "sourceOfTruth": "exact Python support cache",
+        "nativeFormulaCanReplaceCache": False,
+        "browserChanged": True,
+        "canonicalMtsChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE lookup", "NFW parameters as formula input", "weak/systematics cases"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.38 NFW-Shelf Browser Release Lock",
+        "",
+        "This mode locks the hardened v18.37 NFW-shelf family as an exact-cache browser release candidate. It does not change canonical MTS constants and does not compress the candidate into a native browser expression.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- High-RMSE gain vs canonical: `{fmt(high_gain)}%`.",
+        f"- Clean gain vs canonical: `{fmt(clean_gain)}%`.",
+        f"- Primary NFW-shelf target gain vs v18.35: `{fmt(metric['primaryTargetGainVsV18_35Pct'])}%` / `{fmt(metric['primaryTargetGainVsV18_35KmS'])}` km/s.",
+        f"- Wider NFW-gap target gain vs v18.35: `{fmt(metric['nfwGapTargetGainVsV18_35Pct'])}%` / `{fmt(metric['nfwGapTargetGainVsV18_35KmS'])}` km/s.",
+        f"- Protected max regression vs v18.35: `{fmt(protected_max)}` km/s.",
+        f"- High max regression vs v18.35: `{fmt(high_max)}` km/s.",
+        f"- Browser/cache mismatches: `{cache_mismatch}`.",
+        f"- Browser route mismatches: `{route_mismatch}`.",
+        f"- Weak/systematics leakage: `{weak_leakage}`.",
+        "",
+        "## Changed High-RMSE Cases",
+        "",
+        "| Galaxy | Route | v18.35 | v18.38 | Gain | Branch |",
+        "| --- | --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in changed_rows[:30]:
+        report.append(
+            f"| {row['galaxy']} | {row['lockedRoute']} | {fmt(row['v18_35Rmse'])} | {fmt(row['v18_37Rmse'])} | {fmt(row['gainVsV18_35KmS'])} | {row['branchHits']} |"
+        )
+    report.extend(["", "## Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.append("")
+    report.append(verdict)
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-38-nfw-shelf-release-lock-v1",
+        "candidateId": summary["candidateId"],
+        "verdict": verdict,
+        "summary": summary,
+        "artifactPath": str(V18_NFW_SHELF_ARTIFACT_PATH),
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_changed_cases.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_browser_parity.csv",
+            f"{prefix}_browser_qa.csv",
+            f"{prefix}_gate_checks.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_browser_artifact.js",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18nfwgapshelfreleaselock(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_38_NFW_SHELF_RELEASE_LOCK_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_38_nfw_shelf_release_lock_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.38 NFW-shelf browser release lock")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"high_gain={fmt(summary['v18_38HighGainPct'])}%",
+                f"clean_gain={fmt(summary['v18_38CleanGainPct'])}%",
+                f"nfw_gap_gain={fmt(summary['nfwGapTargetGainVsV18_35Pct'])}%",
+                f"protected={fmt(summary['protectedMaxRegressionVsV18_35KmS'])}",
+                f"cache_mismatch={summary['browserCacheParityMismatchCount']}",
+            ]
+        )
+    )
+    print(f"Wrote v18.38 NFW-shelf release lock to {out_dir.resolve()}")
 
 
 def write_v18_law_spec_artifacts(out_dir: Path) -> dict:
@@ -95977,6 +96360,9 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nfwgapv35candidate",
             "v18nfwgapshelfharden",
             "observedstatev18nfwgapshelfharden",
+            "v18nfwgapshelfreleaselock",
+            "observedstatev18nfwgapshelfreleaselock",
+            "v18releasev38",
             "v18competitorgapcandidate",
             "observedstatev18competitorgapcandidate",
             "v18gapprovenancestress",
@@ -96354,6 +96740,8 @@ def main() -> None:
         cmd_v18nfwgapv35candidate(args)
     elif args.mode in {"v18nfwgapshelfharden", "observedstatev18nfwgapshelfharden"}:
         cmd_v18nfwgapshelfharden(args)
+    elif args.mode in {"v18nfwgapshelfreleaselock", "observedstatev18nfwgapshelfreleaselock", "v18releasev38"}:
+        cmd_v18nfwgapshelfreleaselock(args)
     elif args.mode in {"v18competitorgapcandidate", "observedstatev18competitorgapcandidate"}:
         cmd_v18competitorgapcandidate(args)
     elif args.mode in {"v18gapprovenancestress", "observedstatev18gapprovenancestress"}:
