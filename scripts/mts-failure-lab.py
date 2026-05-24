@@ -190,6 +190,7 @@ DEFAULT_OBSERVED_STATE_V18_37_NFW_SHELF_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-
 DEFAULT_OBSERVED_STATE_V18_38_NFW_SHELF_RELEASE_LOCK_OUT = OUTPUT_PACK_ROOT / "mts-v18-38-nfw-shelf-release-lock-v1"
 DEFAULT_OBSERVED_STATE_V18_38_COMPETITOR_BENCHMARK_OUT = OUTPUT_PACK_ROOT / "mts-v18-38-competitor-benchmark-v1"
 DEFAULT_OBSERVED_STATE_V18_39_REMAINING_NFW_GAP_OUT = OUTPUT_PACK_ROOT / "mts-v18-39-remaining-nfw-gap-candidate-v1"
+DEFAULT_OBSERVED_STATE_V18_40_REMAINING_GAP_CLASSES_OUT = OUTPUT_PACK_ROOT / "mts-v18-40-remaining-gap-classes-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPETITOR_GAP_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v18-competitor-gap-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_GAP_PROVENANCE_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-gap-provenance-stress-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VARIABLE_MINE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-variable-mine-v1"
@@ -63698,6 +63699,744 @@ def cmd_v18remainingnfwgapcandidate(args: argparse.Namespace) -> None:
     print(f"Wrote v18.39 remaining NFW-gap cleanup candidate to {out_dir.resolve()}")
 
 
+V18_40_REMAINING_GAP_CLASS_BRANCHES = [
+    "massiveLowGasLowLoadShelf",
+    "lowLoadOuterMemoryShelf",
+    "compactBufferedHighMemoryShelf",
+]
+V18_40_REMAINING_GAP_CLASS_STRENGTHS = {
+    "massiveLowGasLowLoadShelf": 0.05,
+    "lowLoadOuterMemoryShelf": 0.10,
+    "compactBufferedHighMemoryShelf": 0.05,
+}
+V18_40_REMAINING_GAP_CLASS_SEEDS = [20260631, 20260632, 20260633, 20260634, 20260635, 20260636, 20260637, 20260638, 20260639]
+V18_40_MASSIVE_LOW_GAS_LOWLOAD_TARGETS = {"NGC4157", "NGC4100", "NGC5985"}
+V18_40_OUTER_MEMORY_LOWLOAD_TARGETS = {"UGC07399", "UGC06628", "UGC06983", "UGC04325"}
+V18_40_COMPACT_BUFFERED_MEMORY_TARGETS = {"NGC1705", "ESO116-G012", "NGC2403", "F568-1", "UGC08699"}
+V18_40_REMAINING_GAP_CLASS_TARGETS = (
+    V18_40_MASSIVE_LOW_GAS_LOWLOAD_TARGETS
+    | V18_40_OUTER_MEMORY_LOWLOAD_TARGETS
+    | V18_40_COMPACT_BUFFERED_MEMORY_TARGETS
+)
+
+
+def v18_40_remaining_gap_class_target_label(name: str) -> str:
+    if name in V18_40_MASSIVE_LOW_GAS_LOWLOAD_TARGETS:
+        return "massive-low-gas-low-load-shelf"
+    if name in V18_40_OUTER_MEMORY_LOWLOAD_TARGETS:
+        return "low-load-outer-memory-shelf"
+    if name in V18_40_COMPACT_BUFFERED_MEMORY_TARGETS:
+        return "compact-buffered-high-memory-shelf"
+    return ""
+
+
+def v18_40_remaining_gap_class_gate(features: Iterable[float | bool], low: float = 0.04, high: float = 0.32) -> float:
+    clean: list[float] = []
+    for value in features:
+        if isinstance(value, bool):
+            clean.append(1.0 if value else 0.0)
+        else:
+            clean.append(clamp(parse_float(value, 0.0), 0.0, 1.0))
+    if not clean:
+        return 0.0
+    return clamp(v18_nfw_gap_candidate_smooth(min(clean), low, high), 0.0, 1.0)
+
+
+def v18_40_remaining_gap_class_activations(curve: dict, table1_by_name: dict[str, dict]) -> tuple[dict[str, float], dict, dict]:
+    values = observed_state_values(curve)
+    mass = v18_official_mass_scale_features(curve, table1_by_name)
+    route = curve.get("lockedModelRoute", "")
+    memory = curve.get("memoryLoad", math.nan)
+    u075 = curve.get("lockedModelU075", math.nan)
+    u_out = curve.get("lockedModelUOut", math.nan)
+    u_max = curve.get("lockedModelUMax", math.nan)
+    h_over_rout = values["hOverRout"]
+    outer_gas = values["outerGasShare"]
+    mid_gas = values["midGasShare"]
+    inner_gas = values["innerGasShare"]
+    outer_disk = values["outerDiskShare"]
+    f_gas = mass["tableGasFraction"]
+    point_density = values["pointDensity"]
+    mbar = mass["mBar_1e9Msun"]
+    bar_curv = abs(values["barCurv"])
+
+    massive_lowgas_signed = 0.0
+    outer_memory_signed = 0.0
+    if route == "low-load":
+        compact_lowgas_completion = v18_40_remaining_gap_class_gate(
+            [
+                v18_nfw_gap_candidate_smooth(memory, 7.0, 12.0),
+                v18_nfw_gap_candidate_smooth(13.5 - memory, 0.0, 3.6),
+                v18_nfw_gap_candidate_smooth(0.33 - u_out, 0.0, 0.12),
+                v18_nfw_gap_candidate_smooth(u_max, 0.82, 1.05),
+                v18_nfw_gap_candidate_smooth(0.15 - h_over_rout, 0.0, 0.09),
+                v18_nfw_gap_candidate_smooth(0.28 - outer_gas, 0.0, 0.18),
+                v18_nfw_gap_candidate_smooth(0.30 - f_gas, 0.0, 0.18),
+                v18_nfw_gap_candidate_smooth(point_density, 0.45, 0.95),
+                v18_nfw_gap_candidate_smooth(mbar, 30.0, 65.0),
+                v18_nfw_gap_candidate_smooth(120.0 - mbar, 0.0, 80.0),
+            ],
+            0.04,
+            0.34,
+        )
+        extended_massive_suppression = v18_40_remaining_gap_class_gate(
+            [
+                v18_nfw_gap_candidate_smooth(memory, 9.0, 15.0),
+                v18_nfw_gap_candidate_smooth(h_over_rout, 0.17, 0.30),
+                v18_nfw_gap_candidate_smooth(0.45 - h_over_rout, 0.0, 0.22),
+                v18_nfw_gap_candidate_smooth(u_out, 0.35, 0.55),
+                v18_nfw_gap_candidate_smooth(u075, 0.42, 0.72),
+                v18_nfw_gap_candidate_smooth(0.42 - f_gas, 0.0, 0.25),
+                v18_nfw_gap_candidate_smooth(mbar, 35.0, 85.0),
+                v18_nfw_gap_candidate_smooth(point_density, 0.40, 1.10),
+            ],
+            0.04,
+            0.34,
+        )
+        massive_lowgas_signed = extended_massive_suppression - compact_lowgas_completion
+
+        outer_completion = v18_40_remaining_gap_class_gate(
+            [
+                v18_nfw_gap_candidate_smooth(memory, 1.15, 2.55),
+                v18_nfw_gap_candidate_smooth(3.00 - memory, 0.0, 1.05),
+                v18_nfw_gap_candidate_smooth(h_over_rout, 0.17, 0.31),
+                v18_nfw_gap_candidate_smooth(0.36 - h_over_rout, 0.0, 0.18),
+                v18_nfw_gap_candidate_smooth(outer_gas, 0.36, 0.58),
+                v18_nfw_gap_candidate_smooth(0.72 - outer_gas, 0.0, 0.22),
+                v18_nfw_gap_candidate_smooth(f_gas, 0.40, 0.72),
+                v18_nfw_gap_candidate_smooth(8.0 - mbar, 0.0, 7.0),
+                v18_nfw_gap_candidate_smooth(0.92 - u_max, 0.0, 0.22),
+                v18_nfw_gap_candidate_smooth(u_out, 0.34, 0.52),
+            ],
+            0.04,
+            0.34,
+        )
+        outer_suppression = v18_40_remaining_gap_class_gate(
+            [
+                v18_nfw_gap_candidate_smooth(memory, 1.0, 2.8),
+                v18_nfw_gap_candidate_smooth(h_over_rout, 0.08, 0.20),
+                v18_nfw_gap_candidate_smooth(0.28 - h_over_rout, 0.0, 0.14),
+                v18_nfw_gap_candidate_smooth(0.38 - outer_gas, 0.0, 0.22),
+                v18_nfw_gap_candidate_smooth(0.45 - f_gas, 0.0, 0.28),
+                v18_nfw_gap_candidate_smooth(u_max, 0.82, 1.15),
+                v18_nfw_gap_candidate_smooth(mbar, 1.5, 12.0),
+                v18_nfw_gap_candidate_smooth(point_density, 0.45, 1.25),
+            ],
+            0.04,
+            0.34,
+        )
+        outer_memory_signed = outer_suppression - outer_completion
+
+    compact_buffered_signed = 0.0
+    if route == "buffered single-crossing":
+        mid_outer_suppression = v18_40_remaining_gap_class_gate(
+            [
+                v18_nfw_gap_candidate_smooth(memory, 2.2, 5.4),
+                v18_nfw_gap_candidate_smooth(u_max, 1.05, 1.55),
+                v18_nfw_gap_candidate_smooth(h_over_rout, 0.07, 0.20),
+                v18_nfw_gap_candidate_smooth(0.28 - h_over_rout, 0.0, 0.16),
+                v18_nfw_gap_candidate_smooth(0.52 - f_gas, 0.0, 0.30),
+                v18_nfw_gap_candidate_smooth(outer_disk, 0.48, 0.82),
+                v18_nfw_gap_candidate_smooth(1.55 - point_density, 0.0, 0.95),
+                v18_nfw_gap_candidate_smooth(bar_curv, 2.0, 25.0),
+            ],
+            0.04,
+            0.34,
+        )
+        compact_high_memory_suppression = v18_40_remaining_gap_class_gate(
+            [
+                v18_nfw_gap_candidate_smooth(memory, 5.0, 8.8),
+                v18_nfw_gap_candidate_smooth(u_max, 1.25, 1.60),
+                v18_nfw_gap_candidate_smooth(0.14 - h_over_rout, 0.0, 0.09),
+                v18_nfw_gap_candidate_smooth(0.34 - f_gas, 0.0, 0.22),
+                v18_nfw_gap_candidate_smooth(0.34 - outer_gas, 0.0, 0.22),
+                v18_nfw_gap_candidate_smooth(mbar, 15.0, 80.0),
+            ],
+            0.04,
+            0.34,
+        )
+        outer_shape_completion = v18_40_remaining_gap_class_gate(
+            [
+                v18_nfw_gap_candidate_smooth(h_over_rout, 0.16, 0.30),
+                v18_nfw_gap_candidate_smooth(0.45 - h_over_rout, 0.0, 0.22),
+                v18_nfw_gap_candidate_smooth(outer_gas, 0.34, 0.58),
+                v18_nfw_gap_candidate_smooth(mid_gas + inner_gas, 0.20, 0.45),
+                v18_nfw_gap_candidate_smooth(0.95 - u_max, 0.0, 0.20),
+                v18_nfw_gap_candidate_smooth(memory, 0.8, 2.8),
+                v18_nfw_gap_candidate_smooth(9.0 - mbar, 0.0, 7.0),
+            ],
+            0.04,
+            0.34,
+        )
+        compact_buffered_signed = mid_outer_suppression + compact_high_memory_suppression - outer_shape_completion
+
+    acts = {
+        "massiveLowGasLowLoadShelf": clamp(massive_lowgas_signed, -1.0, 1.0),
+        "lowLoadOuterMemoryShelf": clamp(outer_memory_signed, -1.0, 1.0),
+        "compactBufferedHighMemoryShelf": clamp(compact_buffered_signed, -1.0, 1.0),
+    }
+    acts["anyActivation"] = max(abs(value) for value in acts.values())
+    return acts, values, mass
+
+
+def v18_40_remaining_gap_class_supports(
+    curve: dict,
+    base_supports: list[float],
+    strengths: dict[str, float],
+    table1_by_name: dict[str, dict],
+    forced_activations: dict[str, float] | None = None,
+) -> tuple[list[float], dict[str, float], dict, dict]:
+    if forced_activations is None:
+        acts, values, mass = v18_40_remaining_gap_class_activations(curve, table1_by_name)
+    else:
+        acts = {
+            branch: clamp(parse_float(forced_activations.get(branch), 0.0), -1.0, 1.0)
+            for branch in V18_40_REMAINING_GAP_CLASS_BRANCHES
+        }
+        acts["anyActivation"] = max(abs(value) for value in acts.values())
+        values = observed_state_values(curve)
+        mass = v18_official_mass_scale_features(curve, table1_by_name)
+    output: list[float] = []
+    for point, support in zip(curve["points"], base_supports):
+        x_value = point.get("x", point["r"] / max(curve["rOut"], 1.0e-9))
+        outer_shape = 0.08 + 0.92 * v18_nfw_gap_candidate_smooth(x_value, 0.22, 0.84)
+        memory_shape = 0.12 + 0.88 * v18_nfw_gap_candidate_smooth(x_value, 0.32, 0.92)
+        compact_shape = 0.22 + 0.78 * v18_nfw_gap_candidate_smooth(x_value, 0.14, 0.72)
+        factor = 1.0
+        factor -= strengths["massiveLowGasLowLoadShelf"] * acts["massiveLowGasLowLoadShelf"] * memory_shape
+        factor -= strengths["lowLoadOuterMemoryShelf"] * acts["lowLoadOuterMemoryShelf"] * outer_shape
+        factor -= strengths["compactBufferedHighMemoryShelf"] * acts["compactBufferedHighMemoryShelf"] * compact_shape
+        output.append(max(0.0, support * clamp(factor, 0.55, 1.45)))
+    return output, acts, values, mass
+
+
+def v18_40_remaining_gap_class_score_rows(
+    strengths: dict[str, float],
+    split_names: tuple[set[str], set[str]] | None = None,
+    forced_by_name: dict[str, dict[str, float]] | None = None,
+    v18_39_by_name: dict[str, dict] | None = None,
+) -> list[dict]:
+    context = observed_state_candidate_context()
+    table1_by_name = v18_mass_scale_table1()[0]
+    base_supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    benchmark_dir = DEFAULT_OBSERVED_STATE_V18_38_COMPETITOR_BENCHMARK_OUT
+    benchmark_path = benchmark_dir / "mts_v18_38_competitor_case_ledger.csv"
+    if not benchmark_path.exists():
+        write_v18_38_competitor_benchmark_artifacts(benchmark_dir)
+    benchmark_by_name = {row["galaxy"]: row for row in read_csv_rows(benchmark_path)}
+    train_names, holdout_names = split_names if split_names is not None else (set(), set())
+    rows: list[dict] = []
+    for curve in context["curves"]:
+        name = curve["name"]
+        base_supports = base_supports_by_name.get(name, [])
+        if not base_supports:
+            continue
+        base_score = v18_competitor_support_score(curve, base_supports)
+        if name in context["weakNames"]:
+            candidate_supports = base_supports[:]
+            acts = {branch: 0.0 for branch in V18_40_REMAINING_GAP_CLASS_BRANCHES}
+            acts["anyActivation"] = 0.0
+            profile_values = observed_state_values(curve)
+            mass_values = v18_official_mass_scale_features(curve, table1_by_name)
+        else:
+            forced = (
+                forced_by_name.get(name, {branch: 0.0 for branch in V18_40_REMAINING_GAP_CLASS_BRANCHES})
+                if forced_by_name is not None
+                else None
+            )
+            candidate_supports, acts, profile_values, mass_values = v18_40_remaining_gap_class_supports(
+                curve,
+                base_supports,
+                strengths,
+                table1_by_name,
+                forced,
+            )
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        candidate = v18_competitor_support_score(curve, candidate_supports)
+        set_label = v18_competitor_set_label(name, context["weakNames"], context["highNames"])
+        split = "weak-excluded" if name in context["weakNames"] else ("holdout" if name in holdout_names else "train" if name in train_names else "")
+        effective_activation = max(
+            [
+                abs(parse_float(acts.get(branch), 0.0))
+                for branch in V18_40_REMAINING_GAP_CLASS_BRANCHES
+                if parse_float(strengths.get(branch), 0.0) > 0.0
+            ]
+            or [0.0]
+        )
+        branch_hits = [
+            branch
+            for branch in V18_40_REMAINING_GAP_CLASS_BRANCHES
+            if parse_float(strengths.get(branch), 0.0) > 0.0 and abs(parse_float(acts.get(branch), 0.0)) >= 0.05
+        ]
+        bench = benchmark_by_name.get(name, {})
+        nfw_prior = parse_float(bench.get("nfw_concentration_priorRmse"), math.nan)
+        v39 = v18_39_by_name.get(name, {}) if v18_39_by_name is not None else {}
+        v39_rmse = parse_float(v39.get("candidateRmse"), math.nan)
+        rows.append(
+            {
+                "galaxy": name,
+                "set": set_label,
+                "split": split,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "remainingGapClassTarget": name in V18_40_REMAINING_GAP_CLASS_TARGETS,
+                "remainingGapTargetClass": v18_40_remaining_gap_class_target_label(name),
+                "inheritedProtectedRegressionGuard": name in V18_39_REMAINING_NFW_GAP_INHERITED_PROTECTED,
+                "canonicalRmse": canonical["rmse"],
+                "v18_38Rmse": base_score["rmse"],
+                "v18_39Rmse": v39_rmse,
+                "candidateRmse": candidate["rmse"],
+                "nfwPriorRmse": nfw_prior,
+                "candidateMinusNfwPriorKmS": candidate["rmse"] - nfw_prior if math.isfinite(nfw_prior) else math.nan,
+                "candidateRoute": candidate.get("candidateRoute", ""),
+                "v18_38Route": base_score.get("candidateRoute", ""),
+                "candidateGainVsV18_38KmS": base_score["rmse"] - candidate["rmse"],
+                "candidateGainVsV18_38Pct": pct_improvement(base_score["rmse"], candidate["rmse"]),
+                "candidateRegressionVsV18_38KmS": max(0.0, candidate["rmse"] - base_score["rmse"]),
+                "v18_39GainVsV18_38KmS": base_score["rmse"] - v39_rmse if math.isfinite(v39_rmse) else math.nan,
+                "candidateGainVsV18_39KmS": v39_rmse - candidate["rmse"] if math.isfinite(v39_rmse) else math.nan,
+                "candidateGainVsCanonicalPct": pct_improvement(canonical["rmse"], candidate["rmse"]),
+                **{f"{branch}Activation": acts.get(branch, 0.0) for branch in V18_40_REMAINING_GAP_CLASS_BRANCHES},
+                "anyActivation": effective_activation,
+                "branchHits": "; ".join(branch_hits),
+                "memoryLoad": curve["memoryLoad"],
+                "u075": curve.get("lockedModelU075", math.nan),
+                "uOut": curve["lockedModelUOut"],
+                "uMax": curve["lockedModelUMax"],
+                "hOverRout": profile_values["hOverRout"],
+                "outerGasShare": profile_values["outerGasShare"],
+                "outerDiskShare": profile_values["outerDiskShare"],
+                "innerGasShare": profile_values["innerGasShare"],
+                "midGasShare": profile_values["midGasShare"],
+                "barCurv": profile_values["barCurv"],
+                "pointDensity": profile_values["pointDensity"],
+                "mBar_1e9Msun": mass_values["mBar_1e9Msun"],
+                "tableGasFraction": mass_values["tableGasFraction"],
+                "above20Candidate": candidate["rmse"] >= 20.0 if set_label == "clean-high-rmse" else "",
+                "above20V18_38": base_score["rmse"] >= 20.0 if set_label == "clean-high-rmse" else "",
+                "protectedRegressionVsV18_38KmS": max(0.0, candidate["rmse"] - base_score["rmse"]) if set_label == "clean-protected" else "",
+                "highRegressionVsV18_38KmS": max(0.0, candidate["rmse"] - base_score["rmse"]) if set_label == "clean-high-rmse" else "",
+                "routeChangedVsV18_38": candidate.get("candidateRoute", "") != base_score.get("candidateRoute", ""),
+            }
+        )
+    return rows
+
+
+def v18_40_remaining_gap_class_metric(rows: list[dict], split_filter: str | None = None) -> dict:
+    clean = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+    if split_filter:
+        clean = [row for row in clean if row.get("split") == split_filter]
+    high = [row for row in clean if row["set"] == "clean-high-rmse"]
+    protected = [row for row in clean if row["set"] == "clean-protected"]
+    targets = [row for row in high if parse_bool(row.get("remainingGapClassTarget"))]
+    inherited_protected = [row for row in protected if parse_bool(row.get("inheritedProtectedRegressionGuard"))]
+    protected_regs = [parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) for row in protected]
+    high_regs = [parse_float(row.get("highRegressionVsV18_38KmS"), 0.0) for row in high]
+    v1838_high = safe_mean(parse_float(row["v18_38Rmse"]) for row in high)
+    cand_high = safe_mean(parse_float(row["candidateRmse"]) for row in high)
+    v1838_targets = safe_mean(parse_float(row["v18_38Rmse"]) for row in targets)
+    cand_targets = safe_mean(parse_float(row["candidateRmse"]) for row in targets)
+    class_gain_rows: list[dict] = []
+    improved_classes: list[str] = []
+    for class_name in [
+        "massive-low-gas-low-load-shelf",
+        "low-load-outer-memory-shelf",
+        "compact-buffered-high-memory-shelf",
+    ]:
+        class_targets = [row for row in targets if row.get("remainingGapTargetClass") == class_name]
+        base_mean = safe_mean(parse_float(row["v18_38Rmse"]) for row in class_targets)
+        cand_mean = safe_mean(parse_float(row["candidateRmse"]) for row in class_targets)
+        gain_pct = pct_improvement(base_mean, cand_mean)
+        gain_kms = base_mean - cand_mean if math.isfinite(base_mean) and math.isfinite(cand_mean) else math.nan
+        if math.isfinite(gain_kms) and gain_kms > 0.05:
+            improved_classes.append(class_name)
+        class_gain_rows.append(
+            {
+                "targetClass": class_name,
+                "count": len(class_targets),
+                "v18_38MeanRmse": base_mean,
+                "candidateMeanRmse": cand_mean,
+                "gainPct": gain_pct,
+                "gainKmS": gain_kms,
+            }
+        )
+    return {
+        "split": split_filter or "all",
+        "cleanCount": len(clean),
+        "highCount": len(high),
+        "protectedCount": len(protected),
+        "remainingGapClassTargetCount": len(targets),
+        "activeHighCount": sum(1 for row in high if parse_float(row.get("anyActivation"), 0.0) >= 0.05),
+        "activeProtectedCount": sum(1 for row in protected if parse_float(row.get("anyActivation"), 0.0) >= 0.05),
+        "v18_38HighMeanRmse": v1838_high,
+        "candidateHighMeanRmse": cand_high,
+        "highGainVsV18_38Pct": pct_improvement(v1838_high, cand_high),
+        "v18_38RemainingTargetMeanRmse": v1838_targets,
+        "candidateRemainingTargetMeanRmse": cand_targets,
+        "remainingTargetGainVsV18_38Pct": pct_improvement(v1838_targets, cand_targets),
+        "remainingTargetGainVsV18_38KmS": v1838_targets - cand_targets if math.isfinite(v1838_targets) and math.isfinite(cand_targets) else math.nan,
+        "targetClassesImprovedCount": len(improved_classes),
+        "targetClassesImproved": "; ".join(improved_classes),
+        "targetClassGains": class_gain_rows,
+        "protectedMaxRegressionVsV18_38KmS": max(protected_regs or [0.0]),
+        "inheritedProtectedMaxRegressionVsV18_38KmS": max([parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) for row in inherited_protected] or [0.0]),
+        "highMaxRegressionVsV18_38KmS": max(high_regs or [0.0]),
+        "highAbove20Count": sum(1 for row in high if parse_bool(row.get("above20Candidate"))),
+        "routeChangedCount": sum(1 for row in clean if parse_bool(row.get("routeChangedVsV18_38"))),
+        "weakSystematicsLeakage": sum(1 for row in rows if row["set"] == "weak-systematics-excluded" and parse_float(row.get("anyActivation"), 0.0) >= 0.05),
+    }
+
+
+def v18_40_remaining_gap_class_null_rows(strengths: dict[str, float], reference_rows: list[dict]) -> list[dict]:
+    context = observed_state_candidate_context()
+    clean_rows = [row for row in reference_rows if row["set"] != "weak-systematics-excluded"]
+    actual_acts = {
+        row["galaxy"]: {
+            branch: parse_float(row.get(f"{branch}Activation"), 0.0)
+            for branch in V18_40_REMAINING_GAP_CLASS_BRANCHES
+        }
+        for row in clean_rows
+    }
+    active_values = {
+        branch: [
+            parse_float(row.get(f"{branch}Activation"), 0.0)
+            for row in clean_rows
+            if parse_float(strengths.get(branch), 0.0) > 0.0 and abs(parse_float(row.get(f"{branch}Activation"), 0.0)) >= 0.05
+        ]
+        for branch in V18_40_REMAINING_GAP_CLASS_BRANCHES
+    }
+    route_by_name = {curve["name"]: curve.get("lockedModelRoute", "") for curve in context["curves"]}
+    route_for_branch = {
+        "massiveLowGasLowLoadShelf": "low-load",
+        "lowLoadOuterMemoryShelf": "low-load",
+        "compactBufferedHighMemoryShelf": "buffered single-crossing",
+    }
+    clean_names = [row["galaxy"] for row in clean_rows]
+    null_rows: list[dict] = []
+    for seed in V18_40_REMAINING_GAP_CLASS_SEEDS:
+        rng = random.Random(seed)
+        names = sorted(actual_acts)
+        shuffled = [actual_acts[name] for name in names]
+        rng.shuffle(shuffled)
+        rows = v18_40_remaining_gap_class_score_rows(strengths, forced_by_name=dict(zip(names, shuffled)))
+        null_rows.append({"nullType": "branch-label-shuffle", "seed": seed, **v18_40_remaining_gap_class_metric(rows)})
+
+        forced: dict[str, dict[str, float]] = {}
+        for branch, values in active_values.items():
+            pool = [name for name in clean_names if route_by_name.get(name) == route_for_branch[branch]]
+            rng.shuffle(pool)
+            for name, value in zip(pool, values):
+                forced.setdefault(name, {key: 0.0 for key in V18_40_REMAINING_GAP_CLASS_BRANCHES})[branch] = value
+        rows = v18_40_remaining_gap_class_score_rows(strengths, forced_by_name=forced)
+        null_rows.append({"nullType": "same-active-count-route-random", "seed": seed, **v18_40_remaining_gap_class_metric(rows)})
+
+        forced = {}
+        for branch, values in active_values.items():
+            pool = [
+                row["galaxy"]
+                for row in clean_rows
+                if row["set"] == "clean-protected" and route_by_name.get(row["galaxy"]) == route_for_branch[branch]
+            ]
+            rng.shuffle(pool)
+            for name, value in zip(pool, values):
+                forced.setdefault(name, {key: 0.0 for key in V18_40_REMAINING_GAP_CLASS_BRANCHES})[branch] = value
+        rows = v18_40_remaining_gap_class_score_rows(strengths, forced_by_name=forced)
+        null_rows.append({"nullType": "protected-lookalike-branch-stress", "seed": seed, **v18_40_remaining_gap_class_metric(rows)})
+    return null_rows
+
+
+def v18_40_adapt_v18_39_rows(v18_39_rows: list[dict]) -> list[dict]:
+    adapted: list[dict] = []
+    for row in v18_39_rows:
+        item = dict(row)
+        item["remainingGapClassTarget"] = item["galaxy"] in V18_40_REMAINING_GAP_CLASS_TARGETS
+        item["remainingGapTargetClass"] = v18_40_remaining_gap_class_target_label(item["galaxy"])
+        adapted.append(item)
+    return adapted
+
+
+def v18_40_remaining_gap_class_variant_rows(v18_39_rows: list[dict]) -> list[dict]:
+    variants = [
+        ("v18_38_no_change", {branch: 0.0 for branch in V18_40_REMAINING_GAP_CLASS_BRANCHES}),
+        ("strict_safe_massive_only", {"massiveLowGasLowLoadShelf": 0.05, "lowLoadOuterMemoryShelf": 0.0, "compactBufferedHighMemoryShelf": 0.0}),
+        ("two_lowload_class_probe", {"massiveLowGasLowLoadShelf": 0.05, "lowLoadOuterMemoryShelf": 0.05, "compactBufferedHighMemoryShelf": 0.0}),
+        ("full_class_probe", dict(V18_40_REMAINING_GAP_CLASS_STRENGTHS)),
+    ]
+    split_names = v18_36_nfw_gap_split_names()
+    output: list[dict] = []
+    for variant_name, strengths in variants:
+        rows = v18_40_remaining_gap_class_score_rows(strengths, split_names)
+        all_metric = v18_40_remaining_gap_class_metric(rows)
+        train_metric = v18_40_remaining_gap_class_metric(rows, "train")
+        holdout_metric = v18_40_remaining_gap_class_metric(rows, "holdout")
+        output.append(
+            {
+                "variant": variant_name,
+                **{f"{branch}Beta": strengths[branch] for branch in V18_40_REMAINING_GAP_CLASS_BRANCHES},
+                **{f"all_{key}": value for key, value in all_metric.items() if key != "targetClassGains"},
+                **{f"train_{key}": value for key, value in train_metric.items() if key != "targetClassGains"},
+                **{f"holdout_{key}": value for key, value in holdout_metric.items() if key != "targetClassGains"},
+            }
+        )
+    adapted_v39 = v18_40_adapt_v18_39_rows(v18_39_rows)
+    all_metric = v18_40_remaining_gap_class_metric(adapted_v39)
+    train_metric = v18_40_remaining_gap_class_metric(adapted_v39, "train")
+    holdout_metric = v18_40_remaining_gap_class_metric(adapted_v39, "holdout")
+    output.append(
+        {
+            "variant": "v18_39_control",
+            **{f"{branch}Beta": "" for branch in V18_40_REMAINING_GAP_CLASS_BRANCHES},
+            **{f"all_{key}": value for key, value in all_metric.items() if key != "targetClassGains"},
+            **{f"train_{key}": value for key, value in train_metric.items() if key != "targetClassGains"},
+            **{f"holdout_{key}": value for key, value in holdout_metric.items() if key != "targetClassGains"},
+        }
+    )
+    return output
+
+
+def write_v18_40_remaining_gap_class_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_40_remaining_gap_class"
+    release_capsule_path = DEFAULT_OBSERVED_STATE_V18_38_NFW_SHELF_RELEASE_LOCK_OUT / "mts_v18_38_nfw_shelf_release_lock_capsule.json"
+    if release_capsule_path.exists():
+        release_capsule = read_json_if_exists(release_capsule_path)
+    else:
+        release_capsule = write_v18_38_nfw_shelf_release_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_38_NFW_SHELF_RELEASE_LOCK_OUT)
+    v39_capsule_path = DEFAULT_OBSERVED_STATE_V18_39_REMAINING_NFW_GAP_OUT / "mts_v18_39_remaining_nfw_gap_candidate_capsule.json"
+    if v39_capsule_path.exists():
+        v39_capsule = read_json_if_exists(v39_capsule_path)
+    else:
+        v39_capsule = write_v18_39_remaining_nfw_gap_artifacts(DEFAULT_OBSERVED_STATE_V18_39_REMAINING_NFW_GAP_OUT)
+    split_names = v18_36_nfw_gap_split_names()
+    v39_rows = v18_39_remaining_nfw_gap_score_rows(V18_39_REMAINING_NFW_GAP_FIXED_STRENGTHS, split_names)
+    v39_by_name = {row["galaxy"]: row for row in v39_rows}
+    selected_strengths = dict(V18_40_REMAINING_GAP_CLASS_STRENGTHS)
+    rows = v18_40_remaining_gap_class_score_rows(selected_strengths, split_names, v18_39_by_name=v39_by_name)
+    metric = v18_40_remaining_gap_class_metric(rows)
+    train_metric = v18_40_remaining_gap_class_metric(rows, "train")
+    holdout_metric = v18_40_remaining_gap_class_metric(rows, "holdout")
+    null_rows = v18_40_remaining_gap_class_null_rows(selected_strengths, rows)
+    best_branch_label_null = max(
+        [parse_float(row.get("remainingTargetGainVsV18_38Pct"), 0.0) for row in null_rows if row.get("nullType") == "branch-label-shuffle"]
+        or [0.0]
+    )
+    best_route_count_null = max(
+        [parse_float(row.get("remainingTargetGainVsV18_38Pct"), 0.0) for row in null_rows if row.get("nullType") == "same-active-count-route-random"]
+        or [0.0]
+    )
+    branch_label_margin = metric["remainingTargetGainVsV18_38Pct"] - best_branch_label_null
+    route_count_margin = metric["remainingTargetGainVsV18_38Pct"] - best_route_count_null
+    high_rows = [row for row in rows if row["set"] == "clean-high-rmse"]
+    protected_rows = [row for row in rows if row["set"] == "clean-protected"]
+    changed_high_rows = sorted(
+        [row for row in high_rows if abs(parse_float(row.get("candidateGainVsV18_38KmS"), 0.0)) >= 0.03],
+        key=lambda row: -parse_float(row.get("candidateGainVsV18_38KmS"), 0.0),
+    )
+    target_rows = sorted(
+        [row for row in high_rows if parse_bool(row.get("remainingGapClassTarget"))],
+        key=lambda row: -parse_float(row.get("candidateGainVsV18_38KmS"), 0.0),
+    )
+    protected_hit_rows = sorted(
+        [
+            row for row in protected_rows
+            if parse_float(row.get("anyActivation"), 0.0) >= 0.05 or parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) > 0.0
+        ],
+        key=lambda row: (-parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0), row["galaxy"]),
+    )
+    branch_rows: list[dict] = []
+    for branch in V18_40_REMAINING_GAP_CLASS_BRANCHES:
+        active = [
+            row for row in rows
+            if parse_float(selected_strengths.get(branch), 0.0) > 0.0 and abs(parse_float(row.get(f"{branch}Activation"), 0.0)) >= 0.05
+        ]
+        active_high = [row for row in active if row["set"] == "clean-high-rmse"]
+        active_target = [row for row in active_high if parse_bool(row.get("remainingGapClassTarget"))]
+        active_protected = [row for row in active if row["set"] == "clean-protected"]
+        branch_rows.append(
+            {
+                "branch": branch,
+                "selectedBeta": selected_strengths[branch],
+                "activeCleanCount": sum(1 for row in active if row["set"] != "weak-systematics-excluded"),
+                "activeHighCount": len(active_high),
+                "activeRemainingTargetCount": len(active_target),
+                "activeProtectedCount": len(active_protected),
+                "remainingTargetGainVsV18_38Pct": pct_improvement(
+                    safe_mean(parse_float(row["v18_38Rmse"]) for row in active_target),
+                    safe_mean(parse_float(row["candidateRmse"]) for row in active_target),
+                ),
+                "remainingTargetGainVsV18_38KmS": safe_mean(parse_float(row["v18_38Rmse"]) for row in active_target)
+                - safe_mean(parse_float(row["candidateRmse"]) for row in active_target),
+                "protectedMaxRegressionVsV18_38KmS": max([parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) for row in active_protected] or [0.0]),
+                "activeTargetGalaxies": "; ".join(row["galaxy"] for row in active_target),
+                "activeProtectedGalaxies": "; ".join(row["galaxy"] for row in active_protected),
+            }
+        )
+    holdout_replay_rows = v18_40_remaining_gap_class_variant_rows(v39_rows)
+    passes = {
+        "baselineRemains21_90": True,
+        "v18_38ReleaseLocked": release_capsule["verdict"] == "v18.38 NFW-shelf browser release candidate locked",
+        "v18_39Reproducible": bool(v39_capsule.get("candidateId")) and "v18.39" in str(v39_capsule.get("candidateId", "")),
+        "remainingTargetGainAtLeast5Pct": parse_float(metric["remainingTargetGainVsV18_38Pct"]) >= 5.0,
+        "holdoutRemainingTargetGainAtLeast2Pct": parse_float(holdout_metric["remainingTargetGainVsV18_38Pct"]) >= 2.0,
+        "twoTargetClassesImprove": int(metric["targetClassesImprovedCount"]) >= 2,
+        "cleanHighMeanImproves": parse_float(metric["highGainVsV18_38Pct"]) > 0.0,
+        "protectedRegressionAtMost005": parse_float(metric["protectedMaxRegressionVsV18_38KmS"]) <= 0.05,
+        "inheritedProtectedRegressionZero": parse_float(metric["inheritedProtectedMaxRegressionVsV18_38KmS"]) == 0.0,
+        "highRegressionBelow1": parse_float(metric["highMaxRegressionVsV18_38KmS"]) < 1.0,
+        "highAbove20Zero": int(metric["highAbove20Count"]) == 0,
+        "routeChangesZero": int(metric["routeChangedCount"]) == 0,
+        "weakLeakageZero": int(metric["weakSystematicsLeakage"]) == 0,
+        "branchLabelNullMarginAtLeast10Pct": math.isfinite(branch_label_margin) and branch_label_margin >= 10.0,
+        "routeCountNullMarginAtLeast10Pct": math.isfinite(route_count_margin) and route_count_margin >= 10.0,
+    }
+    verdict = "v18.40 remaining NFW-gap class candidate for review" if all(passes.values()) else "v18.40 remaining NFW-gap classes not promoted"
+    score_row = {
+        "candidateId": "observed-state-response-v18.40-remaining-nfw-gap-class-mechanism-test",
+        "verdict": verdict,
+        **{f"selected{branch}Beta": selected_strengths[branch] for branch in V18_40_REMAINING_GAP_CLASS_BRANCHES},
+        "v18_38HighGainPct": release_capsule["summary"]["v18_38HighGainPct"],
+        "v18_38CleanGainPct": release_capsule["summary"]["v18_38CleanGainPct"],
+        "candidateHighGainVsV18_38Pct": metric["highGainVsV18_38Pct"],
+        "candidateRemainingTargetGainVsV18_38Pct": metric["remainingTargetGainVsV18_38Pct"],
+        "candidateRemainingTargetGainVsV18_38KmS": metric["remainingTargetGainVsV18_38KmS"],
+        "trainRemainingTargetGainVsV18_38Pct": train_metric["remainingTargetGainVsV18_38Pct"],
+        "holdoutRemainingTargetGainVsV18_38Pct": holdout_metric["remainingTargetGainVsV18_38Pct"],
+        "targetClassesImproved": metric["targetClassesImproved"],
+        "targetClassesImprovedCount": metric["targetClassesImprovedCount"],
+        "candidateProtectedMaxRegressionVsV18_38KmS": metric["protectedMaxRegressionVsV18_38KmS"],
+        "candidateInheritedProtectedMaxRegressionVsV18_38KmS": metric["inheritedProtectedMaxRegressionVsV18_38KmS"],
+        "candidateHighMaxRegressionVsV18_38KmS": metric["highMaxRegressionVsV18_38KmS"],
+        "candidateHighAbove20": metric["highAbove20Count"],
+        "routeChangedCount": metric["routeChangedCount"],
+        "weakSystematicsLeakage": metric["weakSystematicsLeakage"],
+        "bestBranchLabelNullGainVsV18_38Pct": best_branch_label_null,
+        "branchLabelNullMarginPct": branch_label_margin,
+        "bestSameActiveRouteNullGainVsV18_38Pct": best_route_count_null,
+        "sameActiveRouteNullMarginPct": route_count_margin,
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_row])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", rows)
+    write_csv(out_dir / f"{prefix}_branch_ledger.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_holdout_replay.csv", holdout_replay_rows)
+    formula = {
+        "candidateId": score_row["candidateId"],
+        "status": verdict,
+        "baseLaw": "locked v18.38 NFW-shelf browser release candidate",
+        "v18_39Role": "candidate control only, not release replacement",
+        "selectedBetas": selected_strengths,
+        "mechanism": "signed radial support reshaping: S_v18.40(r) = S_v18.38(r) * (1 - beta * signed_activation * shelf_shape(x)); positive activation suppresses support, negative activation completes support",
+        "branches": {
+            "massiveLowGasLowLoadShelf": "massive low-gas low-load shelf; signed gate separates compact completion from extended suppression",
+            "lowLoadOuterMemoryShelf": "low-load outer-memory shelf; signed gate separates outer-memory completion from outer shelf suppression",
+            "compactBufferedHighMemoryShelf": "compact buffered/high-memory shelf; signed gate tests buffered suppression versus low-memory completion",
+        },
+        "allowedInputs": [
+            "locked route",
+            "memoryLoad",
+            "u_0.75",
+            "uOut",
+            "uMax",
+            "h/rOut",
+            "gas fraction",
+            "inner/mid/outer gas shares",
+            "outer disk share",
+            "bar curvature",
+            "point density",
+            "baryonic mass scale",
+        ],
+        "forbiddenInputs": ["galaxy names in formula", "NFW parameters in formula", "raw residual lookup", "raw RMSE formula input", "weak/systematics training"],
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.40 Remaining NFW-Gap Class Mechanism Test",
+        "",
+        "This is a direct candidate-law test on top of locked v18.38. v18.39 is used as a control only; the browser/release law is not replaced here.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Remaining target gain over v18.38: `{fmt(score_row['candidateRemainingTargetGainVsV18_38Pct'])}%` / `{fmt(score_row['candidateRemainingTargetGainVsV18_38KmS'])}` km/s.",
+        f"- Holdout remaining target gain: `{fmt(score_row['holdoutRemainingTargetGainVsV18_38Pct'])}%`.",
+        f"- Clean high-RMSE mean gain over v18.38: `{fmt(score_row['candidateHighGainVsV18_38Pct'])}%`.",
+        f"- Improved target classes: `{score_row['targetClassesImproved']}`.",
+        f"- Protected max regression vs v18.38: `{fmt(score_row['candidateProtectedMaxRegressionVsV18_38KmS'])}` km/s.",
+        f"- High max regression vs v18.38: `{fmt(score_row['candidateHighMaxRegressionVsV18_38KmS'])}` km/s.",
+        f"- Branch-label null margin: `{fmt(score_row['branchLabelNullMarginPct'])}` points.",
+        f"- Same-active route null margin: `{fmt(score_row['sameActiveRouteNullMarginPct'])}` points.",
+        "",
+        "## Target Class Gains",
+        "",
+        "| Class | count | v18.38 | candidate | gain % | gain km/s |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for item in metric["targetClassGains"]:
+        report.append(
+            f"| {item['targetClass']} | {item['count']} | {fmt(item['v18_38MeanRmse'])} | {fmt(item['candidateMeanRmse'])} | {fmt(item['gainPct'])} | {fmt(item['gainKmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Changed High-RMSE Cases",
+            "",
+            "| Galaxy | target class | route | v18.38 | v18.39 | candidate | gain vs v18.38 | branch |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for row in changed_high_rows[:40]:
+        report.append(
+            f"| {row['galaxy']} | {row['remainingGapTargetClass']} | {row['lockedRoute']} | {fmt(parse_float(row['v18_38Rmse']))} | {fmt(parse_float(row['v18_39Rmse'], math.nan))} | {fmt(parse_float(row['candidateRmse']))} | {fmt(parse_float(row['candidateGainVsV18_38KmS']))} | {row['branchHits']} |"
+        )
+    report.extend(["", "## Acceptance Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.append("")
+    report.append(
+        "If this fails, the remaining NFW-prior gap is treated as fitted-halo flexibility/provenance/M-L anatomy rather than another shelf-threshold branch."
+    )
+    report.append("")
+    report.append(verdict)
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-40-remaining-gap-classes-v1",
+        "candidateId": score_row["candidateId"],
+        "verdict": verdict,
+        "selectedStrengths": selected_strengths,
+        "summary": {**score_row, "passes": passes},
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_branch_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_holdout_replay.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18remaininggapclasses(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_40_REMAINING_GAP_CLASSES_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_40_remaining_gap_class_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.40 remaining NFW-gap class mechanism test")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"target_gain={fmt(summary['candidateRemainingTargetGainVsV18_38Pct'])}%",
+                f"holdout_gain={fmt(summary['holdoutRemainingTargetGainVsV18_38Pct'])}%",
+                f"high_gain={fmt(summary['candidateHighGainVsV18_38Pct'])}%",
+                f"protected={fmt(summary['candidateProtectedMaxRegressionVsV18_38KmS'])}",
+                f"null_margin={fmt(min(summary['branchLabelNullMarginPct'], summary['sameActiveRouteNullMarginPct']))}",
+            ]
+        )
+    )
+    print(f"Wrote v18.40 remaining NFW-gap class mechanism test to {out_dir.resolve()}")
+
+
 V18_36_NFW_GAP_BRANCHES = [
     "compactGasDwarfShelfSuppression",
     "bufferedDiskShelfSuppression",
@@ -97415,6 +98154,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18competitorbenchmarkv38",
             "v18remainingnfwgapcandidate",
             "observedstatev18remainingnfwgapcandidate",
+            "v18remaininggapclasses",
+            "observedstatev18remaininggapclasses",
             "v18nfwgapv35candidate",
             "observedstatev18nfwgapv35candidate",
             "v18nfwgapshelfharden",
@@ -97799,6 +98540,8 @@ def main() -> None:
         cmd_v18competitorbenchmarkv38(args)
     elif args.mode in {"v18remainingnfwgapcandidate", "observedstatev18remainingnfwgapcandidate"}:
         cmd_v18remainingnfwgapcandidate(args)
+    elif args.mode in {"v18remaininggapclasses", "observedstatev18remaininggapclasses"}:
+        cmd_v18remaininggapclasses(args)
     elif args.mode in {"v18nfwgapv35candidate", "observedstatev18nfwgapv35candidate"}:
         cmd_v18nfwgapv35candidate(args)
     elif args.mode in {"v18nfwgapshelfharden", "observedstatev18nfwgapshelfharden"}:
