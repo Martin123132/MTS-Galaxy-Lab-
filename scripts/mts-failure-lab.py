@@ -267,6 +267,8 @@ DEFAULT_V19_NGC3198_COUNTERCASE_OUT = OUTPUT_PACK_ROOT / "mts-v19-ngc3198-counte
 DEFAULT_V19_NGC3198_COUNTERCASE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ngc3198-countercase-v1")
 DEFAULT_V19_NUMERIC_TWO_D_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-numeric-2d-field-v1"
 DEFAULT_V19_KINEMATIC_TWO_D_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-kinematic-2d-field-v1"
+DEFAULT_V19_NGC3198_KINEMATIC_FACTS_OUT = OUTPUT_PACK_ROOT / "mts-v19-ngc3198-kinematic-facts-v1"
+DEFAULT_V19_NGC3198_KINEMATIC_FACTS_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ngc3198-kinematic-facts-v1")
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -107935,6 +107937,339 @@ def cmd_v19kinematic2dfield(args: argparse.Namespace) -> None:
     print(f"Wrote v19 direct numeric 2D kinematic field test to {out_dir.resolve()}")
 
 
+V19_NGC3198_KINEMATIC_FACT_SOURCES = [
+    {
+        "sourceId": "sellwood-spekkens-2010-arxiv",
+        "sourceRole": "source-html",
+        "url": "https://arxiv.org/abs/0912.5493",
+        "maxBytes": 750_000,
+        "reason": "open arXiv source page for NGC3198/NGC2403 non-circular streaming constraints",
+    },
+    {
+        "sourceId": "sellwood-spekkens-2010-arxiv-pdf",
+        "sourceRole": "candidate-pdf",
+        "url": "https://arxiv.org/pdf/0912.5493",
+        "maxBytes": 8_000_000,
+        "reason": "open arXiv PDF for NGC3198/NGC2403 non-circular streaming constraints",
+    },
+    {
+        "sourceId": "sellwood-spekkens-2010-oup",
+        "sourceRole": "source-html",
+        "url": "https://academic.oup.com/mnras/article/404/4/1733/1081138",
+        "maxBytes": 3_000_000,
+        "reason": "NGC3198 non-axisymmetric THINGS residual/bar-flow source facts",
+    },
+    {
+        "sourceId": "schmidt-radial-gas-motions-2016-oup",
+        "sourceRole": "source-html",
+        "url": "https://academic.oup.com/mnras/article/457/3/2642/2588886",
+        "maxBytes": 3_000_000,
+        "reason": "NGC3198/NGC3521 radial gas-motion and asymmetry source facts",
+    },
+    {
+        "sourceId": "schmidt-radial-gas-motions-2016-rug",
+        "sourceRole": "source-html",
+        "url": "https://research.rug.nl/en/publications/radial-gas-motions-in-the-h-i-nearby-galaxy-survey-things",
+        "maxBytes": 1_000_000,
+        "reason": "open university record for radial gas motions in THINGS",
+    },
+    {
+        "sourceId": "schmidt-radial-gas-motions-2016-core-pdf",
+        "sourceRole": "candidate-pdf",
+        "url": "https://core.ac.uk/download/pdf/148330277.pdf",
+        "maxBytes": 8_000_000,
+        "reason": "open repository PDF for radial gas motions in THINGS",
+    },
+    {
+        "sourceId": "marasco-nonaxisymmetric-2023-oup",
+        "sourceRole": "source-html",
+        "url": "https://academic.oup.com/mnras/article/524/1/1560/7209177",
+        "maxBytes": 4_000_000,
+        "reason": "NGC3198 2D velocity-field quietness and bar-aligned fluctuation source facts",
+    },
+    {
+        "sourceId": "halogas-ngc3198-arxiv",
+        "sourceRole": "source-html",
+        "url": "https://arxiv.org/abs/1304.4232",
+        "maxBytes": 750_000,
+        "reason": "NGC3198 extraplanar gas/lag context",
+    },
+]
+
+
+V19_NGC3198_KINEMATIC_FACT_TARGETS = [
+    "NGC3198",
+    "NGC2403",
+    "NGC3521",
+    "NGC5055",
+]
+
+
+V19_KINEMATIC_QUIET_TERMS = [
+    "quiet velocity field",
+    "small variations",
+    "very little variation",
+    "constant",
+    "regular",
+    "axisymmetric",
+    "good fit",
+    "small residual",
+    "less than 20 per cent",
+    "less than 20 percent",
+]
+
+
+V19_KINEMATIC_BOUNDARY_TERMS = [
+    "bar",
+    "spiral",
+    "streaming",
+    "asymmetry",
+    "asymmetric",
+    "lopsided",
+    "non-axisymmetric",
+    "non axisymmetric",
+    "radial velocity",
+    "radial inflow",
+    "residual",
+    "extraplanar",
+    "warp",
+    "coherent",
+]
+
+
+def v19_ngc3198_kinematic_fact_source_targets(source_cache: Path) -> list[dict]:
+    out = []
+    for source in V19_NGC3198_KINEMATIC_FACT_SOURCES:
+        suffix = "pdf" if source["sourceRole"] == "candidate-pdf" or str(source["url"]).lower().endswith(".pdf") else "html"
+        out.append(
+            {
+                **source,
+                "cachePath": str(source_cache / source["sourceRole"] / f"{safe_file_stem(source['sourceId'])}.{suffix}"),
+            }
+        )
+    return out
+
+
+def v19_ngc3198_kinematic_fetch_inventory(source_cache: Path, offline: bool) -> list[dict]:
+    rows = []
+    source_cache.mkdir(parents=True, exist_ok=True)
+    for target in v19_ngc3198_kinematic_fact_source_targets(source_cache):
+        path = Path(target["cachePath"])
+        status = v19_external_2d_fetch(target["url"], path, offline, int(parse_float(target.get("maxBytes"), 750_000) or 750_000))
+        rows.append({**target, **status, "largeDownloadAllowed": False})
+    return rows
+
+
+def v19_ngc3198_text_variants(galaxy: str) -> list[str]:
+    if galaxy.startswith("NGC") and " " not in galaxy:
+        spaced = "NGC " + galaxy[3:]
+    elif galaxy.startswith("UGC") and " " not in galaxy:
+        spaced = "UGC " + galaxy[3:].lstrip("0")
+    else:
+        spaced = galaxy
+    return sorted({galaxy, spaced, galaxy.replace("_", " "), spaced.replace("_", " ")}, key=len, reverse=True)
+
+
+def v19_ngc3198_kinematic_extract_rows(fetch_rows: list[dict], offline: bool) -> list[dict]:
+    rows = []
+    number_pattern = re.compile(r"(?:[±+\-]?\d+(?:\.\d+)?\s*(?:per cent|percent|%|km\s*s(?:−|-)?1|km/s|km s-1|deg|degree|°|arcsec|kpc|Mpc))", re.IGNORECASE)
+    for fetch in fetch_rows:
+        if fetch.get("cacheStatus") != "available":
+            continue
+        path = Path(fetch["cachePath"])
+        text, parser = v21_source_text(path, fetch.get("sourceRole", ""), offline)
+        if not text:
+            continue
+        lowered = text.lower()
+        for galaxy in V19_NGC3198_KINEMATIC_FACT_TARGETS:
+            snippets = []
+            quiet_hits: set[str] = set()
+            boundary_hits: set[str] = set()
+            numeric_hits: set[str] = set()
+            for variant in v19_ngc3198_text_variants(galaxy):
+                idx = lowered.find(variant.lower())
+                while idx >= 0 and len(snippets) < 10:
+                    snippet = re.sub(r"\s+", " ", text[max(0, idx - 520): idx + 1350]).strip()
+                    snippet_lower = snippet.lower()
+                    local_quiet = [term for term in V19_KINEMATIC_QUIET_TERMS if term in snippet_lower]
+                    local_boundary = [term for term in V19_KINEMATIC_BOUNDARY_TERMS if term in snippet_lower]
+                    local_numbers = number_pattern.findall(snippet)
+                    if local_quiet or local_boundary or local_numbers:
+                        snippets.append(snippet[:1800])
+                        quiet_hits.update(local_quiet)
+                        boundary_hits.update(local_boundary)
+                        numeric_hits.update(item.strip() for item in local_numbers[:20])
+                    idx = lowered.find(variant.lower(), idx + max(1, len(variant)))
+            if snippets:
+                if quiet_hits and boundary_hits:
+                    evidence_class = "quiet field plus boundary/streaming evidence"
+                elif quiet_hits:
+                    evidence_class = "quiet/regular field evidence"
+                elif boundary_hits:
+                    evidence_class = "boundary/streaming evidence"
+                else:
+                    evidence_class = "numeric mention only"
+                rows.append(
+                    {
+                        "galaxy": galaxy,
+                        "sourceId": fetch["sourceId"],
+                        "sourceRole": fetch["sourceRole"],
+                        "url": fetch["url"],
+                        "cachePath": fetch["cachePath"],
+                        "parser": parser,
+                        "caseSpecificSnippetCount": len(snippets),
+                        "quietTerms": "; ".join(sorted(quiet_hits)),
+                        "boundaryTerms": "; ".join(sorted(boundary_hits)),
+                        "numericTokens": "; ".join(sorted(numeric_hits))[:2000],
+                        "evidenceClass": evidence_class,
+                        "snippet": " || ".join(snippets)[:6000],
+                    }
+                )
+    return rows
+
+
+def v19_ngc3198_kinematic_case_verdicts(evidence_rows: list[dict]) -> list[dict]:
+    by_name: dict[str, list[dict]] = {}
+    for row in evidence_rows:
+        by_name.setdefault(row["galaxy"], []).append(row)
+    coverage_path = DEFAULT_V19_KINEMATIC_TWO_D_FIELD_OUT / "mts_v19_kinematic_2d_field_case_coverage.csv"
+    if not coverage_path.exists():
+        write_v19_kinematic_2d_field_artifacts(DEFAULT_V19_KINEMATIC_TWO_D_FIELD_OUT, DEFAULT_V19_EXTERNAL_TWO_D_PARSER_OUT)
+    coverage = {row["galaxy"]: row for row in read_csv_rows(coverage_path)}
+    out = []
+    for galaxy in V19_NGC3198_KINEMATIC_FACT_TARGETS:
+        rows = by_name.get(galaxy, [])
+        quiet_count = sum(1 for row in rows if row["quietTerms"])
+        boundary_count = sum(1 for row in rows if row["boundaryTerms"])
+        numeric_count = sum(1 for row in rows if row["numericTokens"])
+        coverage_row = coverage.get(galaxy, {})
+        has_table = parse_bool(coverage_row.get("hasDirect2DKinematics"))
+        if galaxy == "NGC3198" and quiet_count and boundary_count and not has_table:
+            verdict = "source facts show quiet-but-boundary field; table-grade discriminator still missing"
+            next_action = "acquire machine-readable THINGS/velocity-field products or source table for NGC3198 before formula testing"
+        elif quiet_count and not boundary_count:
+            verdict = "quiet/control-like source facts"
+            next_action = "use only as comparison control"
+        elif boundary_count:
+            verdict = "boundary/streaming source facts"
+            next_action = "use as source-field anatomy, not formula input"
+        elif rows:
+            verdict = "case mentioned without decisive kinematic class"
+            next_action = "needs numeric direct kinematic table"
+        else:
+            verdict = "no direct source facts found"
+            next_action = "source search still missing"
+        out.append(
+            {
+                "galaxy": galaxy,
+                "sourceFactRows": len(rows),
+                "quietEvidenceRows": quiet_count,
+                "boundaryEvidenceRows": boundary_count,
+                "numericEvidenceRows": numeric_count,
+                "directTableRowsAlreadyAvailable": coverage_row.get("direct2DKinematicRowCount", 0),
+                "verdict": verdict,
+                "nextAction": next_action,
+                "sourcePaths": ";".join(sorted({row["cachePath"] for row in rows})) if rows else "MISSING",
+            }
+        )
+    return out
+
+
+def write_v19_ngc3198_kinematic_facts_artifacts(out_dir: Path, source_cache: Path, offline: bool) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_ngc3198_kinematic_facts"
+    fetch_rows = v19_ngc3198_kinematic_fetch_inventory(source_cache, offline)
+    evidence_rows = v19_ngc3198_kinematic_extract_rows(fetch_rows, offline)
+    case_rows = v19_ngc3198_kinematic_case_verdicts(evidence_rows)
+    ngc = next((row for row in case_rows if row["galaxy"] == "NGC3198"), {})
+    if "quiet-but-boundary" in ngc.get("verdict", ""):
+        verdict = "NGC3198 quiet-boundary evidence found; numeric table still needed"
+    elif ngc.get("sourceFactRows", 0):
+        verdict = "NGC3198 source facts found but not decisive"
+    else:
+        verdict = "NGC3198 kinematic source facts missing"
+    inventory_rows = []
+    for row in fetch_rows:
+        cache_status = "available" if row.get("cacheStatus") == "available" else "unavailable"
+        inventory_rows.append(
+            {
+                "sourceId": row["sourceId"],
+                "sourceRole": row["sourceRole"],
+                "url": row["url"],
+                "cachePath": row["cachePath"],
+                "cacheStatus": cache_status,
+                "bytes": row.get("bytes", "") if cache_status == "available" else 0,
+                "sha256": row.get("sha256", "") if cache_status == "available" else "",
+                "largeDownloadAllowed": False,
+                "reason": row.get("reason", ""),
+            }
+        )
+    write_csv(out_dir / f"{prefix}_source_inventory.csv", inventory_rows)
+    write_csv(out_dir / f"{prefix}_evidence_table.csv", evidence_rows)
+    write_csv(out_dir / f"{prefix}_case_verdicts.csv", case_rows)
+    report = [
+        "# MTS v19 NGC3198 Kinematic Source Facts",
+        "",
+        "This mode fetches bounded source-paper pages and extracts case-specific kinematic facts for NGC3198 and controls. It does not change any MTS law or browser preset.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Fetched/available sources: `{sum(1 for row in fetch_rows if row.get('cacheStatus') == 'available')}` / `{len(fetch_rows)}`.",
+        f"Evidence rows: `{len(evidence_rows)}`.",
+        "",
+        "| galaxy | source facts | quiet rows | boundary rows | numeric rows | verdict |",
+        "| --- | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for row in case_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['sourceFactRows']} | {row['quietEvidenceRows']} | {row['boundaryEvidenceRows']} | {row['numericEvidenceRows']} | {row['verdict']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Guardrails",
+            "",
+            "- Source facts are evidence only, not formula inputs.",
+            "- No galaxy name, residual, raw RMSE, NFW parameter, or MOND parameter enters an MTS law.",
+            "- No FITS cubes, survey archives, or large data products are downloaded.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-ngc3198-kinematic-facts-v1",
+        "verdict": verdict,
+        "sourceCount": len(fetch_rows),
+        "availableSourceCount": sum(1 for row in fetch_rows if row.get("cacheStatus") == "available"),
+        "evidenceRowCount": len(evidence_rows),
+        "caseVerdicts": {row["galaxy"]: row["verdict"] for row in case_rows},
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "largeDownloadsAllowed": False,
+        "cacheRoot": str(source_cache),
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19ngc3198kinematicfacts(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_NGC3198_KINEMATIC_FACTS_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_V19_NGC3198_KINEMATIC_FACTS_CACHE
+    capsule = write_v19_ngc3198_kinematic_facts_artifacts(out_dir, source_cache, args.offline)
+    print("MTS v19 NGC3198 kinematic source facts")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"sources={capsule['availableSourceCount']}/{capsule['sourceCount']}",
+                f"evidence_rows={capsule['evidenceRowCount']}",
+                f"ngc3198={capsule['caseVerdicts'].get('NGC3198', '')}",
+            ]
+        )
+    )
+    print(f"Wrote v19 NGC3198 kinematic source facts to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -108200,6 +108535,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19numeric2dfield",
             "v19kinematic2dfield",
             "observedstatev19kinematic2dfield",
+            "v19ngc3198kinematicfacts",
+            "observedstatev19ngc3198kinematicfacts",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -108641,6 +108978,8 @@ def main() -> None:
         cmd_v19numeric2dfield(args)
     elif args.mode in {"v19kinematic2dfield", "observedstatev19kinematic2dfield"}:
         cmd_v19kinematic2dfield(args)
+    elif args.mode in {"v19ngc3198kinematicfacts", "observedstatev19ngc3198kinematicfacts"}:
+        cmd_v19ngc3198kinematicfacts(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
