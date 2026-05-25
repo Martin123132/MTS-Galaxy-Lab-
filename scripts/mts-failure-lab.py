@@ -253,6 +253,8 @@ DEFAULT_V19_SOURCE_EQUATION_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-equation-v1
 DEFAULT_V19_SOURCE_ADMISSIBILITY_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-admissibility-v1"
 DEFAULT_V19_SOURCE_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-provenance-discriminator-v1"
 DEFAULT_V19_SOURCE_REGIME_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-regime-candidate-v1"
+DEFAULT_V19_FIELD_COHERENCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-field-coherence-v1"
+DEFAULT_V19_DISTRIBUTED_FLOW_OUT = OUTPUT_PACK_ROOT / "mts-v19-distributed-flow-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -103564,6 +103566,702 @@ def cmd_v19sourceregime(args: argparse.Namespace) -> None:
     print(f"Wrote v19 source-regime candidate to {out_dir.resolve()}")
 
 
+V19_FIELD_COHERENCE_IDS = [
+    "gradient-coherence-denominator",
+    "curvature-resistance-denominator",
+    "admissible-smoothing-coherence",
+    "odd-kernel-balance",
+]
+
+
+def v19_first_derivative(values: list[float], radii: list[float]) -> list[float]:
+    if len(values) < 2:
+        return [0.0 for _ in values]
+    out: list[float] = []
+    for index, value in enumerate(values):
+        if index == 0:
+            dr = max(1.0e-9, radii[1] - radii[0])
+            out.append((values[1] - value) / dr)
+        elif index == len(values) - 1:
+            dr = max(1.0e-9, radii[-1] - radii[-2])
+            out.append((value - values[-2]) / dr)
+        else:
+            dr = max(1.0e-9, radii[index + 1] - radii[index - 1])
+            out.append((values[index + 1] - values[index - 1]) / dr)
+    return out
+
+
+def v19_field_coherence_features(curve: dict) -> dict:
+    radii = [max(1.0e-9, parse_float(point.get("r"), 0.0)) for point in curve["points"]]
+    if len(radii) < 4:
+        return {
+            "gradientCoherence": 0.0,
+            "curvatureResistance": 1.0,
+            "admissibleSmoothness": 0.0,
+            "oddKernelBalance": 0.0,
+            "monotonicFraction": 0.0,
+            "gradientSignChanges": 0,
+            "roughness": 1.0,
+            "innerOuterGradientContrast": 0.0,
+        }
+    state = v19_theory_kernel_state(curve)
+    r_out = max(1.0e-9, curve.get("rOut", radii[-1]))
+    l_eff = max(1.0e-9, state["lExact"])
+    vbar2 = [max(0.0, parse_float(point.get("bar2"), 0.0)) for point in curve["points"]]
+    smooth_len = max(0.12 * r_out, 0.18 * l_eff, 0.15 * parse_float(curve.get("h"), 1.0))
+    smooth = v19_source_smooth(vbar2, radii, smooth_len)
+    grad = v19_first_derivative(smooth, radii)
+    curv = v19_source_second_derivative(smooth, radii)
+    grad_abs = [abs(value) for value in grad]
+    curv_abs = [abs(value) for value in curv]
+    grad_scale = safe_mean(grad_abs) + 1.0e-9
+    curv_scale = safe_mean(curv_abs) + 1.0e-9
+    roughness = clamp(curv_scale * r_out / (grad_scale + 1.0e-9), 0.0, 20.0)
+    resistance_integral = 0.0
+    gradient_integral = 0.0
+    for index in range(1, len(radii)):
+        dr = max(1.0e-9, radii[index] - radii[index - 1])
+        resistance_integral += 0.5 * (
+            grad_abs[index] * curv_abs[index] + grad_abs[index - 1] * curv_abs[index - 1]
+        ) * dr
+        gradient_integral += 0.5 * (grad_abs[index] + grad_abs[index - 1]) * dr
+    curvature_resistance = clamp(
+        resistance_integral * r_out / ((gradient_integral + 1.0e-9) * (max(vbar2) + 1.0e-9)),
+        0.0,
+        8.0,
+    )
+    positive = [value >= -0.03 * grad_scale for value in grad]
+    monotonic_fraction = sum(1 for value in positive if value) / len(positive)
+    signs = []
+    for value in grad:
+        if abs(value) <= 0.05 * grad_scale:
+            signs.append(0)
+        else:
+            signs.append(1 if value > 0 else -1)
+    compact_signs = [value for value in signs if value != 0]
+    sign_changes = sum(1 for left, right in zip(compact_signs, compact_signs[1:]) if left != right)
+    oscillation_penalty = clamp(sign_changes / max(1, len(compact_signs) - 1), 0.0, 1.0)
+    gradient_coherence = clamp(0.72 * monotonic_fraction + 0.28 * (1.0 - oscillation_penalty), 0.0, 1.0)
+    admissible_smoothness = 1.0 / (1.0 + roughness)
+    inner_grad = safe_mean(grad_abs[index] for index, radius in enumerate(radii) if radius <= 0.45 * r_out)
+    outer_grad = safe_mean(grad_abs[index] for index, radius in enumerate(radii) if radius >= 0.65 * r_out)
+    inner_outer_contrast = (outer_grad - inner_grad) / (abs(outer_grad) + abs(inner_grad) + 1.0e-9)
+    odd_kernel_balance = clamp(0.5 + 0.5 * inner_outer_contrast, 0.0, 1.0)
+    field_coherence = clamp(
+        0.42 * gradient_coherence
+        + 0.30 * admissible_smoothness
+        + 0.18 * (1.0 / (1.0 + curvature_resistance))
+        + 0.10 * odd_kernel_balance,
+        0.0,
+        1.0,
+    )
+    return {
+        "gradientCoherence": gradient_coherence,
+        "curvatureResistance": curvature_resistance,
+        "admissibleSmoothness": admissible_smoothness,
+        "oddKernelBalance": odd_kernel_balance,
+        "fieldCoherence": field_coherence,
+        "monotonicFraction": monotonic_fraction,
+        "gradientSignChanges": sign_changes,
+        "roughness": roughness,
+        "innerOuterGradientContrast": inner_outer_contrast,
+    }
+
+
+def v19_field_coherence_activation(curve: dict, family_id: str) -> tuple[float, dict]:
+    features = v19_field_coherence_features(curve)
+    local = v19_admissibility_features(curve)
+    route = curve.get("lockedModelRoute", "")
+    route_loading = clamp(
+        0.36 * clamp(local["memoryLoad"] / 6.0, 0.0, 1.0)
+        + 0.24 * clamp(local["uOut"] / 0.45, 0.0, 1.0)
+        + 0.20 * clamp(local["lGapOverH"] / 1.35, 0.0, 1.0)
+        + 0.20 * (1.0 if route == "low-load" else 0.62),
+        0.0,
+        1.0,
+    )
+    if family_id == "gradient-coherence-denominator":
+        activation = route_loading * features["gradientCoherence"] / (1.0 + 0.65 * features["curvatureResistance"])
+    elif family_id == "curvature-resistance-denominator":
+        activation = route_loading * features["fieldCoherence"] / (1.0 + 0.95 * features["curvatureResistance"])
+    elif family_id == "admissible-smoothing-coherence":
+        activation = route_loading * clamp(0.55 * features["admissibleSmoothness"] + 0.45 * features["gradientCoherence"], 0.0, 1.0)
+    elif family_id == "odd-kernel-balance":
+        activation = route_loading * features["gradientCoherence"] * clamp(
+            0.35 + 0.65 * features["oddKernelBalance"], 0.0, 1.0
+        )
+    else:
+        raise ValueError(f"Unknown v19 field-coherence family: {family_id}")
+    return clamp(activation, 0.0, 1.0), {**local, **features, "routeLoading": route_loading}
+
+
+def v19_field_coherence_scale(curves: list[dict], weak_names: set[str], supports_by_name: dict[str, list[float]], family_id: str) -> float:
+    numerator = 0.0
+    denominator = 0.0
+    for curve in curves:
+        if curve["name"] in weak_names:
+            continue
+        target = supports_by_name.get(curve["name"], [])
+        if len(target) != len(curve["points"]):
+            continue
+        raw, _ = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        activation, _ = v19_field_coherence_activation(curve, family_id)
+        for raw_value, target_value in zip(raw, target):
+            candidate = max(0.0, raw_value) * activation
+            numerator += candidate * max(0.0, target_value)
+            denominator += candidate * candidate
+    return numerator / denominator if denominator > 1.0e-12 else 0.0
+
+
+def v19_field_coherence_case_rows(family_id: str) -> tuple[list[dict], dict]:
+    context = observed_state_candidate_context()
+    curves = context["curves"]
+    weak_names = set(context["weakNames"])
+    high_names = set(context["highNames"])
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    scale = v19_field_coherence_scale(curves, weak_names, supports_by_name, family_id)
+    rows: list[dict] = []
+    for curve in curves:
+        target = supports_by_name.get(curve["name"], [])
+        if len(target) != len(curve["points"]):
+            continue
+        raw, _ = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        activation, features = v19_field_coherence_activation(curve, family_id)
+        supports = [max(0.0, scale * activation * value) for value in raw]
+        score = v18_competitor_support_score(curve, supports)
+        target_score = v18_competitor_support_score(curve, target)
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        target_gain = pct_improvement(canonical["rmse"], target_score["rmse"])
+        candidate_gain = pct_improvement(canonical["rmse"], score["rmse"])
+        set_name = "weak-systematics-excluded" if curve["name"] in weak_names else ("clean-high-rmse" if curve["name"] in high_names else "clean-protected")
+        rows.append(
+            {
+                "galaxy": curve["name"],
+                "set": set_name,
+                "familyId": family_id,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "activation": activation,
+                "globalScale": scale,
+                "canonicalRmse": canonical["rmse"],
+                "lockedV18Rmse": target_score["rmse"],
+                "fieldCoherenceRmse": score["rmse"],
+                "sourceMinusV18KmS": score["rmse"] - target_score["rmse"],
+                "gainVsCanonicalPct": candidate_gain,
+                "v18RepairRetentionPct": candidate_gain / target_gain * 100.0 if abs(target_gain) > 1.0e-9 else math.nan,
+                **v19_source_acceleration_shape_metrics(curve, target, supports),
+                **features,
+            }
+        )
+    return rows, {"globalScale": scale}
+
+
+def v19_field_coherence_score_rows() -> tuple[list[dict], list[dict], str, dict]:
+    score_rows: list[dict] = []
+    all_case_rows: list[dict] = []
+    for family_id in V19_FIELD_COHERENCE_IDS:
+        rows, meta = v19_field_coherence_case_rows(family_id)
+        all_case_rows.extend(rows)
+        clean = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+        high = [row for row in clean if row["set"] == "clean-high-rmse"]
+        protected = [row for row in clean if row["set"] == "clean-protected"]
+        canonical_clean = safe_mean(parse_float(row["canonicalRmse"]) for row in clean)
+        v18_clean = safe_mean(parse_float(row["lockedV18Rmse"]) for row in clean)
+        candidate_clean = safe_mean(parse_float(row["fieldCoherenceRmse"]) for row in clean)
+        canonical_high = safe_mean(parse_float(row["canonicalRmse"]) for row in high)
+        v18_high = safe_mean(parse_float(row["lockedV18Rmse"]) for row in high)
+        candidate_high = safe_mean(parse_float(row["fieldCoherenceRmse"]) for row in high)
+        score_rows.append(
+            {
+                "familyId": family_id,
+                "globalScale": meta["globalScale"],
+                "cleanMeanRmse": candidate_clean,
+                "cleanGainVsCanonicalPct": pct_improvement(canonical_clean, candidate_clean),
+                "cleanV18RepairRetentionPct": (canonical_clean - candidate_clean) / (canonical_clean - v18_clean) * 100.0 if abs(canonical_clean - v18_clean) > 1.0e-9 else math.nan,
+                "highMeanRmse": candidate_high,
+                "highGainVsCanonicalPct": pct_improvement(canonical_high, candidate_high),
+                "highV18RepairRetentionPct": (canonical_high - candidate_high) / (canonical_high - v18_high) * 100.0 if abs(canonical_high - v18_high) > 1.0e-9 else math.nan,
+                "protectedMaxRegressionVsV18KmS": max([parse_float(row["sourceMinusV18KmS"], 0.0) for row in protected] or [0.0]),
+                "protectedMeanRegressionVsV18KmS": safe_mean(max(0.0, parse_float(row["sourceMinusV18KmS"], 0.0)) for row in protected),
+                "meanAccelerationShapeRmse": safe_mean(parse_float(row["accelerationShapeRmse"]) for row in clean),
+                "activeHighCount": sum(1 for row in high if parse_float(row["activation"], 0.0) >= 0.5),
+                "activeProtectedCount": sum(1 for row in protected if parse_float(row["activation"], 0.0) >= 0.5),
+                "meanHighFieldCoherence": safe_mean(parse_float(row["fieldCoherence"]) for row in high),
+                "meanProtectedFieldCoherence": safe_mean(parse_float(row["fieldCoherence"]) for row in protected),
+                "weakSystematicsLeakage": 0,
+            }
+        )
+    best = min(
+        score_rows,
+        key=lambda row: (
+            parse_float(row["protectedMaxRegressionVsV18KmS"], math.inf),
+            -parse_float(row["highV18RepairRetentionPct"], -math.inf),
+            parse_float(row["meanAccelerationShapeRmse"], math.inf),
+        ),
+    )
+    if (
+        parse_float(best["protectedMaxRegressionVsV18KmS"], math.inf) <= 3.0
+        and parse_float(best["highV18RepairRetentionPct"], 0.0) >= 45.0
+        and parse_float(best["cleanV18RepairRetentionPct"], 0.0) > 0.0
+    ):
+        verdict = "field-coherence source-law candidate"
+    elif parse_float(best["highV18RepairRetentionPct"], 0.0) >= 30.0:
+        verdict = "field-coherence anatomy only"
+    else:
+        verdict = "current 1D field-coherence variables insufficient"
+    return score_rows, all_case_rows, verdict, best
+
+
+def write_v19_field_coherence_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_field_coherence"
+    score_rows, case_rows, verdict, best = v19_field_coherence_score_rows()
+    best_cases = [row for row in case_rows if row["familyId"] == best["familyId"]]
+    false_rows = sorted(
+        [row for row in best_cases if row["set"] == "clean-protected" and parse_float(row["sourceMinusV18KmS"], 0.0) > 3.0],
+        key=lambda row: parse_float(row["sourceMinusV18KmS"], 0.0),
+        reverse=True,
+    )
+    retained_high_rows = sorted(
+        [row for row in best_cases if row["set"] == "clean-high-rmse" and parse_float(row["v18RepairRetentionPct"], 0.0) >= 50.0],
+        key=lambda row: parse_float(row["v18RepairRetentionPct"], 0.0),
+        reverse=True,
+    )
+    support_shape_rows = []
+    for row in case_rows:
+        for zone in ["inner", "mid", "outer"]:
+            support_shape_rows.append(
+                {
+                    "galaxy": row["galaxy"],
+                    "set": row["set"],
+                    "familyId": row["familyId"],
+                    "zone": zone,
+                    "accelerationBiasCandidateMinusV18": row[f"{zone}AccelerationBias"],
+                    "accelerationShapeRmse": row["accelerationShapeRmse"],
+                    "fieldCoherence": row["fieldCoherence"],
+                    "curvatureResistance": row["curvatureResistance"],
+                }
+            )
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_support_shape.csv", support_shape_rows)
+    write_csv(out_dir / f"{prefix}_false_activation_ledger.csv", false_rows)
+    write_csv(out_dir / f"{prefix}_retained_high_ledger.csv", retained_high_rows)
+    formula = {
+        "candidateId": "mts-v19-field-coherence-v1",
+        "status": verdict,
+        "bestFamily": best,
+        "baseEquation": "curvature-memory-growth-equation",
+        "physicalReading": "motion-field loading is admissible when the smoothed baryonic field is coherent and curvature resistance is low enough",
+        "featureDefinitions": {
+            "gradientCoherence": "fraction of smoothed Vbar^2 radial field with consistent outward gradient, penalized for gradient sign changes",
+            "curvatureResistance": "normalized integral of |dVbar^2/dr| |d2Vbar^2/dr2|, inspired by curvature-motion resistance",
+            "admissibleSmoothness": "1/(1+roughness), with roughness from curvature over gradient scale",
+            "oddKernelBalance": "outer-minus-inner gradient balance mapped to [0,1], a 1D proxy for antisymmetric radial source response",
+        },
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual", "raw RMSE", "NFW parameter", "MOND parameter", "weak/systematics fitting"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    equations = [
+        "# MTS v19 Field-Coherence Equations",
+        "",
+        "This pass treats the v18 support field as the circular-orbit limit of a motion-field response. It tests whether the source equation needs an admissibility term built from coherent baryonic field geometry.",
+        "",
+        "Let `B(r)=V_bar(r)^2` and `B_L(r)` be an exponentially smoothed baryonic field.",
+        "",
+        "`G(r)=dB_L/dr`",
+        "",
+        "`C(r)=d^2B_L/dr^2`",
+        "",
+        "`R_curv = norm int |G(r)| |C(r)| dr`",
+        "",
+        "`A_source = A_route * C_field / (1 + lambda R_curv)`",
+        "",
+        "The tested support remains the curvature-memory source equation multiplied by `A_source`; no v18/browser law is changed.",
+    ]
+    (out_dir / f"{prefix}_equations.md").write_text("\n".join(equations) + "\n", encoding="utf-8")
+    report = [
+        "# MTS v19 Field-Coherence Source Test",
+        "",
+        "This is a direct test of the Motion-TimeSpace interpretation: the support term is not treated as a fitted halo or residual repair, but as a motion-field loading response controlled by whether the baryonic radial field is coherent enough to source it.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Best family: `{best['familyId']}`.",
+        f"High v18 repair retention: `{fmt(best['highV18RepairRetentionPct'])}%`.",
+        f"Clean v18 repair retention: `{fmt(best['cleanV18RepairRetentionPct'])}%`.",
+        f"Protected max regression vs v18: `{fmt(best['protectedMaxRegressionVsV18KmS'])}` km/s.",
+        f"Mean high field coherence: `{fmt(best['meanHighFieldCoherence'])}`.",
+        f"Mean protected field coherence: `{fmt(best['meanProtectedFieldCoherence'])}`.",
+        "",
+        "## What This Means",
+        "",
+        "The tested variables are all pre-residual curve/source variables: smoothed baryonic-field gradients, curvature resistance, admissible smoothness, and inner/outer radial balance. If this still cannot protect clean lookalikes while retaining high-RMSE repairs, the missing physical condition is probably not present in the one-dimensional SPARC mass-model curve alone.",
+        "",
+        verdict,
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-field-coherence-v1",
+        "verdict": verdict,
+        "bestFamily": best,
+        "falseActivationCount": len(false_rows),
+        "retainedHighCount": len(retained_high_rows),
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "weakSystematicsLeakage": 0,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_equations.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_support_shape.csv",
+            f"{prefix}_false_activation_ledger.csv",
+            f"{prefix}_retained_high_ledger.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19fieldcoherence(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_FIELD_COHERENCE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_field_coherence_artifacts(out_dir)
+    best = capsule["bestFamily"]
+    print("MTS v19 field-coherence source test")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['familyId']}",
+                f"high_retention={fmt(best['highV18RepairRetentionPct'])}%",
+                f"clean_retention={fmt(best['cleanV18RepairRetentionPct'])}%",
+                f"protected_reg={fmt(best['protectedMaxRegressionVsV18KmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v19 field-coherence source test to {out_dir.resolve()}")
+
+
+V19_DISTRIBUTED_FLOW_IDS = [
+    "distributed-source-entropy",
+    "local-pair-dominance-barrier",
+    "two-mode-distributed-flow",
+    "distributed-coherence-composite",
+]
+
+
+def v19_distributed_flow_features(curve: dict) -> dict:
+    radii = [max(1.0e-9, parse_float(point.get("r"), 0.0)) for point in curve["points"]]
+    if len(radii) < 4:
+        return {
+            "sourceEntropy": 0.0,
+            "sourceEffectiveFraction": 0.0,
+            "localPairDominance": 1.0,
+            "distributedFlow": 0.0,
+            "twoModeCapture": 0.0,
+            "radialGapRegularity": 0.0,
+            "minGapOverMeanGap": 0.0,
+            "sourceGini": 1.0,
+        }
+    state = v19_theory_kernel_state(curve)
+    r_out = max(1.0e-9, curve.get("rOut", radii[-1]))
+    smooth_len = max(0.10 * r_out, 0.14 * max(1.0e-9, state["lExact"]), 0.12 * parse_float(curve.get("h"), 1.0))
+    vbar2 = [max(0.0, parse_float(point.get("bar2"), 0.0)) for point in curve["points"]]
+    smooth = v19_source_smooth(vbar2, radii, smooth_len)
+    grad_abs = [abs(value) for value in v19_first_derivative(smooth, radii)]
+    curv_abs = [abs(value) for value in v19_source_second_derivative(smooth, radii)]
+    grad_scale = max(grad_abs or [1.0])
+    curv_scale = max(curv_abs or [1.0])
+    source = [
+        max(0.0, 0.62 * (g / (grad_scale + 1.0e-9)) + 0.38 * (c / (curv_scale + 1.0e-9)))
+        for g, c in zip(grad_abs, curv_abs)
+    ]
+    total = sum(source)
+    if total <= 1.0e-12:
+        weights = [1.0 / len(source) for _ in source]
+    else:
+        weights = [value / total for value in source]
+    entropy = -sum(weight * math.log(max(weight, 1.0e-12)) for weight in weights) / math.log(len(weights))
+    herfindahl = sum(weight * weight for weight in weights)
+    effective_fraction = clamp(1.0 / (len(weights) * max(herfindahl, 1.0e-12)), 0.0, 1.0)
+    local_pair_dominance = max(weights) if weights else 1.0
+    sorted_weights = sorted(weights)
+    n = len(sorted_weights)
+    gini = 0.0
+    if n > 1 and sum(sorted_weights) > 0:
+        gini = (2.0 * sum((index + 1) * value for index, value in enumerate(sorted_weights)) / (n * sum(sorted_weights))) - (n + 1.0) / n
+    gaps = [max(1.0e-9, right - left) for left, right in zip(radii, radii[1:])]
+    mean_gap = safe_mean(gaps) or 1.0
+    min_gap_over_mean = min(gaps or [mean_gap]) / mean_gap
+    radial_gap_regularity = clamp(min_gap_over_mean / 0.28, 0.0, 1.0)
+    x_values = [clamp(parse_float(point.get("x"), 0.0), 0.0, 1.0) for point in curve["points"]]
+    mode1 = [1.0 - math.exp(-3.0 * x) for x in x_values]
+    mode2 = [x * (1.0 - x) for x in x_values]
+    def _capture(basis: list[float]) -> float:
+        num = sum(weight * value for weight, value in zip(weights, basis))
+        den = math.sqrt(sum(weight * weight for weight in weights) * sum(value * value for value in basis)) + 1.0e-12
+        return clamp(abs(num) / den, 0.0, 1.0)
+    two_mode_capture = clamp(0.55 * _capture(mode1) + 0.45 * _capture(mode2), 0.0, 1.0)
+    distributed_flow = clamp(
+        0.42 * entropy
+        + 0.24 * effective_fraction
+        + 0.18 * (1.0 - clamp(local_pair_dominance / 0.36, 0.0, 1.0))
+        + 0.10 * two_mode_capture
+        + 0.06 * radial_gap_regularity,
+        0.0,
+        1.0,
+    )
+    return {
+        "sourceEntropy": entropy,
+        "sourceEffectiveFraction": effective_fraction,
+        "localPairDominance": local_pair_dominance,
+        "distributedFlow": distributed_flow,
+        "twoModeCapture": two_mode_capture,
+        "radialGapRegularity": radial_gap_regularity,
+        "minGapOverMeanGap": min_gap_over_mean,
+        "sourceGini": clamp(gini, 0.0, 1.0),
+    }
+
+
+def v19_distributed_flow_activation(curve: dict, family_id: str) -> tuple[float, dict]:
+    flow = v19_distributed_flow_features(curve)
+    coherence = v19_field_coherence_features(curve)
+    local = v19_admissibility_features(curve)
+    route = curve.get("lockedModelRoute", "")
+    route_loading = clamp(
+        0.36 * clamp(local["memoryLoad"] / 6.0, 0.0, 1.0)
+        + 0.24 * clamp(local["uOut"] / 0.45, 0.0, 1.0)
+        + 0.20 * clamp(local["lGapOverH"] / 1.35, 0.0, 1.0)
+        + 0.20 * (1.0 if route == "low-load" else 0.62),
+        0.0,
+        1.0,
+    )
+    if family_id == "distributed-source-entropy":
+        activation = route_loading * flow["sourceEntropy"] * flow["sourceEffectiveFraction"]
+    elif family_id == "local-pair-dominance-barrier":
+        barrier = 1.0 / (1.0 + 4.0 * max(0.0, flow["localPairDominance"] - 0.22))
+        activation = route_loading * flow["distributedFlow"] * barrier
+    elif family_id == "two-mode-distributed-flow":
+        activation = route_loading * flow["twoModeCapture"] * flow["distributedFlow"]
+    elif family_id == "distributed-coherence-composite":
+        activation = route_loading * flow["distributedFlow"] * clamp(0.45 + 0.55 * coherence["fieldCoherence"], 0.0, 1.0)
+    else:
+        raise ValueError(f"Unknown v19 distributed-flow family: {family_id}")
+    return clamp(activation, 0.0, 1.0), {**local, **coherence, **flow, "routeLoading": route_loading}
+
+
+def v19_distributed_flow_scale(curves: list[dict], weak_names: set[str], supports_by_name: dict[str, list[float]], family_id: str) -> float:
+    numerator = 0.0
+    denominator = 0.0
+    for curve in curves:
+        if curve["name"] in weak_names:
+            continue
+        target = supports_by_name.get(curve["name"], [])
+        if len(target) != len(curve["points"]):
+            continue
+        raw, _ = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        activation, _ = v19_distributed_flow_activation(curve, family_id)
+        for raw_value, target_value in zip(raw, target):
+            candidate = max(0.0, raw_value) * activation
+            numerator += candidate * max(0.0, target_value)
+            denominator += candidate * candidate
+    return numerator / denominator if denominator > 1.0e-12 else 0.0
+
+
+def v19_distributed_flow_case_rows(family_id: str) -> tuple[list[dict], dict]:
+    context = observed_state_candidate_context()
+    curves = context["curves"]
+    weak_names = set(context["weakNames"])
+    high_names = set(context["highNames"])
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    scale = v19_distributed_flow_scale(curves, weak_names, supports_by_name, family_id)
+    rows: list[dict] = []
+    for curve in curves:
+        target = supports_by_name.get(curve["name"], [])
+        if len(target) != len(curve["points"]):
+            continue
+        raw, _ = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        activation, features = v19_distributed_flow_activation(curve, family_id)
+        supports = [max(0.0, scale * activation * value) for value in raw]
+        score = v18_competitor_support_score(curve, supports)
+        target_score = v18_competitor_support_score(curve, target)
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        target_gain = pct_improvement(canonical["rmse"], target_score["rmse"])
+        candidate_gain = pct_improvement(canonical["rmse"], score["rmse"])
+        set_name = "weak-systematics-excluded" if curve["name"] in weak_names else ("clean-high-rmse" if curve["name"] in high_names else "clean-protected")
+        rows.append(
+            {
+                "galaxy": curve["name"],
+                "set": set_name,
+                "familyId": family_id,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "activation": activation,
+                "globalScale": scale,
+                "canonicalRmse": canonical["rmse"],
+                "lockedV18Rmse": target_score["rmse"],
+                "distributedFlowRmse": score["rmse"],
+                "sourceMinusV18KmS": score["rmse"] - target_score["rmse"],
+                "gainVsCanonicalPct": candidate_gain,
+                "v18RepairRetentionPct": candidate_gain / target_gain * 100.0 if abs(target_gain) > 1.0e-9 else math.nan,
+                **v19_source_acceleration_shape_metrics(curve, target, supports),
+                **features,
+            }
+        )
+    return rows, {"globalScale": scale}
+
+
+def v19_distributed_flow_score_rows() -> tuple[list[dict], list[dict], str, dict]:
+    score_rows: list[dict] = []
+    all_case_rows: list[dict] = []
+    for family_id in V19_DISTRIBUTED_FLOW_IDS:
+        rows, meta = v19_distributed_flow_case_rows(family_id)
+        all_case_rows.extend(rows)
+        clean = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+        high = [row for row in clean if row["set"] == "clean-high-rmse"]
+        protected = [row for row in clean if row["set"] == "clean-protected"]
+        canonical_clean = safe_mean(parse_float(row["canonicalRmse"]) for row in clean)
+        v18_clean = safe_mean(parse_float(row["lockedV18Rmse"]) for row in clean)
+        candidate_clean = safe_mean(parse_float(row["distributedFlowRmse"]) for row in clean)
+        canonical_high = safe_mean(parse_float(row["canonicalRmse"]) for row in high)
+        v18_high = safe_mean(parse_float(row["lockedV18Rmse"]) for row in high)
+        candidate_high = safe_mean(parse_float(row["distributedFlowRmse"]) for row in high)
+        score_rows.append(
+            {
+                "familyId": family_id,
+                "globalScale": meta["globalScale"],
+                "cleanMeanRmse": candidate_clean,
+                "cleanGainVsCanonicalPct": pct_improvement(canonical_clean, candidate_clean),
+                "cleanV18RepairRetentionPct": (canonical_clean - candidate_clean) / (canonical_clean - v18_clean) * 100.0 if abs(canonical_clean - v18_clean) > 1.0e-9 else math.nan,
+                "highMeanRmse": candidate_high,
+                "highGainVsCanonicalPct": pct_improvement(canonical_high, candidate_high),
+                "highV18RepairRetentionPct": (canonical_high - candidate_high) / (canonical_high - v18_high) * 100.0 if abs(canonical_high - v18_high) > 1.0e-9 else math.nan,
+                "protectedMaxRegressionVsV18KmS": max([parse_float(row["sourceMinusV18KmS"], 0.0) for row in protected] or [0.0]),
+                "protectedMeanRegressionVsV18KmS": safe_mean(max(0.0, parse_float(row["sourceMinusV18KmS"], 0.0)) for row in protected),
+                "meanAccelerationShapeRmse": safe_mean(parse_float(row["accelerationShapeRmse"]) for row in clean),
+                "meanHighDistributedFlow": safe_mean(parse_float(row["distributedFlow"]) for row in high),
+                "meanProtectedDistributedFlow": safe_mean(parse_float(row["distributedFlow"]) for row in protected),
+                "activeHighCount": sum(1 for row in high if parse_float(row["activation"], 0.0) >= 0.5),
+                "activeProtectedCount": sum(1 for row in protected if parse_float(row["activation"], 0.0) >= 0.5),
+                "weakSystematicsLeakage": 0,
+            }
+        )
+    best = min(
+        score_rows,
+        key=lambda row: (
+            parse_float(row["protectedMaxRegressionVsV18KmS"], math.inf),
+            -parse_float(row["highV18RepairRetentionPct"], -math.inf),
+            parse_float(row["meanAccelerationShapeRmse"], math.inf),
+        ),
+    )
+    if (
+        parse_float(best["protectedMaxRegressionVsV18KmS"], math.inf) <= 3.0
+        and parse_float(best["highV18RepairRetentionPct"], 0.0) >= 45.0
+        and parse_float(best["cleanV18RepairRetentionPct"], 0.0) > 0.0
+    ):
+        verdict = "distributed-flow source-law candidate"
+    elif parse_float(best["highV18RepairRetentionPct"], 0.0) >= 30.0:
+        verdict = "distributed-flow anatomy only"
+    else:
+        verdict = "current distributed-flow variables insufficient"
+    return score_rows, all_case_rows, verdict, best
+
+
+def write_v19_distributed_flow_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_distributed_flow"
+    score_rows, case_rows, verdict, best = v19_distributed_flow_score_rows()
+    best_cases = [row for row in case_rows if row["familyId"] == best["familyId"]]
+    false_rows = sorted(
+        [row for row in best_cases if row["set"] == "clean-protected" and parse_float(row["sourceMinusV18KmS"], 0.0) > 3.0],
+        key=lambda row: parse_float(row["sourceMinusV18KmS"], 0.0),
+        reverse=True,
+    )
+    retained_high_rows = sorted(
+        [row for row in best_cases if row["set"] == "clean-high-rmse" and parse_float(row["v18RepairRetentionPct"], 0.0) >= 50.0],
+        key=lambda row: parse_float(row["v18RepairRetentionPct"], 0.0),
+        reverse=True,
+    )
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_false_activation_ledger.csv", false_rows)
+    write_csv(out_dir / f"{prefix}_retained_high_ledger.csv", retained_high_rows)
+    formula = {
+        "candidateId": "mts-v19-distributed-flow-v1",
+        "status": verdict,
+        "bestFamily": best,
+        "baseEquation": "curvature-memory-growth-equation",
+        "physicalReading": "motion-field source loading may require a distributed field regime rather than a local feature dominated regime",
+        "sourceFromUserTheoryNotes": "Riemann-flow notes distinguish healthy distributed geometry from local-pair dominated weak windows; this mode tests the analogous radial source concentration barrier for galaxies.",
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual", "raw RMSE", "NFW parameter", "MOND parameter", "weak/systematics fitting"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 Distributed-Flow Source Test",
+        "",
+        "This mode imports the distributed-versus-local-pair lesson from the Motion-TimeSpace zero-flow notes into the galaxy source problem. It asks whether the curvature-memory source should load only when the baryonic radial field is distributed rather than dominated by one local feature.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Best family: `{best['familyId']}`.",
+        f"High v18 repair retention: `{fmt(best['highV18RepairRetentionPct'])}%`.",
+        f"Clean v18 repair retention: `{fmt(best['cleanV18RepairRetentionPct'])}%`.",
+        f"Protected max regression vs v18: `{fmt(best['protectedMaxRegressionVsV18KmS'])}` km/s.",
+        f"Mean high distributed flow: `{fmt(best['meanHighDistributedFlow'])}`.",
+        f"Mean protected distributed flow: `{fmt(best['meanProtectedDistributedFlow'])}`.",
+        "",
+        "## Interpretation",
+        "",
+        "The result is not a v18/browser change. It is a falsification pass for a physical admissibility idea: whether source loading is allowed by distributed motion-field geometry rather than local radial domination.",
+        "",
+        verdict,
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-distributed-flow-v1",
+        "verdict": verdict,
+        "bestFamily": best,
+        "falseActivationCount": len(false_rows),
+        "retainedHighCount": len(retained_high_rows),
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "weakSystematicsLeakage": 0,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_false_activation_ledger.csv",
+            f"{prefix}_retained_high_ledger.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19distributedflow(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_DISTRIBUTED_FLOW_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_distributed_flow_artifacts(out_dir)
+    best = capsule["bestFamily"]
+    print("MTS v19 distributed-flow source test")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['familyId']}",
+                f"high_retention={fmt(best['highV18RepairRetentionPct'])}%",
+                f"clean_retention={fmt(best['cleanV18RepairRetentionPct'])}%",
+                f"protected_reg={fmt(best['protectedMaxRegressionVsV18KmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v19 distributed-flow source test to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -103807,6 +104505,10 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19sourceprovenance",
             "v19sourceregime",
             "observedstatev19sourceregime",
+            "v19fieldcoherence",
+            "observedstatev19fieldcoherence",
+            "v19distributedflow",
+            "observedstatev19distributedflow",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -104226,6 +104928,10 @@ def main() -> None:
         cmd_v19sourceprovenance(args)
     elif args.mode in {"v19sourceregime", "observedstatev19sourceregime"}:
         cmd_v19sourceregime(args)
+    elif args.mode in {"v19fieldcoherence", "observedstatev19fieldcoherence"}:
+        cmd_v19fieldcoherence(args)
+    elif args.mode in {"v19distributedflow", "observedstatev19distributedflow"}:
+        cmd_v19distributedflow(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
