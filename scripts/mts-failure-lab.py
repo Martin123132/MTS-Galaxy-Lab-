@@ -245,6 +245,8 @@ DEFAULT_OBSERVED_STATE_V18_BULGE_COUPLING_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT /
 DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_CLOSURE_OUT = OUTPUT_PACK_ROOT / "mts-v18-48-ml-provenance-closure-v1"
 DEFAULT_OBSERVED_STATE_V18_NON_ML_GAP_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v18-49-non-ml-gap-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_NON_ML_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v18-50-non-ml-provenance-v1"
+DEFAULT_OBSERVED_STATE_V18_SOURCE_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v18-51-source-provenance-v1"
+DEFAULT_OBSERVED_STATE_V18_SOURCE_PROVENANCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-source-provenance-v1")
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -83055,6 +83057,262 @@ def cmd_v18nonmlprovenance(args: argparse.Namespace) -> None:
     print(f"Wrote v18.50 non-M/L provenance pass to {out_dir.resolve()}")
 
 
+V18_51_SOURCE_KEYWORDS = [
+    "inclination", "distance", "uncertainty", "warp", "bar", "asymmetry", "non-circular", "noncircular",
+    "beam", "resolution", "tilted-ring", "tilted ring", "quality", "Hubble flow", "Virgo", "HI", "H I",
+    "Fabry-Perot", "long-slit", "synthesis", "rotation curve",
+]
+
+
+def v18_51_reference_records(case_rows: list[dict]) -> list[dict]:
+    refs: dict[str, dict] = {}
+    for row in case_rows:
+        ref_texts = parse_reference_texts({"spArcReferences": row.get("rotationCurveReferences", ""), "spArcReferenceCodes": row.get("rotationCurveRefCodes", "")})
+        for code, text in ref_texts.items():
+            item = refs.setdefault(
+                code,
+                {
+                    "referenceCode": code,
+                    "referenceText": text,
+                    "galaxies": set(),
+                    "provenanceVerdicts": set(),
+                    "crossrefQueryUrl": reference_crossref_query_url(text or code),
+                    "adsSearchUrl": reference_ads_search_url(text or code),
+                    "arxivSearchUrl": reference_arxiv_search_url(text or code),
+                },
+            )
+            item["galaxies"].add(row["galaxy"])
+            item["provenanceVerdicts"].add(row["provenanceVerdict"])
+    output: list[dict] = []
+    for row in refs.values():
+        output.append(
+            {
+                **row,
+                "galaxies": "; ".join(sorted(row["galaxies"])),
+                "provenanceVerdicts": "; ".join(sorted(row["provenanceVerdicts"])),
+            }
+        )
+    output.sort(key=lambda row: row["referenceCode"])
+    return output
+
+
+def v18_51_source_targets(reference_rows: list[dict], source_cache: Path, offline: bool) -> tuple[list[dict], list[dict]]:
+    targets: list[dict] = []
+    crossref_rows: list[dict] = []
+    for ref in reference_rows:
+        code = ref["referenceCode"]
+        crossref_path = source_cache / "crossref-json" / f"{safe_file_stem(code)}.json"
+        fetch = download_small_metadata(ref["crossrefQueryUrl"], crossref_path, offline)
+        metadata = parse_crossref_cache(crossref_path)
+        crossref_rows.append(
+            {
+                "referenceCode": code,
+                "referenceText": ref["referenceText"],
+                "crossrefQueryUrl": ref["crossrefQueryUrl"],
+                "cachePath": str(crossref_path),
+                "cacheStatus": "available" if crossref_path.exists() else "missing",
+                "downloadedThisRun": False,
+                "fetchStatus": "available" if crossref_path.exists() else fetch.get("fetchStatus", ""),
+                "doi": metadata.get("doi", ""),
+                "metadataTitle": metadata.get("metadataTitle", ""),
+                "metadataUrl": metadata.get("metadataUrl", ""),
+                "publicationYear": metadata.get("publicationYear", ""),
+                "sha256": file_sha256(crossref_path) if crossref_path.exists() else "",
+            }
+        )
+        for role, url, suffix, max_bytes in [
+            ("ads-search-html", ref["adsSearchUrl"], "html", V21_SOURCE_MAX_HTML_BYTES),
+            ("arxiv-search-html", ref["arxivSearchUrl"], "html", V21_SOURCE_MAX_HTML_BYTES),
+        ]:
+            targets.append(
+                {
+                    "referenceCode": code,
+                    "referenceText": ref["referenceText"],
+                    "sourceRole": role,
+                    "url": url,
+                    "cachePath": str(source_cache / role / f"{safe_file_stem(code)}.{suffix}"),
+                    "maxBytes": max_bytes,
+                    "largeDownloadAllowed": False,
+                }
+            )
+        if metadata.get("metadataUrl"):
+            targets.append(
+                {
+                    "referenceCode": code,
+                    "referenceText": ref["referenceText"],
+                    "sourceRole": "doi-landing-html",
+                    "url": metadata["metadataUrl"],
+                    "cachePath": str(source_cache / "doi-landing-html" / f"{safe_file_stem(code)}.html"),
+                    "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+                    "largeDownloadAllowed": False,
+                }
+            )
+    return targets, crossref_rows
+
+
+def v18_51_fetch_inventory(target_rows: list[dict], offline: bool) -> list[dict]:
+    rows: list[dict] = []
+    for target in target_rows:
+        path = Path(target["cachePath"])
+        existed = path.exists()
+        v21_source_download(target["url"], path, int(target["maxBytes"]), offline)
+        exists = path.exists()
+        rows.append(
+            {
+                **target,
+                "cacheStatus": "available" if exists else "missing",
+                "downloadedThisRun": False,
+                "sizeBytes": path.stat().st_size if exists else "",
+                "sha256": file_sha256(path) if exists else "",
+            }
+        )
+    return rows
+
+
+def v18_51_keyword_snippets(text: str, galaxy: str) -> tuple[str, str, bool]:
+    if not text:
+        return "", "", False
+    variants = v21_source_name_variants(galaxy)
+    lower = text.lower()
+    snippets: list[str] = []
+    direct = False
+    for variant in variants:
+        idx = lower.find(variant.lower())
+        while idx >= 0 and len(snippets) < 6:
+            direct = True
+            start = max(0, idx - 500)
+            end = min(len(text), idx + 900)
+            snippet = re.sub(r"\s+", " ", text[start:end]).strip()
+            if any(keyword.lower() in snippet.lower() for keyword in V18_51_SOURCE_KEYWORDS):
+                snippets.append(snippet[:1000])
+            idx = lower.find(variant.lower(), idx + max(1, len(variant)))
+    source_wide_hits = v21_source_keyword_hit(text, V18_51_SOURCE_KEYWORDS)
+    return source_wide_hits, " || ".join(snippets), direct
+
+
+def write_v18_source_provenance_artifacts(out_dir: Path, source_cache: Path, offline: bool) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source_cache.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_51_source_provenance"
+    v50_dir = DEFAULT_OBSERVED_STATE_V18_NON_ML_PROVENANCE_OUT
+    v50_path = v50_dir / "mts_v18_50_non_ml_provenance_case_ledger.csv"
+    if not v50_path.exists():
+        write_v18_non_ml_provenance_artifacts(v50_dir)
+    case_rows = read_csv_rows(v50_path)
+    priority_cases = [row for row in case_rows if row["provenanceVerdict"] in {"provenance-first limitation", "mixed provenance and weak state signal"}]
+    reference_rows = v18_51_reference_records(priority_cases)
+    target_rows, crossref_rows = v18_51_source_targets(reference_rows, source_cache, offline)
+    fetch_rows = v18_51_fetch_inventory(target_rows, offline)
+    fetch_by_code: dict[str, list[dict]] = {}
+    for row in fetch_rows:
+        if row["cacheStatus"] == "available":
+            fetch_by_code.setdefault(row["referenceCode"], []).append(row)
+    evidence_rows: list[dict] = []
+    for case in priority_cases:
+        ref_texts = parse_reference_texts({"spArcReferences": case.get("rotationCurveReferences", ""), "spArcReferenceCodes": case.get("rotationCurveRefCodes", "")})
+        for code in ref_texts:
+            for source in fetch_by_code.get(code, []):
+                text, parser_name = v21_source_text(Path(source["cachePath"]), source["sourceRole"], True)
+                hits, snippets, direct = v18_51_keyword_snippets(text, case["galaxy"])
+                evidence_rows.append(
+                    {
+                        "galaxy": case["galaxy"],
+                        "referenceCode": code,
+                        "sourceRole": source["sourceRole"],
+                        "url": source["url"],
+                        "cachePath": source["cachePath"],
+                        "parser": parser_name,
+                        "caseSpecificMention": direct,
+                        "sourceWideKeywordHits": hits,
+                        "caseSpecificSnippet": snippets,
+                        "supportsProvenanceFlag": bool(snippets) or bool(hits),
+                    }
+                )
+    case_verdicts: list[dict] = []
+    by_case: dict[str, list[dict]] = {}
+    for row in evidence_rows:
+        by_case.setdefault(row["galaxy"], []).append(row)
+    for case in priority_cases:
+        evidence = by_case.get(case["galaxy"], [])
+        direct_rows = [row for row in evidence if row["caseSpecificMention"] and row["caseSpecificSnippet"]]
+        source_rows = [row for row in evidence if row["sourceWideKeywordHits"]]
+        if direct_rows:
+            verdict = "direct source-paper provenance evidence found"
+            next_action = "use direct source evidence to classify this as provenance-limited before any transport retuning"
+        elif source_rows:
+            verdict = "source-wide provenance context found"
+            next_action = "treat as likely provenance-limited but keep case-specific paper reading on the queue"
+        else:
+            verdict = "source-paper evidence still missing"
+            next_action = "manual source read or targeted PDF/fulltext fetch needed"
+        case_verdicts.append(
+            {
+                "galaxy": case["galaxy"],
+                "v18_50Verdict": case["provenanceVerdict"],
+                "provenanceFlags": case["provenanceFlags"],
+                "referenceCodes": case["rotationCurveRefCodes"],
+                "directEvidenceRows": len(direct_rows),
+                "sourceWideEvidenceRows": len(source_rows),
+                "sourceVerdict": verdict,
+                "nextAction": next_action,
+            }
+        )
+    verdict_counts: dict[str, int] = {}
+    for row in case_verdicts:
+        verdict_counts[row["sourceVerdict"]] = verdict_counts.get(row["sourceVerdict"], 0) + 1
+    if verdict_counts.get("direct source-paper provenance evidence found", 0) >= 2:
+        verdict = "source provenance supports provenance boundary"
+    elif verdict_counts.get("source-wide provenance context found", 0) >= 2:
+        verdict = "source provenance context only"
+    else:
+        verdict = "source provenance unresolved"
+    score_rows = [
+        {"metric": "priorityCaseCount", "value": len(priority_cases)},
+        {"metric": "referenceCount", "value": len(reference_rows)},
+        {"metric": "crossrefAvailableCount", "value": sum(1 for row in crossref_rows if row["cacheStatus"] == "available")},
+        {"metric": "sourcePageAvailableCount", "value": sum(1 for row in fetch_rows if row["cacheStatus"] == "available")},
+        {"metric": "directEvidenceCaseCount", "value": verdict_counts.get("direct source-paper provenance evidence found", 0)},
+        {"metric": "sourceWideContextCaseCount", "value": verdict_counts.get("source-wide provenance context found", 0)},
+        {"metric": "largeDownloadsAllowed", "value": False},
+        {"metric": "lawChanged", "value": False},
+    ]
+    write_csv(out_dir / f"{prefix}_reference_targets.csv", reference_rows)
+    write_csv(out_dir / f"{prefix}_crossref_inventory.csv", crossref_rows)
+    write_csv(out_dir / f"{prefix}_fetch_inventory.csv", fetch_rows)
+    write_csv(out_dir / f"{prefix}_evidence_table.csv", evidence_rows)
+    write_csv(out_dir / f"{prefix}_case_verdicts.csv", case_verdicts)
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean({"analysisName": "mts-v18-51-source-provenance-v1", "verdict": verdict, "verdictCounts": verdict_counts, "lawChanged": False, "browserChanged": False}), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.51 Source-Paper Provenance",
+        "",
+        "This pass fetches bounded source metadata/search/landing pages for the v18.50 provenance-first cases. It does not score or change MTS.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Priority cases: `{len(priority_cases)}`.",
+        f"- Reference codes: `{len(reference_rows)}`.",
+        f"- Source pages available: `{sum(1 for row in fetch_rows if row['cacheStatus'] == 'available')}`.",
+        "",
+        "| Galaxy | flags | refs | direct evidence | source-wide context | verdict |",
+        "| --- | --- | --- | ---: | ---: | --- |",
+    ]
+    for row in case_verdicts:
+        report.append(f"| {row['galaxy']} | {row['provenanceFlags']} | {row['referenceCodes']} | {row['directEvidenceRows']} | {row['sourceWideEvidenceRows']} | {row['sourceVerdict']} |")
+    report.extend(["", verdict])
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    return {"verdict": verdict, "verdictCounts": verdict_counts}
+
+
+def cmd_v18sourceprovenance(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_SOURCE_PROVENANCE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_OBSERVED_STATE_V18_SOURCE_PROVENANCE_CACHE
+    capsule = write_v18_source_provenance_artifacts(out_dir, source_cache, args.offline)
+    print("MTS v18.51 source-paper provenance")
+    print(f"verdict={capsule['verdict']}")
+    print("\t".join(f"{key}={value}" for key, value in sorted(capsule["verdictCounts"].items())))
+    print(f"Wrote v18.51 source provenance to {out_dir.resolve()}")
+
+
 V18_44_UGC08699_PRIMARY_TARGET = "UGC08699"
 V18_44_ML_SENSITIVE_EVAL_TARGETS = {
     "UGC08699",
@@ -101402,6 +101660,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nonmlgapcandidate",
             "v18nonmlprovenance",
             "observedstatev18nonmlprovenance",
+            "v18sourceprovenance",
+            "observedstatev18sourceprovenance",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -101807,6 +102067,8 @@ def main() -> None:
         cmd_v18nonmlgapcandidate(args)
     elif args.mode in {"v18nonmlprovenance", "observedstatev18nonmlprovenance"}:
         cmd_v18nonmlprovenance(args)
+    elif args.mode in {"v18sourceprovenance", "observedstatev18sourceprovenance"}:
+        cmd_v18sourceprovenance(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
