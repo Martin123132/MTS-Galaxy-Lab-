@@ -281,6 +281,8 @@ DEFAULT_V19_BROAD_SOURCE_BOUNDARY_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-v19-broad-
 DEFAULT_V19_MISSING_BOUNDARY_STATE_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-v19-missing-boundary-state-audit-v1"
 DEFAULT_V19_CASE_TWO_D_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-case-2d-provenance-v1"
 DEFAULT_V19_CASE_TWO_D_PROVENANCE_CACHE = DEFAULT_V19_COUNTER_EVIDENCE_CACHE
+DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-ugc05253-radial-provenance-v1"
+DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ugc05253-radial-provenance-v1")
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -112146,6 +112148,254 @@ def cmd_v19case2dprovenance(args: argparse.Namespace) -> None:
     print(f"Wrote v19 case-specific provenance to {out_dir.resolve()}")
 
 
+V19_UGC05253_RADIAL_SOURCES = [
+    {
+        "sourceId": "astro-ph-0701731",
+        "title": "The mass distribution in early-type disk galaxies",
+        "url": "https://arxiv.org/e-print/astro-ph/0701731",
+        "cacheFile": "astro-ph-0701731-source",
+        "primaryTex": "rotcurs.astro-ph.tex",
+        "maxBytes": 5_000_000,
+        "reason": "Noordermeer et al. 2007 source bundle; contains UGC05253/NGC2985 notes, tilted-ring classification, and residual-field discussion.",
+    }
+]
+
+
+def v19_ugc05253_radial_fetch_sources(source_cache: Path, offline: bool) -> tuple[list[dict], dict[str, Path]]:
+    source_cache.mkdir(parents=True, exist_ok=True)
+    rows: list[dict] = []
+    tex_paths: dict[str, Path] = {}
+    for source in V19_UGC05253_RADIAL_SOURCES:
+        archive_path = source_cache / source["cacheFile"]
+        fetch = v19_external_2d_fetch(source["url"], archive_path, offline, int(source["maxBytes"]))
+        extract_dir = source_cache / f"{source['cacheFile']}-extract"
+        extract = v19_ngc3198_numeric_boundary_safe_extract(archive_path, extract_dir) if fetch["cacheStatus"] == "available" else {"extractStatus": "unavailable", "extractDir": str(extract_dir), "memberCount": 0, "error": fetch.get("error", "")}
+        tex_path = extract_dir / source["primaryTex"]
+        if tex_path.exists():
+            tex_paths[source["sourceId"]] = tex_path
+        rows.append(
+            {
+                "sourceId": source["sourceId"],
+                "title": source["title"],
+                "url": source["url"],
+                "cachePath": str(archive_path),
+                "cacheStatus": fetch["cacheStatus"],
+                "bytes": fetch.get("bytes", ""),
+                "sha256": fetch.get("sha256", ""),
+                "extractStatus": extract["extractStatus"],
+                "extractDir": extract["extractDir"],
+                "memberCount": extract["memberCount"],
+                "primaryTex": str(tex_path),
+                "primaryTexFound": tex_path.exists(),
+                "reason": source["reason"],
+                "largeDownloadAllowed": False,
+                "error": fetch.get("error", "") or extract.get("error", ""),
+            }
+        )
+    case_path = DEFAULT_V19_CASE_TWO_D_PROVENANCE_OUT / "mts_v19_case_2d_provenance_case_facts.csv"
+    if not case_path.exists():
+        write_v19_case_two_d_provenance_artifacts(DEFAULT_V19_CASE_TWO_D_PROVENANCE_OUT, DEFAULT_V19_CASE_TWO_D_PROVENANCE_CACHE)
+    if case_path.exists():
+        rows.append(
+            {
+                "sourceId": "v19-case-2d-provenance",
+                "title": "Local v19 case-specific 2D provenance facts",
+                "url": "",
+                "cachePath": str(case_path),
+                "cacheStatus": "available",
+                "bytes": case_path.stat().st_size,
+                "sha256": file_sha256(case_path),
+                "extractStatus": "",
+                "extractDir": "",
+                "memberCount": "",
+                "primaryTex": "",
+                "primaryTexFound": "",
+                "reason": "local state/provenance bridge for UGC05253, UGC07089, and UGC03205",
+                "largeDownloadAllowed": False,
+                "error": "",
+            }
+        )
+    return rows, tex_paths
+
+
+def v19_ugc05253_add_text_evidence(rows: list[dict], source_path: Path, needle: str, quantity: str, value: float | str, unit: str, interpretation: str, before: int = 2, after: int = 3) -> None:
+    line, snippet = v19_text_line_snippet(source_path, needle, before=before, after=after)
+    v19_add_extracted_value(
+        rows,
+        galaxy="UGC05253",
+        evidence_bucket="source-specific radial/provenance",
+        quantity=quantity,
+        value=value,
+        unit=unit,
+        source_id="astro-ph-0701731",
+        source_path=source_path,
+        line=line,
+        snippet=snippet,
+        interpretation=interpretation,
+        usable_as_formula_input=False,
+    )
+
+
+def v19_ugc05253_radial_extracted_evidence(tex_paths: dict[str, Path]) -> list[dict]:
+    rows: list[dict] = []
+    source_path = tex_paths.get("astro-ph-0701731", Path(""))
+    if not source_path.exists():
+        return rows
+    v19_ugc05253_add_text_evidence(rows, source_path, "11 & 5253", "sample photometric row", "D=21.1; h_R=5.3; M_R=-21.90", "Mpc/kpc/mag", "UGC05253 is NGC2985, an early-type disk with a large R-band scale length in the Noordermeer sample.", before=1, after=2)
+    v19_ugc05253_add_text_evidence(rows, source_path, "5253 & 9  & 50", "dynamical table row", "PA=356--340; i=37; Vmax=255; V2.2h=245; Vasymp=210; class=II", "deg/km/s", "The source classifies the rotation curve as Category II and gives the same low inclination that makes provenance important.", before=1, after=2)
+    v19_ugc05253_add_text_evidence(rows, source_path, "5253  & INT", "optical spectrum setup row", "INT; slit PA=0; exposure=2400", "s/deg", "The optical long-slit setup is documented and can be checked against the HI tilted-ring geometry.", before=1, after=2)
+    v19_ugc05253_add_text_evidence(rows, source_path, "5253 (tidally disturbed)", "rotation-curve quality class", "Category II; tidally disturbed", "classification", "The paper explicitly assigns UGC05253 to the disturbed/less clean Category II group.", before=3, after=3)
+    v19_ugc05253_add_text_evidence(rows, source_path, "The outer parts of the gas disk of {\\bf UGC~5253}", "outer gas disk morphology", "large northern spiral arm", "source text", "The outer gas is not an axisymmetric disk source; it is dominated by a large spiral arm.", before=1, after=6)
+    v19_ugc05253_add_text_evidence(rows, source_path, "tilted ring model to the inner parts", "tilted-ring coverage", "inner-only tilted-ring model", "source text", "The source itself says the outer arm orientation cannot be determined and only the inner parts were fitted.", before=3, after=4)
+    v19_ugc05253_add_text_evidence(rows, source_path, "rotation curve extends out to a radius of 49~kpc", "rotation-curve radial extent", 49.0, "kpc", "Despite the inner-only orientation constraint, the rotation curve extends far into the outer gas domain.", before=2, after=3)
+    v19_ugc05253_add_text_evidence(rows, source_path, "strong m=0", "residual velocity mode", "strong m=0 residual field", "source text", "The source points to a symmetric residual mode, not a normal smooth transport state.", before=2, after=5)
+    v19_ugc05253_add_text_evidence(rows, source_path, "amplitude of $-20$~km/s", "ring residual amplitude", -20.0, "km/s", "A ring-like residual feature around 300 arcsec has a measured amplitude and is directly relevant to source admissibility.", before=4, after=5)
+    v19_ugc05253_add_text_evidence(rows, source_path, "drop in the rotation curve", "coincident velocity drop", "245 to 210", "km/s", "The residual feature coincides with the marked rotation-curve drop that makes this case dangerous for a simple source-load rule.", before=3, after=5)
+    v19_ugc05253_add_text_evidence(rows, source_path, "consistent with pure", "decline interpretation", "Keplerian-like local decline", "source text", "The paper labels the local rate of decline as consistent with pure Keplerian decay, so this is an outer-boundary/provenance case.", before=2, after=3)
+    return rows
+
+
+def v19_ugc05253_radial_case_decision(evidence_rows: list[dict]) -> tuple[list[dict], str]:
+    quantities = {row.get("quantity", ""): row for row in evidence_rows}
+    has_outer_arm = quantities.get("outer gas disk morphology", {}).get("snippet") not in {"", "MISSING", None}
+    has_inner_only_fit = quantities.get("tilted-ring coverage", {}).get("snippet") not in {"", "MISSING", None}
+    has_m0 = quantities.get("residual velocity mode", {}).get("snippet") not in {"", "MISSING", None}
+    has_ring = quantities.get("ring residual amplitude", {}).get("snippet") not in {"", "MISSING", None}
+    has_drop = quantities.get("coincident velocity drop", {}).get("snippet") not in {"", "MISSING", None}
+    if has_outer_arm and has_inner_only_fit and has_m0 and has_ring and has_drop:
+        decision = "source-admissibility blocker confirmed"
+        physical_class = "outer-arm / m=0 residual boundary case"
+        verdict = "UGC05253 should not train a smooth source-load law"
+        next_action = "Test a later source-admissibility veto/caution flag for outer-arm plus m=0 residual evidence; do not force v19 all-case loading."
+    elif has_outer_arm or has_m0 or has_drop:
+        decision = "source-provenance caution"
+        physical_class = "partial outer disturbance evidence"
+        verdict = "UGC05253 provenance caution but not fully quantified"
+        next_action = "Fetch more source material before any candidate law."
+    else:
+        decision = "insufficient source-specific evidence"
+        physical_class = "unresolved"
+        verdict = "UGC05253 remains unresolved"
+        next_action = "Do not alter source law from UGC05253."
+    rows = [
+        {
+            "galaxy": "UGC05253",
+            "alias": "NGC2985",
+            "decision": decision,
+            "physicalClass": physical_class,
+            "sourceEvidenceFound": {
+                "outerArm": has_outer_arm,
+                "innerOnlyTiltedRing": has_inner_only_fit,
+                "m0Residual": has_m0,
+                "ringResidualAmplitude": has_ring,
+                "coincidentVelocityDrop": has_drop,
+            },
+            "futureFormulaInputStatus": "not a direct formula input; source-admissibility evidence only",
+            "nextAction": next_action,
+        }
+    ]
+    return rows, verdict
+
+
+def write_v19_ugc05253_radial_provenance_artifacts(out_dir: Path, source_cache: Path, offline: bool) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source_cache.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_ugc05253_radial_provenance"
+    inventory_rows, tex_paths = v19_ugc05253_radial_fetch_sources(source_cache, offline)
+    evidence_rows = v19_ugc05253_radial_extracted_evidence(tex_paths)
+    decision_rows, verdict = v19_ugc05253_radial_case_decision(evidence_rows)
+    missing_rows = []
+    if not tex_paths.get("astro-ph-0701731", Path("")).exists():
+        missing_rows.append({"galaxy": "UGC05253", "missingField": "Noordermeer 2007 arXiv source TeX", "whyItMatters": "Needed to extract source-specific radial/provenance notes.", "sourcePath": "MISSING"})
+    if not any(row.get("quantity") == "ring residual amplitude" and row.get("snippet") != "MISSING" for row in evidence_rows):
+        missing_rows.append({"galaxy": "UGC05253", "missingField": "numeric residual-ring amplitude", "whyItMatters": "Needed to quantify the source-boundary blocker.", "sourcePath": str(tex_paths.get("astro-ph-0701731", Path("MISSING")))})
+    missing_rows.append({"galaxy": "UGC05253", "missingField": "machine-readable per-ring radial-flow table", "whyItMatters": "The paper has source-specific residual evidence, but not a per-ring radial-flow table for a formula-ready numeric law.", "sourcePath": "MISSING"})
+    next_rows = [
+        {
+            "galaxy": "UGC05253",
+            "nextCandidateInput": "outer-arm / m=0 residual source-admissibility flag",
+            "allowedUse": "future validation guardrail or caution branch, only after holdout/null testing",
+            "forbiddenUse": "do not use galaxy name, raw RMSE, residual lookup, or NFW/MOND parameters as formula inputs",
+            "sourcePath": str(tex_paths.get("astro-ph-0701731", Path("MISSING"))),
+        },
+        {
+            "galaxy": "UGC03205",
+            "nextCandidateInput": "source-load positive control",
+            "allowedUse": "contrast case for any UGC05253 veto: should remain admitted",
+            "forbiddenUse": "do not fit a one-galaxy exception",
+            "sourcePath": str(DEFAULT_V19_CASE_TWO_D_PROVENANCE_OUT / "mts_v19_case_2d_provenance_case_facts.csv"),
+        },
+        {
+            "galaxy": "UGC07089",
+            "nextCandidateInput": "Q2 high-inclination protected cap control",
+            "allowedUse": "contrast case for any source-admissibility cap: should stay protected",
+            "forbiddenUse": "do not broaden low-load loading across protected lookalikes",
+            "sourcePath": str(DEFAULT_V19_CASE_TWO_D_PROVENANCE_OUT / "mts_v19_case_2d_provenance_case_facts.csv"),
+        },
+    ]
+    write_csv(out_dir / f"{prefix}_source_inventory.csv", inventory_rows)
+    write_csv(out_dir / f"{prefix}_extracted_evidence.csv", evidence_rows)
+    write_csv(out_dir / f"{prefix}_case_decision.csv", decision_rows)
+    write_csv(out_dir / f"{prefix}_missing_fields.csv", missing_rows)
+    write_csv(out_dir / f"{prefix}_next_candidate_inputs.csv", next_rows)
+    capsule = {
+        "analysisName": "mts-v19-ugc05253-radial-provenance-v1",
+        "verdict": verdict,
+        "evidenceRows": len(evidence_rows),
+        "sourceCount": len(inventory_rows),
+        "availableSourceCount": sum(1 for row in inventory_rows if row.get("cacheStatus") == "available"),
+        "missingFieldCount": len(missing_rows),
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "lawChanged": False,
+        "largeDownloadsAllowed": False,
+        "cacheRoot": str(source_cache),
+    }
+    report = [
+        "# MTS v19 UGC05253 Radial / Source-Provenance Attack",
+        "",
+        "This mode attacks UGC05253 / NGC2985 only. It fetches bounded source-paper material, extracts case-specific radial/provenance evidence, and does not change any law.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "| Quantity | value | interpretation | source line |",
+        "| --- | --- | --- | ---: |",
+    ]
+    for row in evidence_rows:
+        report.append(f"| {row['quantity']} | {row['value']} {row['unit']} | {row['interpretation']} | {row['line']} |")
+    report.extend(
+        [
+            "",
+            "## Framework Consequence",
+            "",
+            "`UGC05253` is not a clean smooth source-loading example. The source paper directly identifies an outer gas-arm/orientation problem, an inner-only tilted-ring fit, a strong symmetric residual mode, and a local velocity drop. That supports treating it as a source-admissibility blocker rather than using it to broaden v19 loading.",
+            "",
+            "Useful next test: a tightly scoped source-admissibility guard that catches UGC05253-like outer-arm/m=0 residual cases while keeping UGC03205 admitted and UGC07089 protected. That would be a later candidate mode with holdout/null checks, not a hand edit.",
+            "",
+            "## Guardrails",
+            "",
+            "- No v18/v19/browser formula changed.",
+            "- No galaxy name, raw RMSE, residual lookup, NFW parameter, or MOND parameter is a formula input.",
+            "- Source evidence is used only to decide the next physically meaningful variable.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19ugc05253radialprovenance(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_CACHE
+    capsule = write_v19_ugc05253_radial_provenance_artifacts(out_dir, source_cache, args.offline)
+    print("MTS v19 UGC05253 radial/source provenance attack")
+    print(f"verdict={capsule['verdict']}")
+    print("\t".join([f"evidence={capsule['evidenceRows']}", f"sources={capsule['availableSourceCount']}", f"missing={capsule['missingFieldCount']}"]))
+    print(f"Wrote UGC05253 radial/source provenance to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -112433,6 +112683,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19missingboundarystateaudit",
             "v19case2dprovenance",
             "observedstatev19case2dprovenance",
+            "v19ugc05253radialprovenance",
+            "observedstatev19ugc05253radialprovenance",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -112896,6 +113148,8 @@ def main() -> None:
         cmd_v19missingboundarystateaudit(args)
     elif args.mode in {"v19case2dprovenance", "observedstatev19case2dprovenance"}:
         cmd_v19case2dprovenance(args)
+    elif args.mode in {"v19ugc05253radialprovenance", "observedstatev19ugc05253radialprovenance"}:
+        cmd_v19ugc05253radialprovenance(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
