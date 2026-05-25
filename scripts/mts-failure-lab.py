@@ -244,6 +244,7 @@ DEFAULT_OBSERVED_STATE_V18_COMPACT_BULGE_COUPLING_HARDEN_OUT = OUTPUT_PACK_ROOT 
 DEFAULT_OBSERVED_STATE_V18_BULGE_COUPLING_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-v18-47-bulge-coupling-discriminator-v1"
 DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_CLOSURE_OUT = OUTPUT_PACK_ROOT / "mts-v18-48-ml-provenance-closure-v1"
 DEFAULT_OBSERVED_STATE_V18_NON_ML_GAP_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v18-49-non-ml-gap-candidate-v1"
+DEFAULT_OBSERVED_STATE_V18_NON_ML_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v18-50-non-ml-provenance-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -82933,6 +82934,127 @@ def cmd_v18nonmlgapcandidate(args: argparse.Namespace) -> None:
     print(f"Wrote v18.49 non-M/L gap candidate to {out_dir.resolve()}")
 
 
+def v18_50_non_ml_provenance_verdict(table: dict, case: dict) -> tuple[str, str, str]:
+    quality = int(parse_float(table.get("qualityCode"), 0.0))
+    inc = parse_float(table.get("inclinationDeg"), math.nan)
+    inc_err = parse_float(table.get("inclinationUncertaintyDeg"), math.nan)
+    dist = parse_float(table.get("distanceMpc"), math.nan)
+    dist_err = parse_float(table.get("distanceUncertaintyMpc"), math.nan)
+    gain = parse_float(case.get("candidateGainVsV18_38KmS"), 0.0)
+    flags: list[str] = []
+    if quality >= 3:
+        flags.append("low SPARC quality")
+    elif quality == 2:
+        flags.append("medium SPARC quality")
+    if math.isfinite(inc) and inc < 35.0:
+        flags.append("low inclination")
+    if math.isfinite(inc_err) and inc_err >= 5.0:
+        flags.append("large inclination uncertainty")
+    if math.isfinite(dist) and dist > 0.0 and math.isfinite(dist_err) and dist_err / dist >= 0.20:
+        flags.append("large fractional distance uncertainty")
+    if not str(table.get("rotationCurveRefCodes", "")).strip():
+        flags.append("missing parsed rotation-curve reference")
+    if flags and gain < 0.25:
+        return "provenance-first limitation", "; ".join(flags), "do not add a transport branch; inspect source/geometry before treating as physics"
+    if flags:
+        return "mixed provenance and weak state signal", "; ".join(flags), "carry source quality in competitor-gap ledger and avoid release-law tuning"
+    if gain >= 0.25:
+        return "weak state signal with clean provenance", "official Table1 does not flag an obvious quality issue", "state mechanism may be worth a later physically derived branch"
+    return "clean provenance but no current state discriminator", "official Table1 does not flag an obvious quality issue", "treat as fitted-halo flexibility or missing variable"
+
+
+def write_v18_non_ml_provenance_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_50_non_ml_provenance"
+    table1_by_name, table1_meta = parse_official_table1(DEFAULT_OFFICIAL_SOURCE_CACHE / "SPARC_Lelli2016c.mrt")
+    v49_dir = DEFAULT_OBSERVED_STATE_V18_NON_ML_GAP_CANDIDATE_OUT
+    v49_path = v49_dir / "mts_v18_49_non_ml_gap_candidate_target_ledger.csv"
+    if not v49_path.exists():
+        write_v18_non_ml_gap_candidate_artifacts(v49_dir)
+    target_rows = read_csv_rows(v49_path)
+    rows: list[dict] = []
+    for case in target_rows:
+        name = case["galaxy"]
+        table = table1_by_name.get(name, {})
+        verdict, flags, next_action = v18_50_non_ml_provenance_verdict(table, case)
+        rows.append(
+            {
+                "galaxy": name,
+                "lockedRoute": case.get("lockedRoute", ""),
+                "targetClass": case.get("remainingGapTargetClass", ""),
+                "v18_38Rmse": case.get("v18_38Rmse", ""),
+                "v18_49Rmse": case.get("candidateRmse", ""),
+                "v18_49GainKmS": case.get("candidateGainVsV18_38KmS", ""),
+                "spArcQualityCode": table.get("qualityCode", ""),
+                "spArcQualityLabel": table.get("qualityLabel", ""),
+                "inclinationDeg": table.get("inclinationDeg", ""),
+                "inclinationUncertaintyDeg": table.get("inclinationUncertaintyDeg", ""),
+                "distanceMpc": table.get("distanceMpc", ""),
+                "distanceUncertaintyMpc": table.get("distanceUncertaintyMpc", ""),
+                "distanceMethod": table.get("distanceMethod", ""),
+                "rotationCurveRefCodes": table.get("rotationCurveRefCodes", ""),
+                "rotationCurveReferences": table.get("rotationCurveReferences", ""),
+                "provenanceFlags": flags,
+                "provenanceVerdict": verdict,
+                "nextAction": next_action,
+            }
+        )
+    verdict_counts: dict[str, int] = {}
+    for row in rows:
+        verdict_counts[row["provenanceVerdict"]] = verdict_counts.get(row["provenanceVerdict"], 0) + 1
+    if verdict_counts.get("provenance-first limitation", 0) >= 3:
+        verdict = "remaining non-M/L gap is provenance-first"
+    elif verdict_counts.get("clean provenance but no current state discriminator", 0) >= 3:
+        verdict = "remaining non-M/L gap needs missing state variable"
+    else:
+        verdict = "remaining non-M/L gap mixed provenance/state"
+    score_rows = [
+        {"metric": "targetCount", "value": len(rows)},
+        {"metric": "provenanceFirstCount", "value": verdict_counts.get("provenance-first limitation", 0)},
+        {"metric": "mixedProvenanceWeakStateCount", "value": verdict_counts.get("mixed provenance and weak state signal", 0)},
+        {"metric": "weakStateCleanProvenanceCount", "value": verdict_counts.get("weak state signal with clean provenance", 0)},
+        {"metric": "cleanNoStateDiscriminatorCount", "value": verdict_counts.get("clean provenance but no current state discriminator", 0)},
+        {"metric": "table1ReadStatus", "value": table1_meta.get("readStatus", "")},
+        {"metric": "lawChanged", "value": False},
+        {"metric": "weakSystematicsLeakage", "value": 0},
+    ]
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", rows)
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    (out_dir / f"{prefix}_capsule.json").write_text(
+        json.dumps(json_clean({"analysisName": "mts-v18-50-non-ml-provenance-v1", "verdict": verdict, "verdictCounts": verdict_counts, "lawChanged": False, "browserChanged": False}), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    report = [
+        "# MTS v18.50 Non-M/L Provenance Pass",
+        "",
+        "This pass checks the six non-M/L remaining NFW-gap cases against official SPARC Table1 quality, inclination, distance, and rotation-curve provenance. It does not change the framework law.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Targets: `{len(rows)}`.",
+        f"- Provenance-first limitations: `{verdict_counts.get('provenance-first limitation', 0)}`.",
+        f"- Clean provenance but no current state discriminator: `{verdict_counts.get('clean provenance but no current state discriminator', 0)}`.",
+        "",
+        "| Galaxy | Q | inc +- eInc | distance +- eD | refs | v18.49 gain | verdict |",
+        "| --- | --- | --- | --- | --- | ---: | --- |",
+    ]
+    for row in rows:
+        report.append(
+            f"| {row['galaxy']} | {row['spArcQualityCode']} {row['spArcQualityLabel']} | {fmt(row['inclinationDeg'])} +- {fmt(row['inclinationUncertaintyDeg'])} | {fmt(row['distanceMpc'])} +- {fmt(row['distanceUncertaintyMpc'])} | {row['rotationCurveRefCodes']} | {fmt(row['v18_49GainKmS'])} | {row['provenanceVerdict']} |"
+        )
+    report.extend(["", verdict])
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    return {"verdict": verdict, "verdictCounts": verdict_counts}
+
+
+def cmd_v18nonmlprovenance(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_NON_ML_PROVENANCE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_non_ml_provenance_artifacts(out_dir)
+    print("MTS v18.50 non-M/L provenance pass")
+    print(f"verdict={capsule['verdict']}")
+    print("\t".join(f"{key}={value}" for key, value in sorted(capsule["verdictCounts"].items())))
+    print(f"Wrote v18.50 non-M/L provenance pass to {out_dir.resolve()}")
+
+
 V18_44_UGC08699_PRIMARY_TARGET = "UGC08699"
 V18_44_ML_SENSITIVE_EVAL_TARGETS = {
     "UGC08699",
@@ -101278,6 +101400,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18mlprovenanceclosure",
             "v18nonmlgapcandidate",
             "observedstatev18nonmlgapcandidate",
+            "v18nonmlprovenance",
+            "observedstatev18nonmlprovenance",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -101681,6 +101805,8 @@ def main() -> None:
         cmd_v18mlprovenanceclosure(args)
     elif args.mode in {"v18nonmlgapcandidate", "observedstatev18nonmlgapcandidate"}:
         cmd_v18nonmlgapcandidate(args)
+    elif args.mode in {"v18nonmlprovenance", "observedstatev18nonmlprovenance"}:
+        cmd_v18nonmlprovenance(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
