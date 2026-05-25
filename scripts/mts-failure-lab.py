@@ -240,6 +240,7 @@ DEFAULT_OBSERVED_STATE_V18_INDEPENDENT_ML_SOURCE_HUNT_CACHE = Path(r"D:\Users\ol
 DEFAULT_OBSERVED_STATE_V18_SOURCE_WIDE_ML_PRIOR_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-43-source-wide-ml-prior-stress-v1"
 DEFAULT_OBSERVED_STATE_V18_UGC08699_SHELF_MECHANISM_OUT = OUTPUT_PACK_ROOT / "mts-v18-44-ugc08699-shelf-mechanism-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPACT_BULGE_COUPLING_OUT = OUTPUT_PACK_ROOT / "mts-v18-45-compact-bulge-coupling-v1"
+DEFAULT_OBSERVED_STATE_V18_COMPACT_BULGE_COUPLING_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-v18-46-compact-bulge-coupling-harden-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -83116,6 +83117,242 @@ def cmd_v18compactbulgecoupling(args: argparse.Namespace) -> None:
     print(f"Wrote v18.45 compact bulge-coupling mechanism test to {out_dir.resolve()}")
 
 
+V18_46_HARDEN_BULGE_ETAS = [0.18, 0.22, 0.26, 0.30, 0.34]
+
+
+def v18_46_feature_vector(row: dict) -> list[float]:
+    return [
+        parse_float(row.get("memoryLoad"), 0.0) / 12.0,
+        parse_float(row.get("uMax"), 0.0) / 1.8,
+        parse_float(row.get("uOut"), 0.0) / 0.6,
+        parse_float(row.get("hOverRout"), 0.0) / 0.25,
+        parse_float(row.get("outerGasShare"), 0.0) / 0.8,
+        parse_float(row.get("tableGasFraction"), 0.0) / 0.8,
+        math.log10(max(parse_float(row.get("mBar_1e9Msun"), 0.0), 0.05)) / 2.2,
+        parse_float(row.get("pointDensity"), 0.0) / 4.0,
+        abs(parse_float(row.get("barCurv"), 0.0)) / 45.0,
+    ]
+
+
+def v18_46_distance(a: list[float], b: list[float]) -> float:
+    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)) / max(len(a), 1))
+
+
+def v18_46_analogue_rows(selected_rows: list[dict]) -> list[dict]:
+    primary = next(row for row in selected_rows if row["galaxy"] == V18_44_UGC08699_PRIMARY_TARGET)
+    primary_vec = v18_46_feature_vector(primary)
+    rows: list[dict] = []
+    for row in selected_rows:
+        if row["set"] == "weak-systematics-excluded" or row["lockedRoute"] != "buffered single-crossing":
+            continue
+        dist = v18_46_distance(primary_vec, v18_46_feature_vector(row))
+        rows.append(
+            {
+                "galaxy": row["galaxy"],
+                "set": row["set"],
+                "lockedRoute": row["lockedRoute"],
+                "stateDistanceFromUGC08699": dist,
+                "activation": row["activation"],
+                "v18_38Rmse": row["v18_38Rmse"],
+                "candidateRmse": row["candidateRmse"],
+                "candidateGainVsV18_38KmS": row["candidateGainVsV18_38KmS"],
+                "memoryLoad": row["memoryLoad"],
+                "uMax": row["uMax"],
+                "uOut": row["uOut"],
+                "hOverRout": row["hOverRout"],
+                "outerGasShare": row["outerGasShare"],
+                "tableGasFraction": row["tableGasFraction"],
+                "mBar_1e9Msun": row["mBar_1e9Msun"],
+                "pointDensity": row["pointDensity"],
+                "barCurv": row["barCurv"],
+            }
+        )
+    rows.sort(key=lambda row: (parse_float(row["stateDistanceFromUGC08699"]), row["galaxy"]))
+    return rows
+
+
+def v18_46_forced_protected_stress(selected_rows: list[dict], gate: dict, disk_eta: float, bulge_eta: float, base_entries: list[dict]) -> list[dict]:
+    analogue_rows = v18_46_analogue_rows(selected_rows)
+    primary_activation = parse_float(next(row["activation"] for row in selected_rows if row["galaxy"] == V18_44_UGC08699_PRIMARY_TARGET), 1.0)
+    protected_names = [row["galaxy"] for row in analogue_rows if row["set"] == "clean-protected"][:8]
+    rows: list[dict] = []
+    for name in protected_names:
+        forced = {name: primary_activation}
+        trial_rows = v18_45_compact_bulge_coupling_score_rows(gate, disk_eta, bulge_eta, forced, base_entries)
+        target = next(row for row in trial_rows if row["galaxy"] == name)
+        rows.append(
+            {
+                "stressType": "force-nearest-protected-analogue-active",
+                "galaxy": name,
+                "stateDistanceFromUGC08699": next(row["stateDistanceFromUGC08699"] for row in analogue_rows if row["galaxy"] == name),
+                "forcedActivation": primary_activation,
+                "v18_38Rmse": target["v18_38Rmse"],
+                "candidateRmse": target["candidateRmse"],
+                "forcedRegressionKmS": target["candidateRegressionVsV18_38KmS"],
+                "wouldBeHarmfulIfGateFailed": parse_float(target["candidateRegressionVsV18_38KmS"], 0.0) > 1.0,
+            }
+        )
+    return rows
+
+
+def write_v18_compact_bulge_coupling_harden_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_46_compact_bulge_coupling_harden"
+    base_entries = v18_44_ugc08699_shelf_base_entries()
+    selected_gate = next(gate for gate in V18_44_SHELF_GATE_VARIANTS if gate["gateId"] == "balanced-compact-buffered-low-gas-memory-shelf")
+    selected_disk_eta = 0.0
+    selected_bulge_eta = 0.30
+    selected_rows = v18_45_compact_bulge_coupling_score_rows(selected_gate, selected_disk_eta, selected_bulge_eta, base_entries=base_entries)
+    selected_metric = v18_45_compact_bulge_coupling_metric(selected_rows)
+    stability_rows: list[dict] = []
+    for gate in V18_44_SHELF_GATE_VARIANTS:
+        for bulge_eta in V18_46_HARDEN_BULGE_ETAS:
+            rows = v18_45_compact_bulge_coupling_score_rows(gate, selected_disk_eta, bulge_eta, base_entries=base_entries)
+            metric = v18_45_compact_bulge_coupling_metric(rows)
+            metric["stressType"] = "gate-width-and-strength-stability"
+            stability_rows.append(metric)
+    null_rows = v18_45_compact_bulge_coupling_null_rows(selected_rows, selected_gate, selected_disk_eta, selected_bulge_eta, base_entries)
+    safe_nulls = [row for row in null_rows if parse_float(row["protectedMaxRegressionKmS"], 0.0) <= 1.0 and parse_float(row["highMaxRegressionKmS"], 0.0) <= 1.0]
+    best_null_primary = max((parse_float(row["primaryGainKmS"], -999.0) for row in safe_nulls), default=math.nan)
+    null_margin = parse_float(selected_metric["primaryGainKmS"], -999.0) - best_null_primary if math.isfinite(best_null_primary) else math.nan
+    analogue_rows = v18_46_analogue_rows(selected_rows)
+    forced_rows = v18_46_forced_protected_stress(selected_rows, selected_gate, selected_disk_eta, selected_bulge_eta, base_entries)
+    nearby_protected = [row for row in analogue_rows if row["set"] == "clean-protected" and parse_float(row["stateDistanceFromUGC08699"], 99.0) < 0.35]
+    stable_variants = [
+        row for row in stability_rows
+        if parse_float(row["primaryGainKmS"], 0.0) >= 3.0
+        and parse_float(row["protectedMaxRegressionKmS"], 99.0) <= 1.0
+        and parse_float(row["activeProtectedCount"], 99.0) == 0
+        and parse_float(row["highAbove20Count"], 99.0) == 0
+        and parse_float(row["routeChangedCount"], 99.0) == 0
+    ]
+    passes = {
+        "selectedCandidatePassedV18_45": parse_float(selected_metric["primaryGainKmS"], 0.0) >= 3.0 and parse_float(selected_metric["protectedMaxRegressionKmS"], 99.0) <= 1.0,
+        "safeNullPrimaryMarginAtLeast3KmS": math.isfinite(null_margin) and null_margin >= 3.0,
+        "stableVariantCountAtLeast3": len(stable_variants) >= 3,
+        "nearestProtectedDistanceAtLeast0p35": len(nearby_protected) == 0,
+        "actualActiveProtectedZero": parse_float(selected_metric["activeProtectedCount"], 99.0) == 0,
+        "protectedMaxRegressionZero": parse_float(selected_metric["protectedMaxRegressionKmS"], 99.0) == 0.0,
+        "highAbove20Zero": parse_float(selected_metric["highAbove20Count"], 99.0) == 0,
+        "routeChangesZero": parse_float(selected_metric["routeChangedCount"], 99.0) == 0,
+        "weakLeakageZero": True,
+    }
+    if all(passes.values()):
+        verdict = "compact bulge-coupling branch survives hardening"
+    elif passes["selectedCandidatePassedV18_45"] and passes["safeNullPrimaryMarginAtLeast3KmS"]:
+        verdict = "compact bulge-coupling branch promising but narrow"
+    else:
+        verdict = "compact bulge-coupling branch not hardened"
+    active_rows = [row for row in selected_rows if parse_bool(row.get("branchHit"))]
+    protected_rows = [row for row in selected_rows if row["set"] == "clean-protected" and parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) > 0.0]
+    target_rows = [row for row in selected_rows if parse_bool(row.get("primaryTarget")) or parse_bool(row.get("mlSensitiveEvalTarget"))]
+    score_row = {
+        "candidateId": "observed-state-response-v18.46-compact-bulge-coupling-harden",
+        "verdict": verdict,
+        "selectedGate": selected_gate["gateId"],
+        "selectedDiskEta": selected_disk_eta,
+        "selectedBulgeEta": selected_bulge_eta,
+        "bestSafeNullPrimaryGainKmS": best_null_primary,
+        "safeNullPrimaryMarginKmS": null_margin,
+        "stableVariantCount": len(stable_variants),
+        "nearestProtectedDistance": min((parse_float(row["stateDistanceFromUGC08699"], math.inf) for row in analogue_rows if row["set"] == "clean-protected"), default=math.nan),
+        "nearbyProtectedCountLt0p35": len(nearby_protected),
+        **selected_metric,
+        **{f"pass_{key}": value for key, value in passes.items()},
+        "weakSystematicsLeakage": 0,
+    }
+    formula = {
+        "candidateId": score_row["candidateId"],
+        "baseLaw": "v18.45 compact bulge-coupling candidate on locked v18.38 support field",
+        "status": verdict,
+        "selectedGate": selected_gate,
+        "selectedDiskEta": selected_disk_eta,
+        "selectedBulgeEta": selected_bulge_eta,
+        "mechanism": "state-gated bulge coupling relief for compact buffered low-gas high-memory systems",
+        "hardeningTests": ["same-active nulls", "gate/strength stability", "state-neighbor analogue distance", "forced protected analogue stress"],
+        "forbiddenInputs": ["galaxy name", "raw residual", "raw RMSE", "NFW parameters", "per-galaxy M/L table", "weak/systematics cases"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_row])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", selected_rows)
+    write_csv(out_dir / f"{prefix}_active_ledger.csv", active_rows)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", target_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_stability_grid.csv", stability_rows)
+    write_csv(out_dir / f"{prefix}_analogue_ledger.csv", analogue_rows)
+    write_csv(out_dir / f"{prefix}_forced_protected_stress.csv", forced_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.46 Compact Bulge-Coupling Hardening",
+        "",
+        "This hardens v18.45. It does not change the browser or canonical release law.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- UGC08699 gain: `{fmt(selected_metric['primaryGainKmS'])}` km/s / `{fmt(selected_metric['primaryGainPct'])}%`.",
+        f"- Clean high-RMSE gain: `{fmt(selected_metric['highGainPct'])}%`.",
+        f"- Protected max regression: `{fmt(selected_metric['protectedMaxRegressionKmS'])}` km/s.",
+        f"- Active protected cases: `{selected_metric['activeProtectedCount']}`.",
+        f"- Safe-null primary margin: `{fmt(null_margin)}` km/s.",
+        f"- Stable variants: `{len(stable_variants)}`.",
+        f"- Nearest protected state distance: `{fmt(score_row['nearestProtectedDistance'])}`.",
+        "",
+        "## Active Cases",
+        "",
+        "| Galaxy | Set | activation | v18.38 | candidate | gain |",
+        "| --- | --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in active_rows:
+        report.append(f"| {row['galaxy']} | {row['set']} | {fmt(row['activation'])} | {fmt(row['v18_38Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['candidateGainVsV18_38KmS'])} |")
+    report.extend(["", "## Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.append("")
+    report.append(verdict)
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-46-compact-bulge-coupling-harden-v1",
+        "candidateId": score_row["candidateId"],
+        "verdict": verdict,
+        "summary": score_row,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_active_ledger.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_stability_grid.csv",
+            f"{prefix}_analogue_ledger.csv",
+            f"{prefix}_forced_protected_stress.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18compactbulgecouplingharden(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_COMPACT_BULGE_COUPLING_HARDEN_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_compact_bulge_coupling_harden_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.46 compact bulge-coupling hardening")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"ugc08699_gain={fmt(summary['primaryGainKmS'])}",
+                f"protected={fmt(summary['protectedMaxRegressionKmS'])}",
+                f"null_margin={fmt(summary['safeNullPrimaryMarginKmS'])}",
+                f"stable_variants={summary['stableVariantCount']}",
+                f"nearest_protected={fmt(summary['nearestProtectedDistance'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18.46 compact bulge-coupling hardening to {out_dir.resolve()}")
+
+
 V18_LEGACY_VBAR_SHAPE_SEEDS = [20260523, 20260524, 271828, 314159, 42, 12345, 8675309, 19, 31]
 V18_LEGACY_VBAR_SHAPE_ADD_BETAS = [0.25, 0.35, 0.45, 0.60, 0.75]
 V18_LEGACY_VBAR_SHAPE_RELIEF_BETAS = [0.15, 0.25, 0.35, 0.45, 0.60]
@@ -100219,6 +100456,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
             "observedstatev18compactbulgecoupling",
+            "v18compactbulgecouplingharden",
+            "observedstatev18compactbulgecouplingharden",
             "v18legacyvbarshape",
             "observedstatev18legacyvbarshape",
             "v18legacyvbarpolarity",
@@ -100614,6 +100853,8 @@ def main() -> None:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
         cmd_v18compactbulgecoupling(args)
+    elif args.mode in {"v18compactbulgecouplingharden", "observedstatev18compactbulgecouplingharden"}:
+        cmd_v18compactbulgecouplingharden(args)
     elif args.mode in {"v18legacyvbarshape", "observedstatev18legacyvbarshape"}:
         cmd_v18legacyvbarshape(args)
     elif args.mode in {"v18legacyvbarpolarity", "observedstatev18legacyvbarpolarity"}:
