@@ -237,6 +237,7 @@ DEFAULT_OBSERVED_STATE_V18_EXTERNAL_ML_GAP_TEST_OUT = OUTPUT_PACK_ROOT / "mts-v1
 DEFAULT_OBSERVED_STATE_V18_REMAINING_ML_GAP_TEST_OUT = OUTPUT_PACK_ROOT / "mts-v18-41-remaining-ml-provenance-test-v1"
 DEFAULT_OBSERVED_STATE_V18_INDEPENDENT_ML_SOURCE_HUNT_OUT = OUTPUT_PACK_ROOT / "mts-v18-42-independent-ml-source-hunt-v1"
 DEFAULT_OBSERVED_STATE_V18_INDEPENDENT_ML_SOURCE_HUNT_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-independent-ml-source-hunt-v1")
+DEFAULT_OBSERVED_STATE_V18_SOURCE_WIDE_ML_PRIOR_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-43-source-wide-ml-prior-stress-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -81950,6 +81951,419 @@ def cmd_v18independentmlsourcehunt(args: argparse.Namespace) -> None:
     print(f"Wrote v18.42 independent M/L source hunt to {out_dir.resolve()}")
 
 
+V18_43_SOURCE_WIDE_ML_PRIORS = [
+    {
+        "variantId": "fixed-sparc-ml",
+        "mlDisk": ML_DISK,
+        "mlBulge": ML_BULGE,
+        "priorFamily": "SPARC fixed convention",
+        "sourceBasis": "SPARC parser/control baseline",
+        "formulaRole": "reference only",
+    },
+    {
+        "variantId": "sourcewide-coherent-low-0p90",
+        "mlDisk": 0.45,
+        "mlBulge": 0.63,
+        "priorFamily": "source-wide coherent low prior",
+        "sourceBasis": "bounded population-level stellar M/L stress around SPARC fixed values",
+        "formulaRole": "source-wide prior stress, not per-galaxy fitting",
+    },
+    {
+        "variantId": "sourcewide-coherent-high-1p10",
+        "mlDisk": 0.55,
+        "mlBulge": 0.77,
+        "priorFamily": "source-wide coherent high prior",
+        "sourceBasis": "bounded population-level stellar M/L stress around SPARC fixed values",
+        "formulaRole": "source-wide prior stress, not per-galaxy fitting",
+    },
+    {
+        "variantId": "sourcewide-coherent-high-1p20",
+        "mlDisk": 0.60,
+        "mlBulge": 0.84,
+        "priorFamily": "source-wide coherent high prior",
+        "sourceBasis": "McGaugh-style 3.6um disk M/L context plus coherent bulge scaling",
+        "formulaRole": "source-wide prior stress, not per-galaxy fitting",
+    },
+    {
+        "variantId": "sourcewide-disk-0p60-bulge-0p70",
+        "mlDisk": 0.60,
+        "mlBulge": 0.70,
+        "priorFamily": "source-wide disk-heavy prior",
+        "sourceBasis": "source-wide 3.6um disk M/L context with unchanged bulge convention",
+        "formulaRole": "source-wide prior stress, not per-galaxy fitting",
+    },
+    {
+        "variantId": "sourcewide-disk-0p45-bulge-0p70",
+        "mlDisk": 0.45,
+        "mlBulge": 0.70,
+        "priorFamily": "source-wide disk-light prior",
+        "sourceBasis": "bounded disk-only population prior stress",
+        "formulaRole": "source-wide prior stress, not per-galaxy fitting",
+    },
+    {
+        "variantId": "sourcewide-disk-0p50-bulge-0p60",
+        "mlDisk": 0.50,
+        "mlBulge": 0.60,
+        "priorFamily": "source-wide bulge-light prior",
+        "sourceBasis": "bounded bulge-only population prior stress",
+        "formulaRole": "source-wide prior stress, not per-galaxy fitting",
+    },
+    {
+        "variantId": "sourcewide-disk-0p50-bulge-0p80",
+        "mlDisk": 0.50,
+        "mlBulge": 0.80,
+        "priorFamily": "source-wide bulge-heavy prior",
+        "sourceBasis": "bounded bulge-only population prior stress",
+        "formulaRole": "source-wide prior stress, not per-galaxy fitting",
+    },
+]
+V18_43_SOURCE_WIDE_ML_NULL_SEEDS = [20260661, 20260662, 20260663, 20260664, 20260665, 20260666, 20260667, 20260668, 20260669, 20260670, 20260671, 20260672]
+
+
+def v18_43_source_wide_ml_prior_rows() -> list[dict]:
+    context = observed_state_candidate_context()
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    benchmark_dir = DEFAULT_OBSERVED_STATE_V18_38_COMPETITOR_BENCHMARK_OUT
+    benchmark_path = benchmark_dir / "mts_v18_38_competitor_case_ledger.csv"
+    if not benchmark_path.exists():
+        write_v18_38_competitor_benchmark_artifacts(benchmark_dir)
+    benchmark_by_name = {row["galaxy"]: row for row in read_csv_rows(benchmark_path)}
+    holdout_names = v18_36_nfw_gap_split_names()[1]
+    rows: list[dict] = []
+    for curve in context["curves"]:
+        name = curve["name"]
+        supports = supports_by_name.get(name, [])
+        if not supports:
+            continue
+        base_score = v18_competitor_support_score(curve, supports)
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        set_label = v18_competitor_set_label(name, context["weakNames"], context["highNames"])
+        split = "weak-excluded" if name in context["weakNames"] else "holdout" if name in holdout_names else "train"
+        bench = benchmark_by_name.get(name, {})
+        nfw_prior = parse_float(bench.get("nfw_concentration_priorRmse"), math.nan)
+        for prior in V18_43_SOURCE_WIDE_ML_PRIORS:
+            source_curve = transformed_curve(curve, ml_disk=prior["mlDisk"], ml_bulge=prior["mlBulge"])
+            candidate = v18_competitor_support_score(source_curve, supports)
+            regression = max(0.0, candidate["rmse"] - base_score["rmse"])
+            rows.append(
+                {
+                    "galaxy": name,
+                    "variantId": prior["variantId"],
+                    "priorFamily": prior["priorFamily"],
+                    "sourceBasis": prior["sourceBasis"],
+                    "formulaRole": prior["formulaRole"],
+                    "set": set_label,
+                    "split": split,
+                    "lockedRoute": curve.get("lockedModelRoute", ""),
+                    "candidateRoute": candidate.get("candidateRoute", ""),
+                    "routeChangedVsV18_38": candidate.get("candidateRoute", "") != base_score.get("candidateRoute", ""),
+                    "remainingGapClassTarget": name in V18_40_REMAINING_GAP_CLASS_TARGETS,
+                    "remainingGapTargetClass": v18_40_remaining_gap_class_target_label(name),
+                    "canonicalRmse": canonical["rmse"],
+                    "v18_38Rmse": base_score["rmse"],
+                    "candidateRmse": candidate["rmse"],
+                    "candidateGainVsV18_38KmS": base_score["rmse"] - candidate["rmse"],
+                    "candidateGainVsV18_38Pct": pct_improvement(base_score["rmse"], candidate["rmse"]),
+                    "candidateRegressionVsV18_38KmS": regression,
+                    "nfwPriorRmse": nfw_prior,
+                    "candidateMinusNfwPriorKmS": candidate["rmse"] - nfw_prior if math.isfinite(nfw_prior) else math.nan,
+                    "mlDisk": prior["mlDisk"],
+                    "mlBulge": prior["mlBulge"],
+                    "perGalaxyMlInput": False,
+                    "li2020HaloFitMlUsed": False,
+                    "usableAsTransportLaw": False,
+                    "above20Candidate": candidate["rmse"] >= 20.0 if set_label == "clean-high-rmse" else "",
+                    "protectedRegressionVsV18_38KmS": regression if set_label == "clean-protected" else "",
+                    "highRegressionVsV18_38KmS": regression if set_label == "clean-high-rmse" else "",
+                }
+            )
+    rows.sort(key=lambda row: (row["variantId"], row["galaxy"]))
+    return rows
+
+
+def v18_43_source_wide_ml_prior_metric(rows: list[dict], variant_id: str, split: str = "all") -> dict:
+    selected = [row for row in rows if row["variantId"] == variant_id and row["set"] != "weak-systematics-excluded"]
+    if split != "all":
+        selected = [row for row in selected if row.get("split") == split]
+    high = [row for row in selected if row["set"] == "clean-high-rmse"]
+    protected = [row for row in selected if row["set"] == "clean-protected"]
+    targets = [row for row in high if parse_bool(row.get("remainingGapClassTarget"))]
+    base_clean = safe_mean(parse_float(row["v18_38Rmse"]) for row in selected)
+    cand_clean = safe_mean(parse_float(row["candidateRmse"]) for row in selected)
+    base_high = safe_mean(parse_float(row["v18_38Rmse"]) for row in high)
+    cand_high = safe_mean(parse_float(row["candidateRmse"]) for row in high)
+    base_target = safe_mean(parse_float(row["v18_38Rmse"]) for row in targets)
+    cand_target = safe_mean(parse_float(row["candidateRmse"]) for row in targets)
+    protected_regs = [parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) for row in protected]
+    high_regs = [parse_float(row.get("highRegressionVsV18_38KmS"), 0.0) for row in high]
+    return {
+        "variantId": variant_id,
+        "split": split,
+        "cleanCount": len(selected),
+        "highCount": len(high),
+        "targetCount": len(targets),
+        "protectedCount": len(protected),
+        "cleanGainVsV18_38Pct": pct_improvement(base_clean, cand_clean),
+        "highGainVsV18_38Pct": pct_improvement(base_high, cand_high),
+        "targetGainVsV18_38Pct": pct_improvement(base_target, cand_target),
+        "targetGainVsV18_38KmS": base_target - cand_target if math.isfinite(base_target) and math.isfinite(cand_target) else math.nan,
+        "protectedMaxRegressionVsV18_38KmS": max(protected_regs or [0.0]),
+        "protectedWorseOver3Count": sum(1 for value in protected_regs if value > 3.0),
+        "highMaxRegressionVsV18_38KmS": max(high_regs or [0.0]),
+        "highAbove20Count": sum(1 for row in high if parse_bool(row.get("above20Candidate"))),
+        "routeChangedCount": sum(1 for row in selected if parse_bool(row.get("routeChangedVsV18_38"))),
+    }
+
+
+def v18_43_source_wide_ml_prior_target_best(rows: list[dict]) -> list[dict]:
+    output: list[dict] = []
+    target_names = sorted({row["galaxy"] for row in rows if parse_bool(row.get("remainingGapClassTarget"))})
+    for name in target_names:
+        case_rows = [row for row in rows if row["galaxy"] == name]
+        if not case_rows:
+            continue
+        base = next((row for row in case_rows if row["variantId"] == "fixed-sparc-ml"), case_rows[0])
+        best = min(case_rows, key=lambda row: parse_float(row["candidateRmse"], math.inf))
+        output.append(
+            {
+                "galaxy": name,
+                "targetClass": base.get("remainingGapTargetClass", ""),
+                "split": base.get("split", ""),
+                "lockedRoute": base.get("lockedRoute", ""),
+                "v18_38Rmse": base["v18_38Rmse"],
+                "bestVariantId": best["variantId"],
+                "bestPriorFamily": best["priorFamily"],
+                "bestMlDisk": best["mlDisk"],
+                "bestMlBulge": best["mlBulge"],
+                "bestRmse": best["candidateRmse"],
+                "bestGainVsV18_38KmS": parse_float(base["v18_38Rmse"]) - parse_float(best["candidateRmse"]),
+                "bestGainVsV18_38Pct": pct_improvement(parse_float(base["v18_38Rmse"]), parse_float(best["candidateRmse"])),
+                "nfwPriorRmse": base["nfwPriorRmse"],
+                "perGalaxyMlInput": False,
+            }
+        )
+    return output
+
+
+def v18_43_source_wide_ml_prior_null_controls() -> list[dict]:
+    rows: list[dict] = []
+    base_priors = [prior for prior in V18_43_SOURCE_WIDE_ML_PRIORS if prior["variantId"] != "fixed-sparc-ml"]
+    for seed in V18_43_SOURCE_WIDE_ML_NULL_SEEDS:
+        rng = random.Random(seed)
+        null_prior = {
+            "variantId": f"random-sourcewide-ml-{seed}",
+            "mlDisk": rng.uniform(0.45, 0.60),
+            "mlBulge": rng.uniform(0.60, 0.84),
+            "priorFamily": "random bounded source-wide M/L null",
+            "sourceBasis": "same source-wide bounded M/L box as v18.43 candidate priors",
+            "formulaRole": "null control",
+        }
+        original = V18_43_SOURCE_WIDE_ML_PRIORS[:]
+        try:
+            V18_43_SOURCE_WIDE_ML_PRIORS[:] = [original[0], null_prior]
+            null_rows = v18_43_source_wide_ml_prior_rows()
+        finally:
+            V18_43_SOURCE_WIDE_ML_PRIORS[:] = original
+        metric = v18_43_source_wide_ml_prior_metric(null_rows, null_prior["variantId"], "all")
+        rows.append(
+            {
+                "nullType": "random-source-wide-ml-prior",
+                "seed": seed,
+                "mlDisk": null_prior["mlDisk"],
+                "mlBulge": null_prior["mlBulge"],
+                **metric,
+            }
+        )
+    for prior in base_priors:
+        coherent_peer = {
+            "variantId": f"axis-swapped-{prior['variantId']}",
+            "mlDisk": min(0.60, max(0.45, ML_DISK - (prior["mlDisk"] - ML_DISK))),
+            "mlBulge": min(0.84, max(0.60, ML_BULGE - (prior["mlBulge"] - ML_BULGE))),
+            "priorFamily": "axis-swapped source-wide M/L null",
+            "sourceBasis": "opposite bounded direction from a tested source-wide prior",
+            "formulaRole": "null control",
+        }
+        original = V18_43_SOURCE_WIDE_ML_PRIORS[:]
+        try:
+            V18_43_SOURCE_WIDE_ML_PRIORS[:] = [original[0], coherent_peer]
+            null_rows = v18_43_source_wide_ml_prior_rows()
+        finally:
+            V18_43_SOURCE_WIDE_ML_PRIORS[:] = original
+        metric = v18_43_source_wide_ml_prior_metric(null_rows, coherent_peer["variantId"], "all")
+        rows.append(
+            {
+                "nullType": "axis-swapped-source-wide-ml-prior",
+                "seed": "",
+                "mlDisk": coherent_peer["mlDisk"],
+                "mlBulge": coherent_peer["mlBulge"],
+                **metric,
+            }
+        )
+    rows.sort(key=lambda row: (row["nullType"], str(row["seed"]), row["variantId"]))
+    return rows
+
+
+def write_v18_source_wide_ml_prior_stress_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_43_source_wide_ml_prior_stress"
+    rows = v18_43_source_wide_ml_prior_rows()
+    variant_ids = [prior["variantId"] for prior in V18_43_SOURCE_WIDE_ML_PRIORS]
+    score_rows: list[dict] = []
+    for variant_id in variant_ids:
+        for split in ["all", "train", "holdout"]:
+            score_rows.append(v18_43_source_wide_ml_prior_metric(rows, variant_id, split))
+    candidate_scores = [row for row in score_rows if row["variantId"] != "fixed-sparc-ml" and row["split"] == "all"]
+    best_score = max(
+        candidate_scores,
+        key=lambda row: (
+            parse_float(row["targetGainVsV18_38Pct"], -999.0)
+            - 3.0 * max(0.0, parse_float(row["protectedMaxRegressionVsV18_38KmS"], 0.0) - 3.0)
+            - 0.5 * parse_float(row["highAbove20Count"], 0.0)
+        ),
+    )
+    best_variant_id = best_score["variantId"]
+    best_variant = next(prior for prior in V18_43_SOURCE_WIDE_ML_PRIORS if prior["variantId"] == best_variant_id)
+    best_holdout = v18_43_source_wide_ml_prior_metric(rows, best_variant_id, "holdout")
+    target_rows = [row for row in rows if row["variantId"] == best_variant_id and parse_bool(row.get("remainingGapClassTarget"))]
+    target_best_rows = v18_43_source_wide_ml_prior_target_best(rows)
+    protected_rows = [
+        row
+        for row in rows
+        if row["variantId"] == best_variant_id and row["set"] == "clean-protected" and parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) > 0.0
+    ]
+    null_rows = v18_43_source_wide_ml_prior_null_controls()
+    best_null_target_gain = max((parse_float(row.get("targetGainVsV18_38Pct"), -999.0) for row in null_rows), default=math.nan)
+    null_margin = parse_float(best_score["targetGainVsV18_38Pct"]) - best_null_target_gain if math.isfinite(best_null_target_gain) else math.nan
+    if parse_float(best_score["targetGainVsV18_38Pct"]) >= 5.0 and parse_float(best_score["protectedMaxRegressionVsV18_38KmS"]) <= 3.0 and parse_float(best_score["highGainVsV18_38Pct"]) >= 0.0 and parse_float(best_score["highAbove20Count"]) == 0:
+        verdict = "source-wide M/L prior explains remaining gap safely"
+    elif parse_float(best_score["targetGainVsV18_38Pct"]) > 0.0 and parse_float(best_score["protectedMaxRegressionVsV18_38KmS"]) <= 3.0:
+        verdict = "source-wide M/L prior helps individual cases only"
+    elif parse_float(best_score["targetGainVsV18_38Pct"]) > 0.0:
+        verdict = "source-wide M/L prior unsafe"
+    else:
+        verdict = "source-wide M/L prior not explanatory"
+    summary = {
+        "analysisName": "mts-v18-43-source-wide-ml-prior-stress-v1",
+        "verdict": verdict,
+        "baseLaw": "locked v18.38 support field",
+        "formulaChanged": False,
+        "browserChanged": False,
+        "perGalaxyMlInputsUsed": False,
+        "li2020HaloFitMlUsed": False,
+        "variantCount": len(V18_43_SOURCE_WIDE_ML_PRIORS),
+        "bestVariantId": best_variant_id,
+        "bestMlDisk": best_variant["mlDisk"],
+        "bestMlBulge": best_variant["mlBulge"],
+        "bestTargetGainPct": best_score["targetGainVsV18_38Pct"],
+        "bestTargetGainKmS": best_score["targetGainVsV18_38KmS"],
+        "bestHighGainPct": best_score["highGainVsV18_38Pct"],
+        "bestCleanGainPct": best_score["cleanGainVsV18_38Pct"],
+        "bestProtectedMaxRegressionKmS": best_score["protectedMaxRegressionVsV18_38KmS"],
+        "bestProtectedWorseOver3Count": best_score["protectedWorseOver3Count"],
+        "bestHighAbove20Count": best_score["highAbove20Count"],
+        "bestRouteChangedCount": best_score["routeChangedCount"],
+        "holdoutTargetGainPct": best_holdout["targetGainVsV18_38Pct"],
+        "holdoutTargetGainKmS": best_holdout["targetGainVsV18_38KmS"],
+        "bestNullTargetGainPct": best_null_target_gain,
+        "nullMarginPct": null_margin,
+        "weakSystematicsLeakage": 0,
+    }
+    formula = {
+        "candidate": "v18.43 source-wide M/L prior stress",
+        "baseLaw": "v18.38 remains locked",
+        "lawChange": "none",
+        "testedOperation": "recompute baryonic curve with source-wide mlDisk/mlBulge prior, then reuse locked v18.38 support field",
+        "bestVariant": best_variant,
+        "priors": V18_43_SOURCE_WIDE_ML_PRIORS,
+        "forbiddenInputs": ["galaxy name", "raw RMSE", "residual lookup", "NFW parameters", "Li+ per-galaxy halo-fit M/L", "weak/systematics training"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", rows)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", target_rows)
+    write_csv(out_dir / f"{prefix}_target_best.csv", target_best_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_variant_grid.csv", V18_43_SOURCE_WIDE_ML_PRIORS)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.43 Source-Wide M/L Prior Stress",
+        "",
+        "This is a bounded M/L provenance stress test, not a framework law change. It uses only source-wide stellar M/L priors and rejects per-galaxy halo-fit M/L values as formula inputs.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Best source-wide prior: `{best_variant_id}` (`mlDisk={fmt(best_variant['mlDisk'])}`, `mlBulge={fmt(best_variant['mlBulge'])}`).",
+        f"- Remaining target gain: `{fmt(parse_float(best_score['targetGainVsV18_38Pct']))}%` / `{fmt(parse_float(best_score['targetGainVsV18_38KmS']))}` km/s.",
+        f"- Holdout remaining target gain: `{fmt(parse_float(best_holdout['targetGainVsV18_38Pct']))}%` / `{fmt(parse_float(best_holdout['targetGainVsV18_38KmS']))}` km/s.",
+        f"- Clean high-RMSE gain: `{fmt(parse_float(best_score['highGainVsV18_38Pct']))}%`.",
+        f"- Clean-set gain: `{fmt(parse_float(best_score['cleanGainVsV18_38Pct']))}%`.",
+        f"- Protected max regression: `{fmt(parse_float(best_score['protectedMaxRegressionVsV18_38KmS']))}` km/s.",
+        f"- Protected cases worse by more than 3 km/s: `{best_score['protectedWorseOver3Count']}`.",
+        f"- High-RMSE cases above 20 km/s: `{best_score['highAbove20Count']}`.",
+        f"- Best bounded random/null target gain: `{fmt(best_null_target_gain)}%`; margin `{fmt(null_margin)}` points.",
+        "",
+        "## Target Cases",
+        "",
+        "| Galaxy | class | v18.38 | best source-wide prior | M/L disk | M/L bulge | best RMSE | gain |",
+        "| --- | --- | ---: | --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in target_best_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['targetClass']} | {fmt(row['v18_38Rmse'])} | {row['bestVariantId']} | {fmt(row['bestMlDisk'])} | {fmt(row['bestMlBulge'])} | {fmt(row['bestRmse'])} | {fmt(row['bestGainVsV18_38KmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Guard",
+            "",
+            "A source-wide M/L prior can diagnose whether the remaining gap is sensitive to normal stellar-population assumptions. It cannot become a per-galaxy fitting law, and it does not replace the locked v18.38/v18 release candidate unless a later framework test explicitly passes protected/null gates.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": summary["analysisName"],
+        "verdict": verdict,
+        "summary": summary,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_target_best.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_variant_grid.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18sourcewidemlpriorstress(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_SOURCE_WIDE_ML_PRIOR_STRESS_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_source_wide_ml_prior_stress_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.43 source-wide M/L prior stress")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={summary['bestVariantId']}",
+                f"target_gain={fmt(parse_float(summary['bestTargetGainPct']))}%",
+                f"target_gain_kms={fmt(parse_float(summary['bestTargetGainKmS']))}",
+                f"high_gain={fmt(parse_float(summary['bestHighGainPct']))}%",
+                f"protected={fmt(parse_float(summary['bestProtectedMaxRegressionKmS']))}",
+                f"null_margin={fmt(parse_float(summary['nullMarginPct']))}",
+                f"above20={summary['bestHighAbove20Count']}",
+            ]
+        )
+    )
+    print(f"Wrote v18.43 source-wide M/L prior stress to {out_dir.resolve()}")
+
+
 V18_LEGACY_VBAR_SHAPE_SEEDS = [20260523, 20260524, 271828, 314159, 42, 12345, 8675309, 19, 31]
 V18_LEGACY_VBAR_SHAPE_ADD_BETAS = [0.25, 0.35, 0.45, 0.60, 0.75]
 V18_LEGACY_VBAR_SHAPE_RELIEF_BETAS = [0.15, 0.25, 0.35, 0.45, 0.60]
@@ -99047,6 +99461,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18remainingmlgaptest",
             "v18independentmlsourcehunt",
             "observedstatev18independentmlsourcehunt",
+            "v18sourcewidemlpriorstress",
+            "observedstatev18sourcewidemlpriorstress",
             "v18legacyvbarshape",
             "observedstatev18legacyvbarshape",
             "v18legacyvbarpolarity",
@@ -99436,6 +99852,8 @@ def main() -> None:
         cmd_v18remainingmlgaptest(args)
     elif args.mode in {"v18independentmlsourcehunt", "observedstatev18independentmlsourcehunt"}:
         cmd_v18independentmlsourcehunt(args)
+    elif args.mode in {"v18sourcewidemlpriorstress", "observedstatev18sourcewidemlpriorstress"}:
+        cmd_v18sourcewidemlpriorstress(args)
     elif args.mode in {"v18legacyvbarshape", "observedstatev18legacyvbarshape"}:
         cmd_v18legacyvbarshape(args)
     elif args.mode in {"v18legacyvbarpolarity", "observedstatev18legacyvbarpolarity"}:
