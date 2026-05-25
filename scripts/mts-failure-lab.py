@@ -275,6 +275,7 @@ DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_OUT = OUTPUT_PACK_ROOT / "mts-v19-ngc3198-n
 DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ngc3198-numeric-boundary-v1")
 DEFAULT_V19_SOURCE_BOUNDARY_NUMERIC_GATE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-numeric-gate-v1"
 DEFAULT_V19_SOURCE_BOUNDARY_CONTROL_COVERAGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-control-coverage-v1"
+DEFAULT_V19_BOUNDARY_OUTER_PERTURBATION_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-outer-perturbation-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -110680,6 +110681,239 @@ def cmd_v19sourceboundarycontrolcoverage(args: argparse.Namespace) -> None:
     print(f"Wrote v19 source-boundary control coverage to {out_dir.resolve()}")
 
 
+def v19_boundary_outer_proxy_rows() -> list[dict]:
+    matrix_rows = {row["galaxy"]: row for row in v19_source_boundary_numeric_matrix()}
+    coverage_rows = {row["galaxy"]: row for row in v19_source_boundary_control_coverage_rows()}
+    text_rows = v19_source_boundary_control_text_metrics()
+    text_by_name: dict[str, list[dict]] = {}
+    for row in text_rows:
+        if row.get("found"):
+            text_by_name.setdefault(row["galaxy"], []).append(row)
+    rows = []
+    for name, role in V19_SOURCE_BOUNDARY_TARGET_ROLES.items():
+        matrix = matrix_rows.get(name, {})
+        coverage = coverage_rows.get(name, {})
+        metrics = {row["metric"]: row for row in text_by_name.get(name, [])}
+        growth = parse_float(matrix.get("outerPerturbationGrowthKmS"), math.nan)
+        span = parse_float(matrix.get("outerBisymmetricSpanFraction"), math.nan)
+        flow_ratio = parse_float(coverage.get("absFlowToSfrRatio"), math.nan)
+        flow_sign = coverage.get("flowSign", "MISSING")
+        harmonic_a = parse_float(coverage.get("harmonicMedianAkmS"), math.nan)
+        harmonic_pct = parse_float(coverage.get("harmonicPctOfVtot"), math.nan)
+        residual = parse_float(coverage.get("medianResidualKmS"), math.nan)
+        outer_velocity = parse_float(metrics.get("outerRadialVelocityPeak", {}).get("value"), math.nan)
+        outer_mass_flow = parse_float(metrics.get("outerMassFlowPeak", {}).get("value"), math.nan)
+        outer_pa_change = parse_float(metrics.get("outerPaChange", {}).get("value"), math.nan)
+        localized_residual = parse_float(metrics.get("localizedResidualMax", {}).get("value"), math.nan)
+        c0_drop = parse_float(metrics.get("radialLopsidedC0Amplitude", {}).get("value"), math.nan)
+        outer_inflow_velocity = parse_float(metrics.get("outerInflowVelocity", {}).get("value"), math.nan)
+        shell_radius = parse_float(metrics.get("shellFeatureRadius", {}).get("value"), math.nan)
+        matched_growth = math.isfinite(growth) and math.isfinite(span)
+        disturbance_flags = set(str(coverage.get("disturbanceFlags", "")).split(";")) - {""}
+        proxy_signals = []
+        if matched_growth:
+            proxy_signals.append("matched-velfit-growth")
+        if math.isfinite(outer_velocity) or math.isfinite(outer_mass_flow) or math.isfinite(outer_pa_change):
+            proxy_signals.append("outer-flow-pa-structure")
+        if math.isfinite(localized_residual) or math.isfinite(c0_drop):
+            proxy_signals.append("lopsided-residual-structure")
+        if "randomNonCircularMotions" in disturbance_flags or "supergiantShell" in disturbance_flags:
+            proxy_signals.append("chaotic-local-shell")
+        if "warpFlag" in disturbance_flags or "kinematicLopsidedness" in disturbance_flags:
+            proxy_signals.append("warp-lopsided-outer-disk")
+        if math.isfinite(harmonic_a):
+            proxy_signals.append("harmonic-amplitude-table")
+
+        boundary_proxy_class = "missing outer proxy"
+        gate_v2_role = "missing"
+        if matched_growth and growth >= 5.0 and span >= 0.40 and flow_sign == "inflow" and math.isfinite(flow_ratio) and 0.75 <= flow_ratio <= 1.50:
+            boundary_proxy_class = "quiet growing outer boundary"
+            gate_v2_role = "soft-boundary admit"
+        elif matched_growth and growth < 0:
+            boundary_proxy_class = "declining outer perturbation control"
+            gate_v2_role = "source-load admit control"
+        elif "recentMergerEvent" in disturbance_flags or flow_sign == "outflow" or math.isfinite(outer_mass_flow):
+            boundary_proxy_class = "outflow/merger cap control"
+            gate_v2_role = "cap/reject control"
+        elif "randomNonCircularMotions" in disturbance_flags or "supergiantShell" in disturbance_flags:
+            boundary_proxy_class = "chaotic local feature cap control"
+            gate_v2_role = "cap/reject control"
+        elif "highInclinationLimitsStructure" in disturbance_flags or "warpFlag" in disturbance_flags:
+            boundary_proxy_class = "inclined warp/lopsided caution control"
+            gate_v2_role = "source-load caution control"
+        elif math.isfinite(localized_residual) or math.isfinite(c0_drop):
+            boundary_proxy_class = "lopsided residual source-load control"
+            gate_v2_role = "source-load admit control"
+        elif math.isfinite(harmonic_a):
+            boundary_proxy_class = "harmonic-only outer proxy"
+            gate_v2_role = "weak control"
+
+        evidence_strength = sum(
+            1
+            for value in [
+                growth,
+                span,
+                flow_ratio,
+                harmonic_a,
+                harmonic_pct,
+                residual,
+                outer_velocity,
+                outer_mass_flow,
+                outer_pa_change,
+                localized_residual,
+                c0_drop,
+                outer_inflow_velocity,
+                shell_radius,
+            ]
+            if math.isfinite(value)
+        )
+        source_paths = set()
+        for metric in metrics.values():
+            source_paths.add(str(metric.get("sourcePath", "")))
+        for field in ["primarySourcePaths", "outerPerturbationSourcePath"]:
+            for part in str(coverage.get(field) or matrix.get(field) or "").split(";"):
+                if part and part != "MISSING":
+                    source_paths.add(part)
+        rows.append(
+            {
+                "galaxy": name,
+                "targetRole": role,
+                "coverageClass": coverage.get("coverageClass", "MISSING"),
+                "boundaryProxyClass": boundary_proxy_class,
+                "gateV2Role": gate_v2_role,
+                "evidenceStrength": evidence_strength,
+                "flowSign": flow_sign,
+                "absFlowToSfrRatio": flow_ratio,
+                "matchedOuterGrowthKmS": growth,
+                "matchedOuterSpanFraction": span,
+                "harmonicMedianAkmS": harmonic_a,
+                "harmonicPctOfVtot": harmonic_pct,
+                "medianResidualKmS": residual,
+                "outerRadialVelocityPeakKmS": outer_velocity,
+                "outerMassFlowPeakMsunYr": outer_mass_flow,
+                "outerPaChangeDeg": outer_pa_change,
+                "localizedResidualMaxKmS": localized_residual,
+                "radialLopsidedC0KmS": c0_drop,
+                "outerInflowVelocityKmS": outer_inflow_velocity,
+                "shellFeatureRadiusArcsec": shell_radius,
+                "proxySignals": ";".join(proxy_signals) or "MISSING",
+                "disturbanceFlags": coverage.get("disturbanceFlags", ""),
+                "sourcePaths": ";".join(sorted(path for path in source_paths if path)) or "MISSING",
+            }
+        )
+    return rows
+
+
+def write_v19_boundary_outer_perturbation_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_boundary_outer_perturbation"
+    rows = v19_boundary_outer_proxy_rows()
+    source_rows = [
+        {
+            "sourceId": "Radialflows-2016",
+            "sourcePath": str(DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE / "arxiv-1601.01689-source-extract" / "Radialinflows.tex"),
+            "usedFor": "radial-flow signs, flow/SFR context, outer PA/outflow/lopsided text",
+        },
+        {
+            "sourceId": "Trachternach-2008",
+            "sourcePath": str(v19_source_boundary_control_trachte_path()),
+            "usedFor": "THINGS harmonic amplitude table and non-circular motion flags",
+        },
+        {
+            "sourceId": "Spekkens-Sellwood-2007",
+            "sourcePath": str(DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE / "arxiv-0912.5493-source-extract" / "velfit.tex"),
+            "usedFor": "matched bisymmetric outer growth/span for NGC3198 and NGC2403",
+        },
+    ]
+    ready_rows = []
+    for row in rows:
+        ready_rows.append(
+            {
+                "galaxy": row["galaxy"],
+                "gateV2Role": row["gateV2Role"],
+                "boundaryProxyClass": row["boundaryProxyClass"],
+                "readyForGateV2": row["gateV2Role"] not in {"missing", "weak control"},
+                "remainingMissing": "none" if row["gateV2Role"] not in {"missing", "weak control"} else "matched outer perturbation or radial-flow source",
+            }
+        )
+    ready_count = sum(1 for row in ready_rows if row["readyForGateV2"])
+    soft_count = sum(1 for row in rows if row["gateV2Role"] == "soft-boundary admit")
+    cap_count = sum(1 for row in rows if "cap" in row["gateV2Role"])
+    admit_count = sum(1 for row in rows if "admit" in row["gateV2Role"])
+    if ready_count >= 6 and soft_count == 1 and cap_count >= 2 and admit_count >= 2:
+        verdict = "outer-proxy controls ready for guarded gate rerun"
+    elif ready_count >= 4:
+        verdict = "outer-proxy controls partially ready"
+    else:
+        verdict = "outer-proxy coverage still insufficient"
+    write_csv(out_dir / f"{prefix}_source_inventory.csv", source_rows)
+    write_csv(out_dir / f"{prefix}_proxy_table.csv", rows)
+    write_csv(out_dir / f"{prefix}_gate_readiness.csv", ready_rows)
+    capsule = {
+        "analysisName": "mts-v19-boundary-outer-perturbation-v1",
+        "verdict": verdict,
+        "rows": len(rows),
+        "readyForGateV2Count": ready_count,
+        "softBoundaryAdmitCount": soft_count,
+        "capControlCount": cap_count,
+        "admitControlCount": admit_count,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    report = [
+        "# MTS v19 Boundary Outer-Perturbation Proxy",
+        "",
+        "This mode fills the immediate evidence gap after the control-coverage pass. It does not change v18/v19 laws; it classifies whether cached source material gives enough outer-perturbation proxy evidence to rerun the source-boundary gate with controls.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Ready for gate-v2 controls: `{ready_count}`.",
+        f"Soft-boundary admit cases: `{soft_count}`.",
+        f"Cap controls: `{cap_count}`.",
+        f"Source-load admit controls: `{admit_count}`.",
+        "",
+        "| Galaxy | proxy class | gate-v2 role | flow/SFR | matched growth | harmonic A | proxy signals |",
+        "| --- | --- | --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in rows:
+        report.append(
+            f"| {row['galaxy']} | {row['boundaryProxyClass']} | {row['gateV2Role']} | {fmt(row['absFlowToSfrRatio'])} | {fmt(row['matchedOuterGrowthKmS'])} | {fmt(row['harmonicMedianAkmS'])} | {row['proxySignals']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "NGC3198 remains the only covered case with quiet, growing, mild outer perturbation plus flow/SFR near unity. NGC2403 has matched outer-perturbation coverage but declines outward and has much stronger inflow than SFR. IC2574 and NGC5055 are cap/protection controls from shell/outflow/merger evidence. NGC3521 and NGC7331 are source-load/caution controls from radial-flow plus lopsided or high-inclination structure.",
+            "",
+            "The next law test should be a guarded v19 gate-v2 replay. It may use numeric proxy classes as training/evaluation evidence, but not galaxy names, raw residuals, RMSE, NFW parameters, or weak/systematics cases as formula inputs.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19boundaryouterperturbationfetch(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_BOUNDARY_OUTER_PERTURBATION_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_boundary_outer_perturbation_artifacts(out_dir)
+    print("MTS v19 boundary outer-perturbation proxy")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"rows={capsule['rows']}",
+                f"ready={capsule['readyForGateV2Count']}",
+                f"soft={capsule['softBoundaryAdmitCount']}",
+                f"cap={capsule['capControlCount']}",
+                f"admit={capsule['admitControlCount']}",
+            ]
+        )
+    )
+    print(f"Wrote v19 boundary outer-perturbation proxy to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -110957,6 +111191,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19sourceboundarynumericgate",
             "v19sourceboundarycontrolcoverage",
             "observedstatev19sourceboundarycontrolcoverage",
+            "v19boundaryouterperturbationfetch",
+            "observedstatev19boundaryouterperturbationfetch",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -111410,6 +111646,8 @@ def main() -> None:
         cmd_v19sourceboundarynumericgate(args)
     elif args.mode in {"v19sourceboundarycontrolcoverage", "observedstatev19sourceboundarycontrolcoverage"}:
         cmd_v19sourceboundarycontrolcoverage(args)
+    elif args.mode in {"v19boundaryouterperturbationfetch", "observedstatev19boundaryouterperturbationfetch"}:
+        cmd_v19boundaryouterperturbationfetch(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
