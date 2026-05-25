@@ -249,6 +249,8 @@ DEFAULT_OBSERVED_STATE_V18_SOURCE_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v18-5
 DEFAULT_OBSERVED_STATE_V18_SOURCE_PROVENANCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-source-provenance-v1")
 DEFAULT_V19_THEORY_KERNEL_OUT = OUTPUT_PACK_ROOT / "mts-v19-theory-kernel-v1"
 DEFAULT_V19_MOTION_FIELD_LAW_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-law-v1"
+DEFAULT_V19_SOURCE_EQUATION_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-equation-v1"
+DEFAULT_V19_SOURCE_ADMISSIBILITY_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-admissibility-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -102291,6 +102293,753 @@ def cmd_v19motionfieldlaw(args: argparse.Namespace) -> None:
     print(f"Wrote v19 motion-field law to {out_dir.resolve()}")
 
 
+V19_SOURCE_EQUATION_IDS = [
+    "stiffness-relaxation-equation",
+    "curvature-memory-growth-equation",
+    "motion-field-response-equation",
+]
+
+
+def v19_source_second_derivative(values: list[float], radii: list[float]) -> list[float]:
+    if len(values) < 3:
+        return [0.0 for _ in values]
+    out = [0.0 for _ in values]
+    for index in range(1, len(values) - 1):
+        dr1 = max(1.0e-9, radii[index] - radii[index - 1])
+        dr2 = max(1.0e-9, radii[index + 1] - radii[index])
+        left = (values[index] - values[index - 1]) / dr1
+        right = (values[index + 1] - values[index]) / dr2
+        out[index] = 2.0 * (right - left) / max(1.0e-9, dr1 + dr2)
+    out[0] = out[1]
+    out[-1] = out[-2]
+    return out
+
+
+def v19_source_smooth(values: list[float], radii: list[float], length: float) -> list[float]:
+    if not values:
+        return []
+    safe_length = max(1.0e-6, length)
+    smoothed = []
+    for radius in radii:
+        weights = [math.exp(-abs(radius - other) / safe_length) for other in radii]
+        denom = sum(weights) or 1.0
+        smoothed.append(sum(weight * value for weight, value in zip(weights, values)) / denom)
+    return smoothed
+
+
+def v19_source_normalize(values: list[float]) -> list[float]:
+    finite = [abs(parse_float(value, 0.0)) for value in values]
+    scale = max(finite or [1.0])
+    if scale <= 0:
+        return [0.0 for _ in values]
+    return [parse_float(value, 0.0) / scale for value in values]
+
+
+def v19_source_cumulative(values: list[float], radii: list[float]) -> list[float]:
+    if not values:
+        return []
+    total = 0.0
+    out = []
+    prev_r = radii[0]
+    for index, (radius, value) in enumerate(zip(radii, values)):
+        dr = radius - prev_r if index else max(radius, 1.0e-6)
+        total += max(0.0, value) * max(1.0e-6, dr)
+        out.append(total)
+        prev_r = radius
+    norm = max(out[-1], 1.0e-9)
+    return [value / norm for value in out]
+
+
+def v19_source_raw_supports(curve: dict, equation_id: str) -> tuple[list[float], dict]:
+    state = v19_theory_kernel_state(curve)
+    radii = [max(1.0e-9, parse_float(point.get("r"), 0.0)) for point in curve["points"]]
+    x_values = [clamp(parse_float(point.get("x"), 0.0), 0.0, 1.5) for point in curve["points"]]
+    vbar = [math.sqrt(max(0.0, parse_float(point.get("bar2"), 0.0))) for point in curve["points"]]
+    vgas = [abs(parse_float(point.get("vGas"), 0.0)) for point in curve["points"]]
+    vdisk = [abs(parse_float(point.get("vDisk"), 0.0)) for point in curve["points"]]
+    vbulge = [abs(parse_float(point.get("vBulge"), 0.0)) for point in curve["points"]]
+    baryon_norm = v19_source_normalize(vbar)
+    gas_norm = v19_source_normalize(vgas)
+    disk_norm = v19_source_normalize(vdisk)
+    bulge_norm = v19_source_normalize(vbulge)
+    l_eff = max(1.0e-9, state["lExact"])
+    r_out = max(1.0e-9, curve.get("rOut", radii[-1] if radii else 1.0))
+
+    if equation_id == "stiffness-relaxation-equation":
+        ell = max(0.18 * l_eff, 0.12 * curve.get("h", 1.0), 0.05 * r_out)
+        source = [
+            clamp(0.62 * b + 0.24 * d + 0.14 * g, 0.0, 2.0)
+            for b, d, g in zip(baryon_norm, disk_norm, gas_norm)
+        ]
+        smooth = v19_source_smooth(source, radii, ell)
+        cumulative = v19_source_cumulative(smooth, radii)
+        raw = [
+            GAMMA0 * l_eff * (1.0 - math.exp(-((max(1.0e-6, c * r_out) / l_eff) ** Q_DEFAULT)))
+            for c in cumulative
+        ]
+        return raw, {
+            "equation": "m - ell^2 nabla_r^2 m = m_baryon; S_raw = Gamma0*L_eff*(1-exp(-(u_m*r_out/L_eff)^q))",
+            "lengthScale": ell,
+        }
+
+    if equation_id == "curvature-memory-growth-equation":
+        grad_b = v19_source_normalize([abs(value) for value in v19_source_second_derivative(baryon_norm, radii)])
+        memory_drive = clamp(state["memoryLoad"] / 8.0, 0.0, 1.0)
+        sat_drive = clamp(state["satFraction"] * 4.0, 0.0, 1.0)
+        local_drive = [
+            clamp(
+                0.38 * b
+                + 0.22 * g
+                + 0.16 * d
+                + 0.14 * gb
+                + 0.10 * memory_drive,
+                0.0,
+                2.0,
+            )
+            for b, g, d, gb in zip(baryon_norm, gas_norm, disk_norm, grad_b)
+        ]
+        gamma_memory = v19_source_smooth(local_drive, radii, max(0.22 * l_eff, 0.08 * r_out))
+        leff_memory = l_eff * (1.0 + 0.22 * sat_drive)
+        raw = []
+        for point, drive in zip(curve["points"], gamma_memory):
+            base = GAMMA0 * leff_memory * (1.0 - math.exp(-((point["r"] / leff_memory) ** Q_DEFAULT)))
+            raw.append(base * (0.70 + 0.30 * clamp(drive, 0.0, 1.0)))
+        return raw, {
+            "equation": "Gamma_m(r) = Smooth_L[F(Sigma_b, dSigma_b/dr, memory_load)]; S_raw = Gamma0*L_m*K(r,L_m)*Gamma_m",
+            "lengthScale": leff_memory,
+        }
+
+    if equation_id == "motion-field-response-equation":
+        ell = max(0.30 * l_eff, 0.10 * r_out)
+        profile_curv = v19_source_normalize([abs(value) for value in v19_source_second_derivative(vbar, radii)])
+        psi_source = [
+            clamp(
+                0.44 * b
+                + 0.20 * g * (0.45 + 0.55 * x)
+                + 0.18 * d
+                + 0.10 * bu * (1.0 - 0.55 * x)
+                + 0.08 * c,
+                0.0,
+                2.0,
+            )
+            for b, g, d, bu, c, x in zip(baryon_norm, gas_norm, disk_norm, bulge_norm, profile_curv, x_values)
+        ]
+        psi = v19_source_smooth(psi_source, radii, ell)
+        psi_cumulative = v19_source_cumulative(psi, radii)
+        raw = []
+        for point, psi_value, cumulative in zip(curve["points"], psi, psi_cumulative):
+            boundary = 0.78 + 0.22 * clamp(cumulative + 0.35 * psi_value, 0.0, 1.2)
+            raw.append(GAMMA0 * l_eff * (1.0 - math.exp(-((point["r"] / l_eff) ** Q_DEFAULT))) * boundary)
+        return raw, {
+            "equation": "div(K[psi,Sigma_b] grad psi)=rho_b; S_raw = Gamma0*L_eff*K(r,L_eff)*B_psi(r)",
+            "lengthScale": ell,
+        }
+
+    raise ValueError(f"Unknown v19 source equation: {equation_id}")
+
+
+def v19_source_equation_global_scales(curves: list[dict], weak_names: set[str], supports_by_name: dict[str, list[float]]) -> dict[str, float]:
+    scales: dict[str, float] = {}
+    for equation_id in V19_SOURCE_EQUATION_IDS:
+        numerator = 0.0
+        denominator = 0.0
+        for curve in curves:
+            if curve["name"] in weak_names:
+                continue
+            target = supports_by_name.get(curve["name"], [])
+            if len(target) != len(curve["points"]):
+                continue
+            raw, _ = v19_source_raw_supports(curve, equation_id)
+            for raw_value, target_value in zip(raw, target):
+                numerator += max(0.0, raw_value) * max(0.0, target_value)
+                denominator += max(0.0, raw_value) ** 2
+        scales[equation_id] = numerator / denominator if denominator > 1.0e-12 else 1.0
+    return scales
+
+
+def v19_source_acceleration_shape_metrics(curve: dict, target_supports: list[float], candidate_supports: list[float]) -> dict:
+    target_acc = []
+    candidate_acc = []
+    for point, target, candidate in zip(curve["points"], target_supports, candidate_supports):
+        r = max(1.0e-9, parse_float(point.get("r"), 0.0))
+        target_acc.append(max(0.0, target) / r)
+        candidate_acc.append(max(0.0, candidate) / r)
+    target_max = max([abs(value) for value in target_acc] or [1.0])
+    candidate_max = max([abs(value) for value in candidate_acc] or [1.0])
+    shape_diffs = []
+    accel_diffs = []
+    zone_bias = {"inner": [], "mid": [], "outer": []}
+    for point, target, candidate in zip(curve["points"], target_acc, candidate_acc):
+        shape_diffs.append(((candidate / candidate_max) - (target / target_max)) ** 2 if candidate_max > 0 and target_max > 0 else 0.0)
+        accel_diffs.append((candidate - target) ** 2)
+        zone_bias[v19_kernel_zone(point)].append(candidate - target)
+    out = {
+        "accelerationShapeRmse": math.sqrt(safe_mean(shape_diffs)) if shape_diffs else math.nan,
+        "accelerationFieldRmse": math.sqrt(safe_mean(accel_diffs)) if accel_diffs else math.nan,
+    }
+    for zone, values in zone_bias.items():
+        out[f"{zone}AccelerationBias"] = safe_mean(values)
+    return out
+
+
+def v19_source_equation_rows() -> tuple[list[dict], list[dict], list[dict], dict]:
+    context = observed_state_candidate_context()
+    curves = context["curves"]
+    weak_names = set(context["weakNames"])
+    high_names = set(context["highNames"])
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    scales = v19_source_equation_global_scales(curves, weak_names, supports_by_name)
+    case_rows: list[dict] = []
+    shape_rows: list[dict] = []
+    for curve in curves:
+        name = curve["name"]
+        target_supports = supports_by_name.get(name, [])
+        if len(target_supports) != len(curve["points"]):
+            continue
+        set_name = "weak-systematics-excluded" if name in weak_names else ("clean-high-rmse" if name in high_names else "clean-protected")
+        target_score = v18_competitor_support_score(curve, target_supports)
+        canonical_score = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        for equation_id in V19_SOURCE_EQUATION_IDS:
+            raw, meta = v19_source_raw_supports(curve, equation_id)
+            scale = scales[equation_id]
+            candidate_supports = [max(0.0, scale * value) for value in raw]
+            score = v18_competitor_support_score(curve, candidate_supports)
+            shape = v19_source_acceleration_shape_metrics(curve, target_supports, candidate_supports)
+            target_gain = pct_improvement(canonical_score["rmse"], target_score["rmse"])
+            candidate_gain = pct_improvement(canonical_score["rmse"], score["rmse"])
+            row = {
+                "galaxy": name,
+                "set": set_name,
+                "equationId": equation_id,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "canonicalRmse": canonical_score["rmse"],
+                "lockedV18Rmse": target_score["rmse"],
+                "sourceEquationRmse": score["rmse"],
+                "sourceMinusV18KmS": score["rmse"] - target_score["rmse"],
+                "gainVsCanonicalPct": candidate_gain,
+                "lockedV18GainVsCanonicalPct": target_gain,
+                "v18RepairRetentionPct": candidate_gain / target_gain * 100.0 if abs(target_gain) > 1.0e-9 else math.nan,
+                "globalScale": scale,
+                "equation": meta["equation"],
+                "equationLengthScale": meta["lengthScale"],
+                "weakSystematicsExcluded": name in weak_names,
+                **shape,
+            }
+            case_rows.append(row)
+            for zone in ["inner", "mid", "outer"]:
+                shape_rows.append(
+                    {
+                        "galaxy": name,
+                        "set": set_name,
+                        "equationId": equation_id,
+                        "zone": zone,
+                        "accelerationBiasCandidateMinusV18": shape[f"{zone}AccelerationBias"],
+                        "accelerationShapeRmse": shape["accelerationShapeRmse"],
+                        "accelerationFieldRmse": shape["accelerationFieldRmse"],
+                    }
+                )
+    scale_rows = [{"equationId": equation_id, "globalScale": scale} for equation_id, scale in scales.items()]
+    metadata = {
+        "weakSystematicsExcludedCount": len(weak_names),
+        "cleanHighCount": len(high_names),
+        "scaleTraining": "one global scale per source equation, learned against locked v18 support on clean rows only",
+    }
+    return case_rows, shape_rows, scale_rows, metadata
+
+
+def v19_source_equation_score_rows(case_rows: list[dict]) -> tuple[list[dict], str, dict]:
+    score_rows = []
+    clean_rows = [row for row in case_rows if row["set"] != "weak-systematics-excluded"]
+    for equation_id in V19_SOURCE_EQUATION_IDS:
+        rows = [row for row in clean_rows if row["equationId"] == equation_id]
+        high = [row for row in rows if row["set"] == "clean-high-rmse"]
+        protected = [row for row in rows if row["set"] == "clean-protected"]
+        canonical_clean = safe_mean(parse_float(row["canonicalRmse"]) for row in rows)
+        v18_clean = safe_mean(parse_float(row["lockedV18Rmse"]) for row in rows)
+        source_clean = safe_mean(parse_float(row["sourceEquationRmse"]) for row in rows)
+        canonical_high = safe_mean(parse_float(row["canonicalRmse"]) for row in high)
+        v18_high = safe_mean(parse_float(row["lockedV18Rmse"]) for row in high)
+        source_high = safe_mean(parse_float(row["sourceEquationRmse"]) for row in high)
+        clean_retention = (canonical_clean - source_clean) / (canonical_clean - v18_clean) * 100.0 if abs(canonical_clean - v18_clean) > 1.0e-9 else math.nan
+        high_retention = (canonical_high - source_high) / (canonical_high - v18_high) * 100.0 if abs(canonical_high - v18_high) > 1.0e-9 else math.nan
+        score_rows.append(
+            {
+                "equationId": equation_id,
+                "cleanCount": len(rows),
+                "highCount": len(high),
+                "protectedCount": len(protected),
+                "cleanMeanRmse": source_clean,
+                "cleanGainVsCanonicalPct": pct_improvement(canonical_clean, source_clean),
+                "cleanLockedV18GainPct": pct_improvement(canonical_clean, v18_clean),
+                "cleanV18RepairRetentionPct": clean_retention,
+                "highMeanRmse": source_high,
+                "highGainVsCanonicalPct": pct_improvement(canonical_high, source_high),
+                "highLockedV18GainPct": pct_improvement(canonical_high, v18_high),
+                "highV18RepairRetentionPct": high_retention,
+                "meanAccelerationShapeRmse": safe_mean(parse_float(row["accelerationShapeRmse"]) for row in rows),
+                "meanAccelerationFieldRmse": safe_mean(parse_float(row["accelerationFieldRmse"]) for row in rows),
+                "protectedMaxRegressionVsV18KmS": max([parse_float(row["sourceMinusV18KmS"], 0.0) for row in protected] or [0.0]),
+                "weakSystematicsLeakage": 0,
+            }
+        )
+    best = min(score_rows, key=lambda row: (parse_float(row["meanAccelerationShapeRmse"], math.inf), -parse_float(row["highV18RepairRetentionPct"], -math.inf)))
+    if parse_float(best["highV18RepairRetentionPct"], 0.0) >= 70.0 and parse_float(best["protectedMaxRegressionVsV18KmS"], math.inf) <= 0.25:
+        verdict = "source equation bridge plausible"
+    elif parse_float(best["highV18RepairRetentionPct"], 0.0) >= 45.0:
+        verdict = "partial source equation bridge"
+    else:
+        verdict = "missing source variable"
+    return score_rows, verdict, best
+
+
+def write_v19_source_equation_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_source_equation"
+    if not V18_NFW_SHELF_ARTIFACT_PATH.exists():
+        write_v18_nfw_gap_shelf_release_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_38_NFW_SHELF_RELEASE_LOCK_OUT)
+    case_rows, shape_rows, scale_rows, metadata = v19_source_equation_rows()
+    score_rows, verdict, best = v19_source_equation_score_rows(case_rows)
+    limit_rows = [
+        {"check": "target", "status": "pass", "detail": "locked v18 motion-field acceleration is the target field; canonical/browser law unchanged"},
+        {"check": "global normalization", "status": "pass", "detail": "one global scale per equation, trained on clean rows only; no per-galaxy fitting"},
+        {"check": "forbidden inputs", "status": "pass", "detail": "no galaxy name, residual, raw RMSE, NFW parameter, MOND parameter, or branch label enters any source equation"},
+        {"check": "weak/systematics leakage", "status": "pass", "detail": "weak/systematics rows excluded from normalization and framework-facing scores"},
+        {"check": "Newtonian limit", "status": "candidate", "detail": "if the motion-field source tends to zero, a_total tends to a_bar"},
+        {"check": "field-theory gap", "status": "open", "detail": "these are disk-limit radial source equations; a full covariant psi/Gamma action is still future work"},
+    ]
+    formula = {
+        "candidateId": "mts-v19-source-equation-v1",
+        "status": verdict,
+        "target": "locked v18 motion-field acceleration a_MTS(r)",
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "normalization": "single global scale per equation learned on clean rows only",
+        "equations": {
+            "stiffness-relaxation-equation": "m - ell^2 nabla_r^2 m = m_baryon",
+            "curvature-memory-growth-equation": "Gamma_m(r)=Smooth_L[F(Sigma_b, dSigma_b/dr, memory_load)]",
+            "motion-field-response-equation": "div(K[psi,Sigma_b] grad psi)=rho_b",
+        },
+        "forbiddenInputs": ["galaxy name", "raw residual", "raw RMSE", "NFW parameter", "MOND parameter", "branch labels", "weak/systematics fitting"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_acceleration_shape.csv", shape_rows)
+    write_csv(out_dir / f"{prefix}_global_scales.csv", scale_rows)
+    write_csv(out_dir / f"{prefix}_limit_checks.csv", limit_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    equations_doc = [
+        "# MTS v19.1 Source Equation Candidates",
+        "",
+        "The target field is the locked v18 disk-limit acceleration field:",
+        "",
+        "```text",
+        "a_total(r) = a_bar(r) + a_MTS(r)",
+        "a_MTS(r) = S_MTS(r) / r",
+        "```",
+        "",
+        "This mode asks whether compact source equations can reproduce the shape of `a_MTS` without branch labels, galaxy names, residuals, RMSE, or competitor-fit parameters.",
+        "",
+        "## 1. Stiffness Relaxation Equation",
+        "",
+        "```text",
+        "m(r) - ell^2 nabla_r^2 m(r) = m_baryon(r)",
+        "u_m(r) = integral_0^r m(s) ds / integral_0^rout m(s) ds",
+        "S_raw(r) = Gamma0 L_eff [1 - exp(-(u_m r_out / L_eff)^q)]",
+        "```",
+        "",
+        "## 2. Curvature-Memory Growth Equation",
+        "",
+        "```text",
+        "Gamma_m(r) = Smooth_L[F(Sigma_b, dSigma_b/dr, memory_load)]",
+        "S_raw(r) = Gamma0 L_m [1 - exp(-(r/L_m)^q)] Gamma_m(r)",
+        "```",
+        "",
+        "## 3. Motion-Field Response Equation",
+        "",
+        "```text",
+        "div(K[psi,Sigma_b] grad psi) = rho_b",
+        "S_raw(r) = Gamma0 L_eff [1 - exp(-(r/L_eff)^q)] B_psi(r)",
+        "```",
+        "",
+        "Each equation receives one global normalization against the locked clean v18 acceleration field. There is no per-galaxy tuning.",
+    ]
+    (out_dir / f"{prefix}_equations.md").write_text("\n".join(equations_doc) + "\n", encoding="utf-8")
+
+    report = [
+        "# MTS v19.1 Source Equation Test",
+        "",
+        "This is a source-equation derivation test, not a new galaxy repair branch. Locked v18 remains unchanged.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Best equation: `{best['equationId']}`.",
+        "",
+        "## Scores",
+        "",
+        "| Equation | Shape RMSE | Clean retention | High retention | Protected regression vs v18 |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['equationId']} | {fmt(row['meanAccelerationShapeRmse'])} | {fmt(row['cleanV18RepairRetentionPct'])}% | {fmt(row['highV18RepairRetentionPct'])}% | {fmt(row['protectedMaxRegressionVsV18KmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "A passing source equation would mean the locked MTS acceleration field is reproducible from a compact baryon-sourced motion-field equation. A failure means the galaxy law is still strong as a disk-limit law, but the current source variables are not enough to derive the v18 field structure.",
+            "",
+            "## Guardrails",
+            "",
+            "- No galaxy names enter any equation.",
+            "- No raw residuals, raw RMSE, NFW, MOND, or branch labels enter any equation.",
+            "- Weak/systematics cases are excluded from normalization.",
+            "- No browser law is changed.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-source-equation-v1",
+        "verdict": verdict,
+        "bestEquation": best,
+        "summary": metadata,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_equations.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_acceleration_shape.csv",
+            f"{prefix}_global_scales.csv",
+            f"{prefix}_limit_checks.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19sourceequation(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SOURCE_EQUATION_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_source_equation_artifacts(out_dir)
+    best = capsule["bestEquation"]
+    print("MTS v19.1 source-equation test")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['equationId']}",
+                f"shape_rmse={fmt(best['meanAccelerationShapeRmse'])}",
+                f"clean_retention={fmt(best['cleanV18RepairRetentionPct'])}%",
+                f"high_retention={fmt(best['highV18RepairRetentionPct'])}%",
+                f"protected_reg={fmt(best['protectedMaxRegressionVsV18KmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v19 source-equation test to {out_dir.resolve()}")
+
+
+V19_ADMISSIBILITY_FEATURES = [
+    "memoryLoad",
+    "u075",
+    "uOut",
+    "uMax",
+    "fGasOut",
+    "rOutOverH",
+    "lGapOverH",
+    "satFraction",
+    "outerGasShare",
+    "outerDiskShare",
+    "outerBulgeShare",
+    "barCurvAbs",
+    "pointDensity",
+]
+
+
+def v19_admissibility_features(curve: dict) -> dict:
+    state = v19_theory_kernel_state(curve)
+    h = max(1.0e-9, curve.get("h", 0.0))
+    return {
+        "memoryLoad": parse_float(state.get("memoryLoad"), 0.0),
+        "u075": parse_float(curve.get("lockedModelU075"), 0.0),
+        "uOut": parse_float(curve.get("lockedModelUOut"), 0.0),
+        "uMax": parse_float(curve.get("lockedModelUMax"), 0.0),
+        "fGasOut": parse_float(curve.get("fGasOut"), 0.0),
+        "rOutOverH": parse_float(curve.get("rOut"), 0.0) / h,
+        "lGapOverH": parse_float(state.get("lGapOverH"), 0.0),
+        "satFraction": parse_float(state.get("satFraction"), 0.0),
+        "outerGasShare": parse_float(state.get("outerGasShare"), 0.0),
+        "outerDiskShare": parse_float(state.get("outerDiskShare"), 0.0),
+        "outerBulgeShare": parse_float(state.get("outerBulgeShare"), 0.0),
+        "barCurvAbs": abs(parse_float(state.get("barCurv"), 0.0)),
+        "pointDensity": parse_float(state.get("pointDensity"), 0.0),
+    }
+
+
+def v19_gate_value(features: dict, feature: str, threshold: float, direction: str) -> float:
+    value = parse_float(features.get(feature), 0.0)
+    span = max(1.0e-6, abs(threshold) * 0.20)
+    if direction == "high":
+        return clamp((value - (threshold - span)) / (2.0 * span), 0.0, 1.0)
+    return clamp(((threshold + span) - value) / (2.0 * span), 0.0, 1.0)
+
+
+def v19_admissibility_candidate_specs(curves: list[dict], weak_names: set[str]) -> list[dict]:
+    rows = []
+    clean_curves = [curve for curve in curves if curve["name"] not in weak_names]
+    quantiles = [0.25, 0.33, 0.50, 0.66, 0.75]
+    for feature in V19_ADMISSIBILITY_FEATURES:
+        values = [v19_admissibility_features(curve)[feature] for curve in clean_curves]
+        for q in quantiles:
+            threshold = v19_quantile(values, q)
+            for direction in ["high", "low"]:
+                rows.append(
+                    {
+                        "gateId": f"{feature}-{direction}-q{int(q * 100)}",
+                        "gateType": "single-feature-soft-gate",
+                        "featureA": feature,
+                        "directionA": direction,
+                        "thresholdA": threshold,
+                        "featureB": "",
+                        "directionB": "",
+                        "thresholdB": "",
+                    }
+                )
+    # Small frozen pair set: enough to test source-side admissibility without broad threshold chasing.
+    pair_features = [
+        ("memoryLoad", "uOut"),
+        ("memoryLoad", "outerGasShare"),
+        ("uOut", "outerGasShare"),
+        ("rOutOverH", "fGasOut"),
+        ("lGapOverH", "barCurvAbs"),
+        ("outerDiskShare", "pointDensity"),
+    ]
+    for feature_a, feature_b in pair_features:
+        values_a = [v19_admissibility_features(curve)[feature_a] for curve in clean_curves]
+        values_b = [v19_admissibility_features(curve)[feature_b] for curve in clean_curves]
+        for qa, qb in [(0.50, 0.50), (0.66, 0.33), (0.33, 0.66)]:
+            for direction_a, direction_b in [("high", "high"), ("high", "low"), ("low", "high")]:
+                ta = v19_quantile(values_a, qa)
+                tb = v19_quantile(values_b, qb)
+                rows.append(
+                    {
+                        "gateId": f"{feature_a}-{direction_a}-q{int(qa*100)}__{feature_b}-{direction_b}-q{int(qb*100)}",
+                        "gateType": "two-feature-soft-gate",
+                        "featureA": feature_a,
+                        "directionA": direction_a,
+                        "thresholdA": ta,
+                        "featureB": feature_b,
+                        "directionB": direction_b,
+                        "thresholdB": tb,
+                    }
+                )
+    return rows
+
+
+def v19_admissibility_gate(features: dict, spec: dict) -> float:
+    gate_a = v19_gate_value(features, spec["featureA"], parse_float(spec["thresholdA"], 0.0), spec["directionA"])
+    if spec["gateType"] == "single-feature-soft-gate":
+        return gate_a
+    gate_b = v19_gate_value(features, spec["featureB"], parse_float(spec["thresholdB"], 0.0), spec["directionB"])
+    return gate_a * gate_b
+
+
+def v19_admissibility_scale(curves: list[dict], weak_names: set[str], supports_by_name: dict[str, list[float]], spec: dict) -> float:
+    numerator = 0.0
+    denominator = 0.0
+    for curve in curves:
+        if curve["name"] in weak_names:
+            continue
+        target = supports_by_name.get(curve["name"], [])
+        if len(target) != len(curve["points"]):
+            continue
+        raw, _ = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        gate = v19_admissibility_gate(v19_admissibility_features(curve), spec)
+        for raw_value, target_value in zip(raw, target):
+            candidate = max(0.0, raw_value) * gate
+            numerator += candidate * max(0.0, target_value)
+            denominator += candidate * candidate
+    return numerator / denominator if denominator > 1.0e-12 else 0.0
+
+
+def v19_admissibility_score_spec(curves: list[dict], weak_names: set[str], high_names: set[str], supports_by_name: dict[str, list[float]], spec: dict) -> tuple[dict, list[dict]]:
+    scale = v19_admissibility_scale(curves, weak_names, supports_by_name, spec)
+    case_rows = []
+    for curve in curves:
+        target = supports_by_name.get(curve["name"], [])
+        if len(target) != len(curve["points"]):
+            continue
+        set_name = "weak-systematics-excluded" if curve["name"] in weak_names else ("clean-high-rmse" if curve["name"] in high_names else "clean-protected")
+        raw, _ = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        features = v19_admissibility_features(curve)
+        gate = v19_admissibility_gate(features, spec)
+        supports = [max(0.0, scale * gate * value) for value in raw]
+        score = v18_competitor_support_score(curve, supports)
+        target_score = v18_competitor_support_score(curve, target)
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        target_gain = pct_improvement(canonical["rmse"], target_score["rmse"])
+        candidate_gain = pct_improvement(canonical["rmse"], score["rmse"])
+        shape = v19_source_acceleration_shape_metrics(curve, target, supports)
+        case_rows.append(
+            {
+                "galaxy": curve["name"],
+                "set": set_name,
+                "gateId": spec["gateId"],
+                "gateType": spec["gateType"],
+                "gateValue": gate,
+                "globalScale": scale,
+                "canonicalRmse": canonical["rmse"],
+                "lockedV18Rmse": target_score["rmse"],
+                "admissibleSourceRmse": score["rmse"],
+                "sourceMinusV18KmS": score["rmse"] - target_score["rmse"],
+                "gainVsCanonicalPct": candidate_gain,
+                "v18RepairRetentionPct": candidate_gain / target_gain * 100.0 if abs(target_gain) > 1.0e-9 else math.nan,
+                **shape,
+                **features,
+            }
+        )
+    clean = [row for row in case_rows if row["set"] != "weak-systematics-excluded"]
+    high = [row for row in clean if row["set"] == "clean-high-rmse"]
+    protected = [row for row in clean if row["set"] == "clean-protected"]
+    canonical_clean = safe_mean(parse_float(row["canonicalRmse"]) for row in clean)
+    v18_clean = safe_mean(parse_float(row["lockedV18Rmse"]) for row in clean)
+    candidate_clean = safe_mean(parse_float(row["admissibleSourceRmse"]) for row in clean)
+    canonical_high = safe_mean(parse_float(row["canonicalRmse"]) for row in high)
+    v18_high = safe_mean(parse_float(row["lockedV18Rmse"]) for row in high)
+    candidate_high = safe_mean(parse_float(row["admissibleSourceRmse"]) for row in high)
+    clean_retention = (canonical_clean - candidate_clean) / (canonical_clean - v18_clean) * 100.0 if abs(canonical_clean - v18_clean) > 1.0e-9 else math.nan
+    high_retention = (canonical_high - candidate_high) / (canonical_high - v18_high) * 100.0 if abs(canonical_high - v18_high) > 1.0e-9 else math.nan
+    metric = {
+        **spec,
+        "globalScale": scale,
+        "cleanMeanRmse": candidate_clean,
+        "cleanV18RepairRetentionPct": clean_retention,
+        "highMeanRmse": candidate_high,
+        "highV18RepairRetentionPct": high_retention,
+        "meanAccelerationShapeRmse": safe_mean(parse_float(row["accelerationShapeRmse"]) for row in clean),
+        "protectedMaxRegressionVsV18KmS": max([parse_float(row["sourceMinusV18KmS"], 0.0) for row in protected] or [0.0]),
+        "protectedMeanRegressionVsV18KmS": safe_mean(max(0.0, parse_float(row["sourceMinusV18KmS"], 0.0)) for row in protected),
+        "weakSystematicsLeakage": 0,
+    }
+    return metric, case_rows
+
+
+def write_v19_source_admissibility_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_source_admissibility"
+    context = observed_state_candidate_context()
+    curves = context["curves"]
+    weak_names = set(context["weakNames"])
+    high_names = set(context["highNames"])
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    specs = v19_admissibility_candidate_specs(curves, weak_names)
+    score_rows = []
+    best_cases: list[dict] = []
+    for spec in specs:
+        metric, cases = v19_admissibility_score_spec(curves, weak_names, high_names, supports_by_name, spec)
+        score_rows.append(metric)
+    best = min(
+        score_rows,
+        key=lambda row: (
+            parse_float(row["protectedMaxRegressionVsV18KmS"], math.inf),
+            -parse_float(row["highV18RepairRetentionPct"], -math.inf),
+            parse_float(row["meanAccelerationShapeRmse"], math.inf),
+        ),
+    )
+    _, best_cases = v19_admissibility_score_spec(curves, weak_names, high_names, supports_by_name, best)
+    protected_false = sorted(
+        [row for row in best_cases if row["set"] == "clean-protected"],
+        key=lambda row: parse_float(row["sourceMinusV18KmS"], 0.0),
+        reverse=True,
+    )[:25]
+    high_hits = sorted(
+        [row for row in best_cases if row["set"] == "clean-high-rmse"],
+        key=lambda row: parse_float(row["v18RepairRetentionPct"], 0.0),
+        reverse=True,
+    )[:25]
+    if parse_float(best["protectedMaxRegressionVsV18KmS"], math.inf) <= 0.25 and parse_float(best["highV18RepairRetentionPct"], 0.0) >= 50.0:
+        verdict = "source admissibility variable found"
+    elif parse_float(best["protectedMaxRegressionVsV18KmS"], math.inf) <= 3.0 and parse_float(best["highV18RepairRetentionPct"], 0.0) >= 35.0:
+        verdict = "partial admissibility discriminator"
+    else:
+        verdict = "current source variables not sufficient"
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", best_cases)
+    write_csv(out_dir / f"{prefix}_protected_false_activation.csv", protected_false)
+    write_csv(out_dir / f"{prefix}_high_retained_hits.csv", high_hits)
+    formula = {
+        "candidateId": "mts-v19-source-admissibility-v1",
+        "status": verdict,
+        "baseEquation": "curvature-memory-growth-equation",
+        "bestGate": best,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual", "raw RMSE", "NFW parameter", "MOND parameter", "weak/systematics fitting"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19.2 Source Admissibility Test",
+        "",
+        "The v19.1 source equations over-activated protected clean galaxies. This pass asks whether a pre-residual source variable can act as an admissibility factor for the curvature-memory equation.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Best gate: `{best['gateId']}`.",
+        f"High v18 repair retention: `{fmt(best['highV18RepairRetentionPct'])}%`.",
+        f"Clean v18 repair retention: `{fmt(best['cleanV18RepairRetentionPct'])}%`.",
+        f"Protected max regression vs v18: `{fmt(best['protectedMaxRegressionVsV18KmS'])}` km/s.",
+        f"Mean acceleration shape RMSE: `{fmt(best['meanAccelerationShapeRmse'])}`.",
+        "",
+        "## What This Means",
+        "",
+        "If the best gate is weak, the current local state/profile variables still do not contain the missing field-source admissibility condition. If it is strong, the next step is to turn that gate into a physical source term rather than a threshold branch.",
+        "",
+        verdict,
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-source-admissibility-v1",
+        "verdict": verdict,
+        "bestGate": best,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_protected_false_activation.csv",
+            f"{prefix}_high_retained_hits.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19sourceadmissibility(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SOURCE_ADMISSIBILITY_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_source_admissibility_artifacts(out_dir)
+    best = capsule["bestGate"]
+    print("MTS v19.2 source-admissibility test")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best_gate={best['gateId']}",
+                f"high_retention={fmt(best['highV18RepairRetentionPct'])}%",
+                f"clean_retention={fmt(best['cleanV18RepairRetentionPct'])}%",
+                f"protected_reg={fmt(best['protectedMaxRegressionVsV18KmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v19 source-admissibility test to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -102526,6 +103275,10 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19theorykernel",
             "v19motionfieldlaw",
             "observedstatev19motionfieldlaw",
+            "v19sourceequation",
+            "observedstatev19sourceequation",
+            "v19sourceadmissibility",
+            "observedstatev19sourceadmissibility",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -102937,6 +103690,10 @@ def main() -> None:
         cmd_v19theorykernel(args)
     elif args.mode in {"v19motionfieldlaw", "observedstatev19motionfieldlaw"}:
         cmd_v19motionfieldlaw(args)
+    elif args.mode in {"v19sourceequation", "observedstatev19sourceequation"}:
+        cmd_v19sourceequation(args)
+    elif args.mode in {"v19sourceadmissibility", "observedstatev19sourceadmissibility"}:
+        cmd_v19sourceadmissibility(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
