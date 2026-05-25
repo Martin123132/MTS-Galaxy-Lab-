@@ -266,6 +266,7 @@ DEFAULT_V19_COUNTER_EVIDENCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\sou
 DEFAULT_V19_NGC3198_COUNTERCASE_OUT = OUTPUT_PACK_ROOT / "mts-v19-ngc3198-countercase-v1"
 DEFAULT_V19_NGC3198_COUNTERCASE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ngc3198-countercase-v1")
 DEFAULT_V19_NUMERIC_TWO_D_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-numeric-2d-field-v1"
+DEFAULT_V19_KINEMATIC_TWO_D_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-kinematic-2d-field-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -107673,6 +107674,267 @@ def cmd_v19numeric2dfield(args: argparse.Namespace) -> None:
     print(f"Wrote v19 numeric 2D/field discriminator to {out_dir.resolve()}")
 
 
+V19_KINEMATIC_TWO_D_FEATURES = [
+    "usableSidePairCount",
+    "meanSideDiffKmS",
+    "medianSideDiffKmS",
+    "maxSideDiffKmS",
+    "meanSideAsymmetryFraction",
+    "medianSideAsymmetryFraction",
+    "meanSideSigmaKmS",
+    "meanFieldResidualVelocityKmSIfMS",
+    "meanFieldResidualSigmaKmS",
+    "inclinationMismatchDeg",
+    "positionAngleMismatchDeg",
+    "fieldModelChi2",
+]
+
+
+def v19_kinematic_2d_case_rows(parser_dir: Path) -> list[dict]:
+    case_path = parser_dir / "mts_v19_external_2d_parser_case_metrics.csv"
+    if not case_path.exists():
+        write_v19_external_2d_parser_artifacts(parser_dir, DEFAULT_V19_EXTERNAL_TWO_D_ACQUIRE_CACHE)
+    parser_rows = read_csv_rows(case_path) if case_path.exists() else []
+    by_galaxy: dict[str, list[dict]] = {}
+    for row in parser_rows:
+        by_galaxy.setdefault(row.get("galaxy", ""), []).append(row)
+    context = observed_state_candidate_context()
+    curves_by_name = {curve["name"]: curve for curve in context["curves"]}
+    out: list[dict] = []
+    for name, role in V19_NUMERIC_TWO_D_TARGETS.items():
+        group = by_galaxy.get(name, [])
+        curve = curves_by_name.get(name, {})
+        state = v19_admissibility_features(curve) if curve else {}
+        direct_rows = []
+        for row in group:
+            source_id = row.get("sourceId", "")
+            direct_source = source_id.startswith("cds-blais") or source_id.startswith("cds-ghasp")
+            direct_value = any(math.isfinite(parse_float(row.get(feature), math.nan)) for feature in V19_KINEMATIC_TWO_D_FEATURES)
+            if direct_source and direct_value:
+                direct_rows.append(row)
+        if role == "cap-control":
+            train_label = "cap"
+        elif role == "admit-control":
+            train_label = "admit"
+        else:
+            train_label = "holdout"
+        row_out = {
+            "galaxy": name,
+            "comparisonRole": role,
+            "trainLabel": train_label,
+            "lockedRoute": curve.get("lockedModelRoute", "") if curve else "",
+            "external2DRowCount": len(group),
+            "direct2DKinematicRowCount": len(direct_rows),
+            "hasDirect2DKinematics": bool(direct_rows),
+            "hasSidePairTable": any(parse_float(row.get("usableSidePairCount"), 0.0) > 0 for row in direct_rows),
+            "hasVelocityFieldFitTable": any(
+                math.isfinite(parse_float(row.get(feature), math.nan))
+                for row in direct_rows
+                for feature in ["meanFieldResidualVelocityKmSIfMS", "meanFieldResidualSigmaKmS", "inclinationMismatchDeg", "positionAngleMismatchDeg", "fieldModelChi2"]
+            ),
+            "directSourceIds": ";".join(sorted({row.get("sourceId", "") for row in direct_rows if row.get("sourceId", "")})),
+            "directSourcePaths": ";".join(sorted({row.get("sourcePath", "") for row in direct_rows if row.get("sourcePath", "")})),
+            "morphologySourceIds": ";".join(sorted({row.get("sourceId", "") for row in group if row.get("sourceId", "") and row not in direct_rows})),
+            "memoryLoad": state.get("memoryLoad", ""),
+            "fGasOut": state.get("fGasOut", ""),
+            "uOut": state.get("uOut", ""),
+            "uMax": state.get("uMax", ""),
+        }
+        for feature in V19_KINEMATIC_TWO_D_FEATURES:
+            values = [parse_float(row.get(feature), math.nan) for row in direct_rows]
+            values = [value for value in values if math.isfinite(value)]
+            if values:
+                row_out[feature] = safe_median(values)
+                row_out[f"{feature}Max"] = max(values)
+                row_out[f"{feature}Count"] = len(values)
+            else:
+                row_out[feature] = ""
+                row_out[f"{feature}Max"] = ""
+                row_out[f"{feature}Count"] = 0
+        out.append(row_out)
+    return out
+
+
+def v19_kinematic_2d_rule_features(rows: list[dict]) -> list[str]:
+    train_rows = [row for row in rows if row.get("trainLabel") in {"cap", "admit"} and parse_bool(row.get("hasDirect2DKinematics"))]
+    features = []
+    for feature in V19_KINEMATIC_TWO_D_FEATURES:
+        values = [parse_float(row.get(feature), math.nan) for row in train_rows]
+        values = [value for value in values if math.isfinite(value)]
+        if len(values) >= 4 and len(set(round(value, 8) for value in values)) >= 2:
+            features.append(feature)
+    return features
+
+
+def v19_kinematic_2d_rule_candidates(rows: list[dict]) -> list[dict]:
+    train_rows = [row for row in rows if row.get("trainLabel") in {"cap", "admit"} and parse_bool(row.get("hasDirect2DKinematics"))]
+    rules: list[dict] = []
+    for feature in v19_kinematic_2d_rule_features(rows):
+        values = [parse_float(row.get(feature), math.nan) for row in train_rows]
+        values = [value for value in values if math.isfinite(value)]
+        for q in [0.33, 0.50, 0.66]:
+            threshold = v19_quantile(values, q)
+            for direction in ["high", "low"]:
+                rules.append(
+                    {
+                        "ruleId": f"{feature}-{direction}-q{int(q*100)}",
+                        "feature": feature,
+                        "direction": direction,
+                        "threshold": threshold,
+                    }
+                )
+    return rules
+
+
+def v19_kinematic_2d_rule_hit(row: dict, rule: dict) -> bool:
+    value = parse_float(row.get(rule["feature"]), math.nan)
+    threshold = parse_float(rule.get("threshold"), math.nan)
+    if not math.isfinite(value) or not math.isfinite(threshold):
+        return False
+    return value >= threshold if rule["direction"] == "high" else value <= threshold
+
+
+def v19_kinematic_2d_score_rule(rows: list[dict], rule: dict) -> dict:
+    train_rows = [row for row in rows if row.get("trainLabel") in {"cap", "admit"} and parse_bool(row.get("hasDirect2DKinematics"))]
+    cap_rows = [row for row in train_rows if row.get("trainLabel") == "cap"]
+    admit_rows = [row for row in train_rows if row.get("trainLabel") == "admit"]
+    cap_hits = [row for row in cap_rows if v19_kinematic_2d_rule_hit(row, rule)]
+    admit_hits = [row for row in admit_rows if v19_kinematic_2d_rule_hit(row, rule)]
+    ngc3198 = next((row for row in rows if row["galaxy"] == "NGC3198"), {})
+    return {
+        **rule,
+        "directTrainCaseCount": len(train_rows),
+        "capDirectCount": len(cap_rows),
+        "admitDirectCount": len(admit_rows),
+        "capRecall": len(cap_hits) / len(cap_rows) if cap_rows else 0.0,
+        "admitFalseCapRate": len(admit_hits) / len(admit_rows) if admit_rows else 1.0,
+        "utility": (len(cap_hits) / len(cap_rows) if cap_rows else 0.0) - (len(admit_hits) / len(admit_rows) if admit_rows else 1.0),
+        "ngc3198HasDirect2DKinematics": parse_bool(ngc3198.get("hasDirect2DKinematics")),
+        "ngc3198PredictedCap": v19_kinematic_2d_rule_hit(ngc3198, rule) if ngc3198 else False,
+        "ngc3198Value": ngc3198.get(rule["feature"], ""),
+    }
+
+
+def write_v19_kinematic_2d_field_artifacts(out_dir: Path, parser_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_kinematic_2d_field"
+    rows = v19_kinematic_2d_case_rows(parser_dir)
+    rules = v19_kinematic_2d_rule_candidates(rows)
+    scores = [v19_kinematic_2d_score_rule(rows, rule) for rule in rules]
+    scores.sort(key=lambda row: (parse_float(row["utility"], -math.inf), parse_float(row["capRecall"], -math.inf), -parse_float(row["admitFalseCapRate"], math.inf)), reverse=True)
+    best = scores[0] if scores else {}
+    ngc3198 = next((row for row in rows if row["galaxy"] == "NGC3198"), {})
+    direct_train = [row for row in rows if row.get("trainLabel") in {"cap", "admit"} and parse_bool(row.get("hasDirect2DKinematics"))]
+    cap_direct = [row for row in direct_train if row.get("trainLabel") == "cap"]
+    admit_direct = [row for row in direct_train if row.get("trainLabel") == "admit"]
+    missing_rows = []
+    for row in rows:
+        if not parse_bool(row.get("hasDirect2DKinematics")):
+            missing_rows.append(
+                {
+                    "galaxy": row["galaxy"],
+                    "comparisonRole": row["comparisonRole"],
+                    "lockedRoute": row["lockedRoute"],
+                    "external2DRowCount": row["external2DRowCount"],
+                    "missingInput": "direct numeric 2D kinematics",
+                    "neededSourceProduct": "approaching/receding rotation sides or velocity-field residual/inclination/PA fit table",
+                    "currentEvidence": "morphology-only rows" if parse_float(row.get("external2DRowCount"), 0.0) > 0 else "no current external 2D row",
+                }
+            )
+    next_targets = []
+    for row in missing_rows:
+        priority = 1 if row["galaxy"] == "NGC3198" else (2 if row["comparisonRole"] == "cap-control" else 3)
+        next_targets.append(
+            {
+                **row,
+                "priority": priority,
+                "suggestedAction": "fetch/source a small numeric side-pair or velocity-field table; do not use FITS cubes or manual digitization for this pass",
+            }
+        )
+    next_targets.sort(key=lambda row: (row["priority"], row["galaxy"]))
+    if not parse_bool(ngc3198.get("hasDirect2DKinematics")):
+        verdict = "direct numeric 2D kinematics missing for NGC3198"
+    elif len(cap_direct) < 2 or len(admit_direct) < 2:
+        verdict = "direct numeric 2D overlap too small"
+    elif best and parse_float(best.get("utility"), 0.0) > 0.0:
+        verdict = "direct kinematic discriminator anatomy"
+    else:
+        verdict = "direct kinematic discriminator not found"
+    write_csv(out_dir / f"{prefix}_case_coverage.csv", rows)
+    write_csv(out_dir / f"{prefix}_rule_scores.csv", scores)
+    write_csv(out_dir / f"{prefix}_missing_inputs.csv", missing_rows)
+    write_csv(out_dir / f"{prefix}_next_acquisition_targets.csv", next_targets)
+    report = [
+        "# MTS v19 Direct Numeric 2D Kinematic Field Test",
+        "",
+        "This mode separates direct numeric 2D kinematic evidence from morphology-only evidence. It does not change canonical MTS, v18, v19, or the browser law.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Target cases: `{len(rows)}`.",
+        f"Direct kinematic training cases: `{len(direct_train)}`.",
+        f"Direct cap controls: `{len(cap_direct)}`.",
+        f"Direct admit controls: `{len(admit_direct)}`.",
+        f"NGC3198 direct 2D kinematics present: `{ngc3198.get('hasDirect2DKinematics', False)}`.",
+        f"Best rule: `{best.get('ruleId', 'none')}`.",
+        "",
+        "## Coverage",
+        "",
+        "| galaxy | role | route | direct rows | morphology/external rows | direct source |",
+        "| --- | --- | --- | ---: | ---: | --- |",
+    ]
+    for row in rows:
+        report.append(
+            f"| {row['galaxy']} | {row['comparisonRole']} | {row['lockedRoute']} | {row['direct2DKinematicRowCount']} | {row['external2DRowCount']} | {row['directSourceIds']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Meaning",
+            "",
+            "A morphology-only row is not enough to decide source-field admissibility. For NGC3198, the current small external tables do not provide the direct velocity-field/side-pair numeric structure needed to test the missing discriminator.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-kinematic-2d-field-v1",
+        "verdict": verdict,
+        "caseCount": len(rows),
+        "directTrainingCaseCount": len(direct_train),
+        "directCapControlCount": len(cap_direct),
+        "directAdmitControlCount": len(admit_direct),
+        "ngc3198HasDirect2DKinematics": parse_bool(ngc3198.get("hasDirect2DKinematics")),
+        "bestRule": best,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "parserDir": str(parser_dir),
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19kinematic2dfield(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_KINEMATIC_TWO_D_FIELD_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    parser_dir = Path(args.source_dir) if args.source_dir else DEFAULT_V19_EXTERNAL_TWO_D_PARSER_OUT
+    capsule = write_v19_kinematic_2d_field_artifacts(out_dir, parser_dir)
+    best = capsule.get("bestRule", {})
+    print("MTS v19 direct numeric 2D kinematic field test")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"direct_train={capsule['directTrainingCaseCount']}",
+                f"cap={capsule['directCapControlCount']}",
+                f"admit={capsule['directAdmitControlCount']}",
+                f"ngc3198_direct={capsule['ngc3198HasDirect2DKinematics']}",
+                f"best={best.get('ruleId', 'none')}",
+            ]
+        )
+    )
+    print(f"Wrote v19 direct numeric 2D kinematic field test to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -107936,6 +108198,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19ngc3198countercase",
             "v19numeric2dfield",
             "observedstatev19numeric2dfield",
+            "v19kinematic2dfield",
+            "observedstatev19kinematic2dfield",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -108375,6 +108639,8 @@ def main() -> None:
         cmd_v19ngc3198countercase(args)
     elif args.mode in {"v19numeric2dfield", "observedstatev19numeric2dfield"}:
         cmd_v19numeric2dfield(args)
+    elif args.mode in {"v19kinematic2dfield", "observedstatev19kinematic2dfield"}:
+        cmd_v19kinematic2dfield(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
