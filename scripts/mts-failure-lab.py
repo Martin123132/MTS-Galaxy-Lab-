@@ -104952,6 +104952,7 @@ V19_EXTERNAL_TWO_D_SOURCES = [
         "family": "S4G stellar lopsidedness",
         "urls": [
             "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/ApJ/772/135?format=html&tex=true",
+            "https://cdsarc.cds.unistra.fr/ftp/J/ApJ/772/135/table1.dat",
         ],
         "dataKind": "stellar lopsidedness / morphology catalogue",
         "independent2DUse": "stellar asymmetry and lopsidedness proxy if target overlap exists",
@@ -104961,6 +104962,8 @@ V19_EXTERNAL_TWO_D_SOURCES = [
         "family": "WHISP morphology parameters",
         "urls": [
             "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/MNRAS/416/2415?format=html&tex=true",
+            "https://cdsarc.cds.unistra.fr/ftp/J/MNRAS/416/2415/tablea1.dat",
+            "https://cdsarc.cds.unistra.fr/ftp/J/MNRAS/416/2415/tablea2.dat",
         ],
         "dataKind": "HI morphology/asymmetry catalogue",
         "independent2DUse": "HI morphology and asymmetry proxy if target overlap exists",
@@ -104970,6 +104973,7 @@ V19_EXTERNAL_TWO_D_SOURCES = [
         "family": "AMIGA HI profile asymmetry",
         "urls": [
             "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/A%2BA/532/A117?format=html&tex=true",
+            "https://cdsarc.cds.unistra.fr/ftp/J/A+A/532/A117/table1.dat",
         ],
         "dataKind": "HI profile asymmetry catalogue",
         "independent2DUse": "profile asymmetry/environment proxy; not full velocity-field evidence",
@@ -105630,14 +105634,113 @@ def v19_parse_ghasp_velocity_field_table(source_cache: Path) -> list[dict]:
     return cases
 
 
+def v19_parse_s4g_lopsidedness_table(source_cache: Path) -> list[dict]:
+    base = source_cache / "cds-s4g-lopsidedness"
+    files = sorted(base.glob("*table1*"))
+    if not files:
+        return []
+    path = files[0]
+    source_class = v19_external_2d_source_class_map()
+    cases: list[dict] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+        if not line.strip():
+            continue
+        galaxy = v19_external_2d_substr_text(line, 1, 10).replace(" ", "")
+        target = source_class.get(v19_external_2d_norm_name(galaxy))
+        if not target:
+            continue
+        cases.append(
+            {
+                "sourceId": "cds-s4g-lopsidedness",
+                "galaxy": target.get("galaxy", galaxy),
+                "sourceClass": target.get("sourceClass", "v19-target"),
+                "pointCount": 1,
+                "usableSidePairCount": 0,
+                "s4gTType": v19_external_2d_substr_float(line, 12, 16),
+                "s4gDistanceMpc": v19_external_2d_substr_float(line, 18, 22),
+                "s4gScaleLengthPix": v19_external_2d_substr_float(line, 30, 34),
+                "s4gExpFitChi2": v19_external_2d_substr_float(line, 36, 39),
+                "s4gArmClass": v19_external_2d_substr_float(line, 41, 42),
+                "s4gBarClass": v19_external_2d_substr_float(line, 44, 44),
+                "s4gInnerA1": v19_external_2d_substr_float(line, 46, 50),
+                "s4gInnerA2": v19_external_2d_substr_float(line, 58, 62),
+                "s4gOuterA1": v19_external_2d_substr_float(line, 70, 74),
+                "s4gOuterA2": v19_external_2d_substr_float(line, 82, 86),
+                "s4gInnerPhase1Deg": v19_external_2d_substr_float(line, 94, 97),
+                "s4gOuterPhase1Deg": v19_external_2d_substr_float(line, 102, 105),
+                "sourcePath": str(path),
+                "lineNumber": line_number,
+            }
+        )
+    return cases
+
+
+def v19_parse_whisp_morphology_tables(source_cache: Path) -> list[dict]:
+    base = source_cache / "cds-whisp-morphology"
+    files = sorted(base.glob("*tablea[12]*"))
+    source_class = v19_external_2d_source_class_map()
+    cases: list[dict] = []
+    for path in files:
+        table_id = "tablea1" if "tablea1" in path.name.lower() else "tablea2"
+        for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+            if not line.strip():
+                continue
+            ugc_number = int(parse_float(v19_external_2d_substr_text(line, 1, 5), math.nan)) if math.isfinite(parse_float(v19_external_2d_substr_text(line, 1, 5), math.nan)) else -1
+            if ugc_number < 0:
+                continue
+            candidate_keys = [
+                v19_external_2d_norm_name(f"UGC{ugc_number}"),
+                v19_external_2d_norm_name(f"UGC{ugc_number:04d}"),
+                v19_external_2d_norm_name(f"UGC{ugc_number:05d}"),
+            ]
+            target = next((source_class[key] for key in candidate_keys if key in source_class), None)
+            if not target:
+                continue
+            cases.append(
+                {
+                    "sourceId": f"cds-whisp-morphology-{table_id}",
+                    "galaxy": target.get("galaxy", f"UGC{ugc_number}"),
+                    "sourceClass": target.get("sourceClass", "v19-target"),
+                    "pointCount": 1,
+                    "usableSidePairCount": 0,
+                    "whispUGC": ugc_number,
+                    "whispGini": v19_external_2d_substr_float(line, 7, 20),
+                    "whispM20": v19_external_2d_substr_float(line, 57, 71),
+                    "whispConcentration2080": v19_external_2d_substr_float(line, 108, 122),
+                    "whispConcentration5080": v19_external_2d_substr_float(line, 158, 173),
+                    "whispAsymmetryA": v19_external_2d_substr_float(line, 312, 325),
+                    "whispSmoothnessS": v19_external_2d_substr_float(line, 361, 376),
+                    "whispEllipticity": v19_external_2d_substr_float(line, 414, 430),
+                    "whispMomentGini": v19_external_2d_substr_float(line, 468, 484),
+                    "whispLopsidedness": v19_external_2d_substr_float(line, 522, 538),
+                    "whispLopsidednessX": v19_external_2d_substr_float(line, 576, 592),
+                    "whispLopsidednessY": v19_external_2d_substr_float(line, 630, 645),
+                    "sourcePath": str(path),
+                    "lineNumber": line_number,
+                }
+            )
+    return cases
+
+
+def v19_external_2d_union_rows(rows: list[dict]) -> list[dict]:
+    keys: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in keys:
+                keys.append(key)
+    return [{key: row.get(key, "") for key in keys} for row in rows]
+
+
 def write_v19_external_2d_parser_artifacts(out_dir: Path, source_cache: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_external_2d_parser"
     b_points, b_cases = v19_parse_blais_side_tables(source_cache)
     g_points, g_cases = v19_parse_ghasp_side_table(source_cache)
     gf_cases = v19_parse_ghasp_velocity_field_table(source_cache)
+    s4g_cases = v19_parse_s4g_lopsidedness_table(source_cache)
+    whisp_cases = v19_parse_whisp_morphology_tables(source_cache)
     points = b_points + g_points
-    cases = b_cases + g_cases + gf_cases
+    cases = b_cases + g_cases + gf_cases + s4g_cases + whisp_cases
     v19_cases = [row for row in cases if row.get("sourceClass") in {"protected-false-activation", "retained-high-source-load"}]
     false_cases = [row for row in v19_cases if row["sourceClass"] == "protected-false-activation"]
     high_cases = [row for row in v19_cases if row["sourceClass"] == "retained-high-source-load"]
@@ -105648,6 +105751,14 @@ def write_v19_external_2d_parser_artifacts(out_dir: Path, source_cache: Path) ->
         "inclinationMismatchDeg",
         "positionAngleMismatchDeg",
         "fieldModelChi2",
+        "s4gOuterA1",
+        "s4gInnerA1",
+        "s4gOuterA2",
+        "s4gBarClass",
+        "whispAsymmetryA",
+        "whispLopsidedness",
+        "whispGini",
+        "whispM20",
     ]
     for feature_name in feature_names:
         values = [parse_float(row.get(feature_name), math.nan) for row in v19_cases]
@@ -105673,18 +105784,18 @@ def write_v19_external_2d_parser_artifacts(out_dir: Path, source_cache: Path) ->
                 )
     threshold_rows.sort(key=lambda row: parse_float(row["utilityFalseRecallMinusHighSuppression"], -math.inf), reverse=True)
     if len(v19_cases) >= 5 and false_cases and high_cases:
-        verdict = "external 2D side-asymmetry pilot usable"
+        verdict = "external 2D morphology pilot usable"
     elif v19_cases:
         verdict = "external 2D parser works but sample too small"
     else:
         verdict = "external 2D parser found no v19 overlap"
-    write_csv(out_dir / f"{prefix}_points.csv", points)
-    write_csv(out_dir / f"{prefix}_case_metrics.csv", cases)
+    write_csv(out_dir / f"{prefix}_points.csv", v19_external_2d_union_rows(points))
+    write_csv(out_dir / f"{prefix}_case_metrics.csv", v19_external_2d_union_rows(cases))
     write_csv(out_dir / f"{prefix}_discriminator_scores.csv", threshold_rows)
     report = [
         "# MTS v19 External 2D Parser Pilot",
         "",
-        "This parses independent small external tables into side-asymmetry metrics. It does not alter or score the MTS law.",
+        "This parses independent small external tables into side-asymmetry, stellar-lopsidedness, and HI-morphology metrics. It does not alter or score the MTS law.",
         "",
         f"Verdict: `{verdict}`.",
         f"Parsed point rows: `{len(points)}`.",
@@ -105700,7 +105811,7 @@ def write_v19_external_2d_parser_artifacts(out_dir: Path, source_cache: Path) ->
     ]
     for row in sorted(v19_cases, key=lambda item: item["galaxy"]):
         report.append(
-            f"| {row['galaxy']} | {row['sourceClass']} | {row['sourceId']} | {row['usableSidePairCount']} | {fmt(row['meanSideAsymmetryFraction'])} | {fmt(row['meanSideDiffKmS'])} |"
+            f"| {row.get('galaxy', '')} | {row.get('sourceClass', '')} | {row.get('sourceId', '')} | {row.get('usableSidePairCount', '')} | {fmt(row.get('meanSideAsymmetryFraction', ''))} | {fmt(row.get('meanSideDiffKmS', ''))} |"
         )
     report.extend(["", verdict])
     (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
