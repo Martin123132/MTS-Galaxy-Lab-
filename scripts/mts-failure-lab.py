@@ -277,6 +277,7 @@ DEFAULT_V19_SOURCE_BOUNDARY_NUMERIC_GATE_OUT = OUTPUT_PACK_ROOT / "mts-v19-sourc
 DEFAULT_V19_SOURCE_BOUNDARY_CONTROL_COVERAGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-control-coverage-v1"
 DEFAULT_V19_BOUNDARY_OUTER_PERTURBATION_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-outer-perturbation-v1"
 DEFAULT_V19_SOURCE_BOUNDARY_NUMERIC_GATE_V2_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-numeric-gate-v2"
+DEFAULT_V19_BROAD_SOURCE_BOUNDARY_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-v19-broad-source-boundary-audit-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -111200,6 +111201,343 @@ def cmd_v19sourceboundarynumericgatev2(args: argparse.Namespace) -> None:
     print(f"Wrote v19 source-boundary numeric gate v2 to {out_dir.resolve()}")
 
 
+def v19_boundary_normalize_ngc_name(name: str) -> str:
+    text = str(name or "").strip()
+    match = re.match(r"NGC0+(\d+)$", text)
+    if match:
+        return f"NGC{match.group(1)}"
+    return text
+
+
+def v19_broad_source_boundary_overlap_rows() -> list[dict]:
+    context = observed_state_candidate_context()
+    curves = {curve["name"]: curve for curve in context["curves"]}
+    weak_names = set(context["weakNames"])
+    high_names = set(context["highNames"])
+    trachte_path = v19_source_boundary_control_trachte_path()
+    sample_rows = {v19_boundary_normalize_ngc_name(name): row for name, row in v19_source_boundary_parse_trachte_sample(trachte_path).items()}
+    harmonic_rows = {v19_boundary_normalize_ngc_name(name): row for name, row in v19_source_boundary_parse_trachte_harmonic(trachte_path).items()}
+    radial_path = DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_OUT / "mts_v19_ngc3198_numeric_boundary_radial_flow_table.csv"
+    if not radial_path.exists():
+        write_v19_ngc3198_numeric_boundary_artifacts(
+            DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_OUT,
+            DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE,
+            True,
+        )
+    radial_rows = {v19_boundary_normalize_ngc_name(row["galaxy"]): row for row in read_csv_rows(radial_path)}
+    proxy_by_name = {row["galaxy"]: row for row in v19_boundary_outer_proxy_rows()}
+    all_names = sorted(set(sample_rows) | set(harmonic_rows) | set(radial_rows))
+    rows = []
+    for name in all_names:
+        curve = curves.get(name)
+        if not curve:
+            continue
+        sample = sample_rows.get(name, {})
+        harmonic = harmonic_rows.get(name, {})
+        radial = radial_rows.get(name, {})
+        proxy = proxy_by_name.get(name, {})
+        gamma = parse_float(radial.get("gammaHiOutsideR25MsunYr"), math.nan)
+        sfr = parse_float(radial.get("sfrMsunYr"), math.nan)
+        ratio = abs(gamma) / sfr if math.isfinite(gamma) and math.isfinite(sfr) and sfr > 0 else math.nan
+        flow_sign = "inflow" if math.isfinite(gamma) and gamma < 0 else ("outflow" if math.isfinite(gamma) and gamma > 0 else "MISSING")
+        harmonic_pct = parse_float(harmonic.get("harmonicPctOfVtot"), math.nan)
+        harmonic_a = parse_float(harmonic.get("harmonicMedianAkmS"), math.nan)
+        growth = parse_float(proxy.get("matchedOuterGrowthKmS"), math.nan)
+        span = parse_float(proxy.get("matchedOuterSpanFraction"), math.nan)
+        disturbance_flags = str(proxy.get("disturbanceFlags", ""))
+        set_label = "weak/systematics" if name in weak_names else ("clean-high" if name in high_names else "clean-stable")
+        cap_control = (
+            flow_sign == "outflow"
+            or "recentMergerEvent" in disturbance_flags
+            or "randomNonCircularMotions" in disturbance_flags
+            or "supergiantShell" in disturbance_flags
+        )
+        near_unity_flow = math.isfinite(ratio) and 0.75 <= ratio <= 1.50
+        harmonic_quiet = math.isfinite(harmonic_pct) and harmonic_pct <= 3.5
+        matched_positive_boundary = math.isfinite(growth) and growth >= 5.0 and math.isfinite(span) and span >= 0.40
+        clean_formula_eligible = name not in weak_names
+        source_boundary_class = "missing radial-flow class"
+        gate_role = "missing"
+        if cap_control:
+            source_boundary_class = "cap/reject provenance"
+            gate_role = "cap"
+        elif near_unity_flow and harmonic_quiet and clean_formula_eligible and (matched_positive_boundary or not math.isfinite(growth)):
+            source_boundary_class = "near-unity quiet boundary"
+            gate_role = "soft"
+        elif near_unity_flow and harmonic_quiet and name in weak_names:
+            source_boundary_class = "near-unity quiet boundary but weak-excluded"
+            gate_role = "weak-excluded-soft-analog"
+        elif flow_sign == "inflow" and math.isfinite(ratio):
+            source_boundary_class = "source-load/admit control"
+            gate_role = "admit"
+        elif math.isfinite(harmonic_a):
+            source_boundary_class = "harmonic-only control"
+            gate_role = "harmonic-only"
+        rows.append(
+            {
+                "galaxy": name,
+                "setLabel": set_label,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "canonicalRmse": score_curve(curve)["rmse"],
+                "isWeakExcluded": name in weak_names,
+                "isHighRmse": name in high_names,
+                "flowSign": flow_sign,
+                "gammaHiOutsideR25MsunYr": gamma,
+                "sfrMsunYr": sfr,
+                "absFlowToSfrRatio": ratio,
+                "harmonicMedianAkmS": harmonic_a,
+                "harmonicPctOfVtot": harmonic_pct,
+                "medianResidualKmS": parse_float(harmonic.get("medianResidualKmS"), math.nan),
+                "matchedOuterGrowthKmS": growth,
+                "matchedOuterSpanFraction": span,
+                "sourceBoundaryClass": source_boundary_class,
+                "gateRole": gate_role,
+                "disturbanceFlags": disturbance_flags,
+                "sampleSourcePath": sample.get("sampleSourcePath", ""),
+                "harmonicSourcePath": harmonic.get("harmonicSourcePath", ""),
+                "radialSourcePath": radial.get("sourcePath", ""),
+            }
+        )
+    return rows
+
+
+def v19_broad_source_boundary_case_base(overlap_rows: list[dict]) -> tuple[dict[str, dict], dict[str, list[float]], dict[str, list[float]], dict[str, list[float]], dict]:
+    if not V18_NFW_SHELF_ARTIFACT_PATH.exists():
+        write_v18_nfw_gap_shelf_release_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_38_NFW_SHELF_RELEASE_LOCK_OUT)
+    context = observed_state_candidate_context()
+    curves = {curve["name"]: curve for curve in context["curves"]}
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    scales = v19_source_equation_global_scales(list(curves.values()), set(context["weakNames"]), supports_by_name)
+    source_supports: dict[str, list[float]] = {}
+    canonical_supports: dict[str, list[float]] = {}
+    v18_supports: dict[str, list[float]] = {}
+    for row in overlap_rows:
+        name = row["galaxy"]
+        curve = curves.get(name)
+        if not curve:
+            continue
+        raw, _ = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        source_supports[name] = [max(0.0, scales["curvature-memory-growth-equation"] * value) for value in raw]
+        canonical_supports[name] = v18_competitor_canonical_supports(curve)
+        v18_supports[name] = supports_by_name.get(name, [])
+    return curves, source_supports, canonical_supports, v18_supports, context
+
+
+def v19_broad_source_boundary_score_variant(
+    variant: dict,
+    overlap_rows: list[dict],
+    curves: dict[str, dict],
+    source_supports: dict[str, list[float]],
+    canonical_supports: dict[str, list[float]],
+    v18_supports: dict[str, list[float]],
+) -> tuple[dict, list[dict]]:
+    row_by_name = {row["galaxy"]: row for row in overlap_rows}
+    case_rows: list[dict] = []
+    for name, source in source_supports.items():
+        curve = curves.get(name)
+        target = v18_supports.get(name, [])
+        canonical = canonical_supports.get(name, [])
+        if not curve or len(source) != len(curve["points"]) or len(target) != len(curve["points"]):
+            continue
+        row = row_by_name.get(name, {})
+        factor = parse_float(variant.get("factors", {}).get(name, 1.0), 1.0)
+        candidate_supports = v19_source_boundary_supports(curve, source, factor)
+        source_score = v18_competitor_support_score(curve, source)
+        candidate_score = v18_competitor_support_score(curve, candidate_supports)
+        canonical_score = v18_competitor_support_score(curve, canonical)
+        v18_score = v18_competitor_support_score(curve, target)
+        case_rows.append(
+            {
+                "variantId": variant["variantId"],
+                "galaxy": name,
+                "setLabel": row.get("setLabel", ""),
+                "gateRole": row.get("gateRole", ""),
+                "sourceBoundaryFactor": factor,
+                "canonicalRmse": canonical_score["rmse"],
+                "lockedV18Rmse": v18_score["rmse"],
+                "fullSourceRmse": source_score["rmse"],
+                "candidateRmse": candidate_score["rmse"],
+                "candidateMinusV18KmS": candidate_score["rmse"] - v18_score["rmse"],
+                "candidateImprovementVsFullSourceKmS": source_score["rmse"] - candidate_score["rmse"],
+                "candidateGainVsCanonicalPct": pct_improvement(canonical_score["rmse"], candidate_score["rmse"]),
+                "lockedV18GainVsCanonicalPct": pct_improvement(canonical_score["rmse"], v18_score["rmse"]),
+                "isWeakExcluded": row.get("isWeakExcluded", False),
+                "isHighRmse": row.get("isHighRmse", False),
+            }
+        )
+    clean_rows = [row for row in case_rows if str(row["isWeakExcluded"]).lower() != "true" and row["isWeakExcluded"] is not True]
+    high_rows = [row for row in clean_rows if str(row["isHighRmse"]).lower() == "true" or row["isHighRmse"] is True]
+    stable_rows = [row for row in clean_rows if row not in high_rows]
+    soft_rows = [row for row in clean_rows if row["gateRole"] == "soft"]
+    admit_rows = [row for row in clean_rows if row["gateRole"] == "admit"]
+    metric = {
+        "variantId": variant["variantId"],
+        "variantClass": variant["variantClass"],
+        "description": variant["description"],
+        "cleanCaseCount": len(clean_rows),
+        "weakExcludedCaseCount": len(case_rows) - len(clean_rows),
+        "cleanSoftCaseCount": len(soft_rows),
+        "cleanAdmitCaseCount": len(admit_rows),
+        "cleanMeanCandidateMinusV18KmS": safe_mean(parse_float(row["candidateMinusV18KmS"], 0.0) for row in clean_rows),
+        "cleanHighMeanCandidateMinusV18KmS": safe_mean(parse_float(row["candidateMinusV18KmS"], 0.0) for row in high_rows),
+        "cleanStableMaxRegressionVsV18KmS": max([parse_float(row["candidateMinusV18KmS"], -math.inf) for row in stable_rows] or [0.0]),
+        "softMeanImprovementVsFullSourceKmS": safe_mean(parse_float(row["candidateImprovementVsFullSourceKmS"], 0.0) for row in soft_rows),
+        "admitMaxPenaltyVsFullSourceKmS": max([max(0.0, parse_float(row["candidateRmse"], 0.0) - parse_float(row["fullSourceRmse"], 0.0)) for row in admit_rows] or [0.0]),
+        "utilityKmS": safe_mean(parse_float(row["candidateImprovementVsFullSourceKmS"], 0.0) for row in soft_rows)
+        - max([max(0.0, parse_float(row["candidateRmse"], 0.0) - parse_float(row["fullSourceRmse"], 0.0)) for row in admit_rows] or [0.0])
+        - max(0.0, max([parse_float(row["candidateMinusV18KmS"], -math.inf) for row in stable_rows] or [0.0])),
+    }
+    return metric, case_rows
+
+
+def write_v19_broad_source_boundary_audit_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_broad_source_boundary_audit"
+    overlap_rows = v19_broad_source_boundary_overlap_rows()
+    curves, source_supports, canonical_supports, v18_supports, context = v19_broad_source_boundary_case_base(overlap_rows)
+    clean_soft = {row["galaxy"] for row in overlap_rows if row["gateRole"] == "soft" and not row["isWeakExcluded"]}
+    weak_soft = {row["galaxy"] for row in overlap_rows if row["gateRole"] == "weak-excluded-soft-analog"}
+    caps = {row["galaxy"] for row in overlap_rows if row["gateRole"] == "cap" and not row["isWeakExcluded"]}
+    admits = {row["galaxy"] for row in overlap_rows if row["gateRole"] == "admit" and not row["isWeakExcluded"]}
+    variants = [
+        {
+            "variantId": "full-source-equation",
+            "variantClass": "control",
+            "description": "Unmodified v19 source equation on all numeric overlap rows.",
+            "factors": {},
+        },
+        {
+            "variantId": "broad-proxy-guarded",
+            "variantClass": "broad-source-boundary-audit",
+            "description": "Cap clean cap controls and soften clean near-unity quiet-boundary rows.",
+            "factors": {**{name: 0.0 for name in caps}, **{name: 0.50 for name in clean_soft}},
+        },
+        {
+            "variantId": "include-weak-soft-analog",
+            "variantClass": "unsafe-leakage-control",
+            "description": "Same as broad proxy but also activates weak/systematics near-unity analogs; not promotable.",
+            "factors": {**{name: 0.0 for name in caps}, **{name: 0.50 for name in clean_soft | weak_soft}},
+        },
+        {
+            "variantId": "unsafe-admit-soft",
+            "variantClass": "negative-control",
+            "description": "Cap controls and soften source-load/admit rows.",
+            "factors": {**{name: 0.0 for name in caps}, **{name: 0.50 for name in admits}},
+        },
+    ]
+    score_rows: list[dict] = []
+    case_rows: list[dict] = []
+    for variant in variants:
+        metric, cases = v19_broad_source_boundary_score_variant(
+            variant, overlap_rows, curves, source_supports, canonical_supports, v18_supports
+        )
+        score_rows.append(metric)
+        case_rows.extend(cases)
+    rng = random.Random(20260525)
+    eligible = [row["galaxy"] for row in overlap_rows if not row["isWeakExcluded"] and row["galaxy"] in source_supports and row["gateRole"] not in {"cap", "missing"}]
+    null_rows: list[dict] = []
+    for draw in range(400):
+        selected = set(rng.sample(eligible, min(len(clean_soft), len(eligible)))) if clean_soft else set()
+        variant = {
+            "variantId": f"random-clean-soft-{draw}",
+            "variantClass": "same-active-clean-null",
+            "description": "Cap controls and soften a random clean eligible overlap row.",
+            "factors": {**{name: 0.0 for name in caps}, **{name: 0.50 for name in selected}},
+        }
+        metric, _ = v19_broad_source_boundary_score_variant(
+            variant, overlap_rows, curves, source_supports, canonical_supports, v18_supports
+        )
+        null_rows.append(
+            {
+                "nullType": "same-active-clean-soft",
+                "draw": draw,
+                "activeTargets": ";".join(sorted(selected)),
+                "utilityKmS": metric["utilityKmS"],
+                "softMeanImprovementVsFullSourceKmS": metric["softMeanImprovementVsFullSourceKmS"],
+                "admitMaxPenaltyVsFullSourceKmS": metric["admitMaxPenaltyVsFullSourceKmS"],
+            }
+        )
+    best = next(row for row in score_rows if row["variantId"] == "broad-proxy-guarded")
+    null_utils = [parse_float(row["utilityKmS"], math.nan) for row in null_rows]
+    null_p95 = v19_quantile(null_utils, 0.95) if null_utils else math.nan
+    null_margin = parse_float(best["utilityKmS"], math.nan) - null_p95 if math.isfinite(null_p95) else math.nan
+    if len(clean_soft) >= 2 and null_margin >= 2.0:
+        verdict = "broad source-boundary class found"
+    elif len(clean_soft) == 1 and weak_soft:
+        verdict = "clean source-boundary class isolated; weak analog excluded"
+    elif len(clean_soft) == 1:
+        verdict = "clean source-boundary class isolated"
+    else:
+        verdict = "no broad source-boundary class found"
+    capsule = {
+        "analysisName": "mts-v19-broad-source-boundary-audit-v1",
+        "verdict": verdict,
+        "overlapRows": len(overlap_rows),
+        "cleanSoftCaseCount": len(clean_soft),
+        "weakSoftAnalogCount": len(weak_soft),
+        "capControlCount": len(caps),
+        "admitControlCount": len(admits),
+        "bestUtilityKmS": best["utilityKmS"],
+        "nullP95UtilityKmS": null_p95,
+        "nullMarginKmS": null_margin,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    write_csv(out_dir / f"{prefix}_overlap_rows.csv", overlap_rows)
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 Broad Source-Boundary Audit",
+        "",
+        "This mode tests whether the NGC3198 numeric source-boundary condition generalizes across all cached THINGS/Radialflows galaxies that overlap SPARC. It does not update v18, v19, or the browser.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"SPARC-overlap numeric rows: `{len(overlap_rows)}`.",
+        f"Clean soft-boundary rows: `{len(clean_soft)}` ({';'.join(sorted(clean_soft)) or 'none'}).",
+        f"Weak/systematics soft analogs: `{len(weak_soft)}` ({';'.join(sorted(weak_soft)) or 'none'}).",
+        f"Same-active null p95 utility: `{fmt(null_p95)}`; margin `{fmt(null_margin)}`.",
+        "",
+        "| Galaxy | set | route | flow/SFR | harmonic % | class | gate |",
+        "| --- | --- | --- | ---: | ---: | --- | --- |",
+    ]
+    for row in overlap_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['setLabel']} | {row['lockedRoute']} | {fmt(row['absFlowToSfrRatio'])} | {fmt(row['harmonicPctOfVtot'])} | {row['sourceBoundaryClass']} | {row['gateRole']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Framework Consequence",
+            "",
+            "The cached numeric tables do not reveal a broad clean NGC3198-like class. NGC2903 is the closest near-unity inflow/harmonic-quiet analog, but it is already weak/systematics-excluded and cannot be used to fit or promote a transport law. The clean result is therefore not a stronger v19 gate yet; it is a sharper diagnosis that the missing source-boundary variable likely needs more 2D/provenance coverage or another physical source-field descriptor.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    return capsule
+
+
+def cmd_v19broadsourceboundaryaudit(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_BROAD_SOURCE_BOUNDARY_AUDIT_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_broad_source_boundary_audit_artifacts(out_dir)
+    print("MTS v19 broad source-boundary audit")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"overlap={capsule['overlapRows']}",
+                f"clean_soft={capsule['cleanSoftCaseCount']}",
+                f"weak_analog={capsule['weakSoftAnalogCount']}",
+                f"null_margin={fmt(capsule['nullMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v19 broad source-boundary audit to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -111481,6 +111819,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19boundaryouterperturbationfetch",
             "v19sourceboundarynumericgatev2",
             "observedstatev19sourceboundarynumericgatev2",
+            "v19broadsourceboundaryaudit",
+            "observedstatev19broadsourceboundaryaudit",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -111938,6 +112278,8 @@ def main() -> None:
         cmd_v19boundaryouterperturbationfetch(args)
     elif args.mode in {"v19sourceboundarynumericgatev2", "observedstatev19sourceboundarynumericgatev2"}:
         cmd_v19sourceboundarynumericgatev2(args)
+    elif args.mode in {"v19broadsourceboundaryaudit", "observedstatev19broadsourceboundaryaudit"}:
+        cmd_v19broadsourceboundaryaudit(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
