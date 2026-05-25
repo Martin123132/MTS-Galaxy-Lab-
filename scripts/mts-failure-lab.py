@@ -104970,6 +104970,40 @@ V19_EXTERNAL_TWO_D_SOURCES = [
         "independent2DUse": "HI morphology and asymmetry proxy if target overlap exists",
     },
     {
+        "sourceId": "cds-things-whisp-morphology",
+        "family": "THINGS/WHISP quantified stellar and HI morphology",
+        "urls": [
+            "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/MNRAS/416/2401?format=html&tex=true",
+            "https://cdsarc.cds.unistra.fr/ftp/J/MNRAS/416/2401/tablea.dat",
+            "https://cdsarc.cds.unistra.fr/ftp/J/MNRAS/416/2401/tablea2.dat",
+        ],
+        "dataKind": "stellar and neutral-hydrogen morphology/asymmetry catalogue",
+        "independent2DUse": "compares stellar/gas morphology state for THINGS/WHISP overlaps",
+    },
+    {
+        "sourceId": "cds-whisp-morphology-paper4",
+        "family": "WHISP complete-sample morphology",
+        "urls": [
+            "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/MNRAS/416/2437?format=html&tex=true",
+            "https://cdsarc.cds.unistra.fr/ftp/J/MNRAS/416/2437/tablea1.dat",
+        ],
+        "dataKind": "complete WHISP HI morphology/asymmetry catalogue",
+        "independent2DUse": "larger WHISP morphology overlap for source-field admissibility",
+    },
+    {
+        "sourceId": "cds-whisp-multiwavelength-paper6",
+        "family": "WHISP HI/UV morphology and XUV classes",
+        "urls": [
+            "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/MNRAS/427/3159?format=html&tex=true",
+            "https://cdsarc.cds.unistra.fr/ftp/J/MNRAS/427/3159/tablea1.dat",
+            "https://cdsarc.cds.unistra.fr/ftp/J/MNRAS/427/3159/tablec1.dat",
+            "https://cdsarc.cds.unistra.fr/ftp/J/MNRAS/427/3159/tablec2.dat",
+            "https://cdsarc.cds.unistra.fr/ftp/J/MNRAS/427/3159/tablec3.dat",
+        ],
+        "dataKind": "HI/NUV/FUV morphology and extended-UV class catalogue",
+        "independent2DUse": "multiwavelength source-field morphology overlap for protected/high cases",
+    },
+    {
         "sourceId": "cds-amiga-hi-asymmetry",
         "family": "AMIGA HI profile asymmetry",
         "urls": [
@@ -105723,6 +105757,159 @@ def v19_parse_whisp_morphology_tables(source_cache: Path) -> list[dict]:
     return cases
 
 
+def v19_external_2d_match_ugc_target(source_class: dict[str, dict], ugc_number: int) -> dict | None:
+    if ugc_number < 0:
+        return None
+    candidate_keys = [
+        v19_external_2d_norm_name(f"UGC{ugc_number}"),
+        v19_external_2d_norm_name(f"UGC{ugc_number:04d}"),
+        v19_external_2d_norm_name(f"UGC{ugc_number:05d}"),
+    ]
+    return next((source_class[key] for key in candidate_keys if key in source_class), None)
+
+
+def v19_parse_things_whisp_morphology_table(source_cache: Path) -> list[dict]:
+    base = source_cache / "cds-things-whisp-morphology"
+    files = sorted(base.glob("*tablea-dat*"))
+    if not files:
+        return []
+    path = files[0]
+    source_class = v19_external_2d_source_class_map()
+    cases: list[dict] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+        if not line.strip():
+            continue
+        galaxy = v19_external_2d_substr_text(line, 1, 11).replace(" ", "")
+        target = source_class.get(v19_external_2d_norm_name(galaxy))
+        if not target:
+            continue
+        data_kind = v19_external_2d_substr_text(line, 13, 13)
+        source_suffix = "stellar" if data_kind == "s" else ("gas" if data_kind == "g" else "unknown")
+        cases.append(
+            {
+                "sourceId": f"cds-things-whisp-morphology-{source_suffix}",
+                "galaxy": target.get("galaxy", galaxy),
+                "sourceClass": target.get("sourceClass", "v19-target"),
+                "pointCount": 1,
+                "usableSidePairCount": 0,
+                "thingsMorphologyDataKind": data_kind,
+                "thingsMorphologyFilter": v19_external_2d_substr_text(line, 15, 21),
+                "thingsMorphologyGini": v19_external_2d_substr_float(line, 24, 29),
+                "thingsMorphologyM20": v19_external_2d_substr_float(line, 37, 42),
+                "thingsMorphologyConcentration": v19_external_2d_substr_float(line, 50, 55),
+                "thingsMorphologyAsymmetryA": v19_external_2d_substr_float(line, 63, 69),
+                "thingsMorphologySmoothnessS": v19_external_2d_substr_float(line, 77, 81),
+                "thingsMorphologyEllipticity": v19_external_2d_substr_float(line, 89, 93),
+                "thingsMorphologyMomentGini": v19_external_2d_substr_float(line, 101, 108),
+                "sourcePath": str(path),
+                "lineNumber": line_number,
+            }
+        )
+    return cases
+
+
+def v19_parse_whisp_complete_morphology_table(source_cache: Path) -> list[dict]:
+    base = source_cache / "cds-whisp-morphology-paper4"
+    files = sorted(base.glob("*tablea1*"))
+    if not files:
+        return []
+    path = files[0]
+    source_class = v19_external_2d_source_class_map()
+    cases: list[dict] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+        if not line.strip():
+            continue
+        ugc_value = parse_float(v19_external_2d_substr_text(line, 1, 5), math.nan)
+        target = v19_external_2d_match_ugc_target(source_class, int(ugc_value) if math.isfinite(ugc_value) else -1)
+        if not target:
+            continue
+        cases.append(
+            {
+                "sourceId": "cds-whisp-morphology-paper4",
+                "galaxy": target.get("galaxy", f"UGC{int(ugc_value)}"),
+                "sourceClass": target.get("sourceClass", "v19-target"),
+                "pointCount": 1,
+                "usableSidePairCount": 0,
+                "whispP4UGC": int(ugc_value),
+                "whispP4Gini": v19_external_2d_substr_float(line, 7, 11),
+                "whispP4M20": v19_external_2d_substr_float(line, 19, 24),
+                "whispP4Concentration": v19_external_2d_substr_float(line, 32, 37),
+                "whispP4AsymmetryA": v19_external_2d_substr_float(line, 45, 49),
+                "whispP4SmoothnessS": v19_external_2d_substr_float(line, 57, 61),
+                "whispP4Ellipticity": v19_external_2d_substr_float(line, 69, 73),
+                "whispP4MomentGini": v19_external_2d_substr_float(line, 81, 85),
+                "whispP4AxisSymmetryAxy": v19_external_2d_substr_float(line, 93, 97),
+                "sourcePath": str(path),
+                "lineNumber": line_number,
+            }
+        )
+    return cases
+
+
+def v19_parse_whisp_multiwavelength_tables(source_cache: Path) -> list[dict]:
+    base = source_cache / "cds-whisp-multiwavelength-paper6"
+    source_class = v19_external_2d_source_class_map()
+    cases: list[dict] = []
+    class_files = sorted(base.glob("*tablea1*"))
+    for path in class_files:
+        for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+            if not line.strip():
+                continue
+            ugc_value = parse_float(v19_external_2d_substr_text(line, 1, 5), math.nan)
+            target = v19_external_2d_match_ugc_target(source_class, int(ugc_value) if math.isfinite(ugc_value) else -1)
+            if not target:
+                continue
+            cases.append(
+                {
+                    "sourceId": "cds-whisp-multiwavelength-paper6-xuv",
+                    "galaxy": target.get("galaxy", f"UGC{int(ugc_value)}"),
+                    "sourceClass": target.get("sourceClass", "v19-target"),
+                    "pointCount": 1,
+                    "usableSidePairCount": 0,
+                    "whispP6UGC": int(ugc_value),
+                    "whispP6XuvClass": v19_external_2d_substr_text(line, 7, 9),
+                    "sourcePath": str(path),
+                    "lineNumber": line_number,
+                }
+            )
+    table_map = {
+        "tablec1": ("hi", "HI"),
+        "tablec2": ("nuv", "NUV"),
+        "tablec3": ("fuv", "FUV"),
+    }
+    for table_id, (suffix, band) in table_map.items():
+        for path in sorted(base.glob(f"*{table_id}*")):
+            for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+                if not line.strip():
+                    continue
+                ugc_value = parse_float(v19_external_2d_substr_text(line, 1, 5), math.nan)
+                target = v19_external_2d_match_ugc_target(source_class, int(ugc_value) if math.isfinite(ugc_value) else -1)
+                if not target:
+                    continue
+                cases.append(
+                    {
+                        "sourceId": f"cds-whisp-multiwavelength-paper6-{suffix}",
+                        "galaxy": target.get("galaxy", f"UGC{int(ugc_value)}"),
+                        "sourceClass": target.get("sourceClass", "v19-target"),
+                        "pointCount": 1,
+                        "usableSidePairCount": 0,
+                        "whispP6UGC": int(ugc_value),
+                        "whispP6Band": band,
+                        "whispP6Gini": v19_external_2d_substr_float(line, 7, 11),
+                        "whispP6M20": v19_external_2d_substr_float(line, 19, 24),
+                        "whispP6Concentration": v19_external_2d_substr_float(line, 32, 36),
+                        "whispP6AsymmetryA": v19_external_2d_substr_float(line, 44, 48),
+                        "whispP6SmoothnessS": v19_external_2d_substr_float(line, 56, 60),
+                        "whispP6Ellipticity": v19_external_2d_substr_float(line, 68, 72),
+                        "whispP6MomentGini": v19_external_2d_substr_float(line, 80, 84),
+                        "whispP6R50Arcsec": v19_external_2d_substr_float(line, 92, 98),
+                        "sourcePath": str(path),
+                        "lineNumber": line_number,
+                    }
+                )
+    return cases
+
+
 def v19_external_2d_union_rows(rows: list[dict]) -> list[dict]:
     keys: list[str] = []
     for row in rows:
@@ -105740,11 +105927,17 @@ def write_v19_external_2d_parser_artifacts(out_dir: Path, source_cache: Path) ->
     gf_cases = v19_parse_ghasp_velocity_field_table(source_cache)
     s4g_cases = v19_parse_s4g_lopsidedness_table(source_cache)
     whisp_cases = v19_parse_whisp_morphology_tables(source_cache)
+    things_whisp_cases = v19_parse_things_whisp_morphology_table(source_cache)
+    whisp_p4_cases = v19_parse_whisp_complete_morphology_table(source_cache)
+    whisp_p6_cases = v19_parse_whisp_multiwavelength_tables(source_cache)
     points = b_points + g_points
-    cases = b_cases + g_cases + gf_cases + s4g_cases + whisp_cases
+    cases = b_cases + g_cases + gf_cases + s4g_cases + whisp_cases + things_whisp_cases + whisp_p4_cases + whisp_p6_cases
     v19_cases = [row for row in cases if row.get("sourceClass") in {"protected-false-activation", "retained-high-source-load"}]
     false_cases = [row for row in v19_cases if row["sourceClass"] == "protected-false-activation"]
     high_cases = [row for row in v19_cases if row["sourceClass"] == "retained-high-source-load"]
+    v19_unique = sorted({(row.get("galaxy", ""), row.get("sourceClass", "")) for row in v19_cases})
+    false_unique = sorted({row.get("galaxy", "") for row in false_cases})
+    high_unique = sorted({row.get("galaxy", "") for row in high_cases})
     threshold_rows = []
     feature_names = [
         "meanSideAsymmetryFraction",
@@ -105760,6 +105953,18 @@ def write_v19_external_2d_parser_artifacts(out_dir: Path, source_cache: Path) ->
         "whispLopsidedness",
         "whispGini",
         "whispM20",
+        "thingsMorphologyM20",
+        "thingsMorphologyAsymmetryA",
+        "thingsMorphologyGini",
+        "thingsMorphologyConcentration",
+        "whispP4M20",
+        "whispP4AsymmetryA",
+        "whispP4Gini",
+        "whispP4AxisSymmetryAxy",
+        "whispP6M20",
+        "whispP6AsymmetryA",
+        "whispP6Gini",
+        "whispP6R50Arcsec",
     ]
     for feature_name in feature_names:
         values = [parse_float(row.get(feature_name), math.nan) for row in v19_cases]
@@ -105801,9 +106006,10 @@ def write_v19_external_2d_parser_artifacts(out_dir: Path, source_cache: Path) ->
         f"Verdict: `{verdict}`.",
         f"Parsed point rows: `{len(points)}`.",
         f"Parsed case metrics: `{len(cases)}`.",
-        f"v19 overlap cases: `{len(v19_cases)}`.",
-        f"False-activation overlap cases: `{len(false_cases)}`.",
-        f"Retained-high overlap cases: `{len(high_cases)}`.",
+        f"v19 overlap metric rows: `{len(v19_cases)}`.",
+        f"Unique v19 overlap galaxies: `{len(v19_unique)}`.",
+        f"Unique false-activation overlap galaxies: `{len(false_unique)}`.",
+        f"Unique retained-high overlap galaxies: `{len(high_unique)}`.",
         "",
         "## v19 Overlap Cases",
         "",
@@ -105821,9 +106027,10 @@ def write_v19_external_2d_parser_artifacts(out_dir: Path, source_cache: Path) ->
         "verdict": verdict,
         "parsedPointRows": len(points),
         "caseMetricRows": len(cases),
-        "v19OverlapCases": len(v19_cases),
-        "falseActivationOverlapCases": len(false_cases),
-        "retainedHighOverlapCases": len(high_cases),
+        "v19OverlapRows": len(v19_cases),
+        "v19OverlapCases": len(v19_unique),
+        "falseActivationOverlapCases": len(false_unique),
+        "retainedHighOverlapCases": len(high_unique),
         "canonicalMtsChanged": False,
         "browserChanged": False,
         "cacheRoot": str(source_cache),
@@ -105851,6 +106058,7 @@ def cmd_v19external2dparser(args: argparse.Namespace) -> None:
                 f"points={capsule['parsedPointRows']}",
                 f"cases={capsule['caseMetricRows']}",
                 f"v19_overlap={capsule['v19OverlapCases']}",
+                f"v19_rows={capsule.get('v19OverlapRows', capsule['v19OverlapCases'])}",
                 f"false={capsule['falseActivationOverlapCases']}",
                 f"high={capsule['retainedHighOverlapCases']}",
             ]
@@ -105881,6 +106089,18 @@ V19_EXTERNAL_2D_ADMISSIBILITY_FEATURES = [
     "whispEllipticity",
     "whispSmoothnessS",
     "whispMomentGini",
+    "thingsMorphologyM20",
+    "thingsMorphologyAsymmetryA",
+    "thingsMorphologyGini",
+    "thingsMorphologyConcentration",
+    "whispP4M20",
+    "whispP4AsymmetryA",
+    "whispP4Gini",
+    "whispP4AxisSymmetryAxy",
+    "whispP6M20",
+    "whispP6AsymmetryA",
+    "whispP6Gini",
+    "whispP6R50Arcsec",
 ]
 
 
@@ -105889,16 +106109,39 @@ def v19_external_2d_admissibility_rows(parser_dir: Path) -> list[dict]:
     if not case_path.exists():
         write_v19_external_2d_parser_artifacts(parser_dir, DEFAULT_V19_EXTERNAL_TWO_D_ACQUIRE_CACHE)
     rows = read_csv_rows(case_path) if case_path.exists() else []
-    out = [
+    labeled = [
         row for row in rows
         if row.get("sourceClass") in {"protected-false-activation", "retained-high-source-load"}
     ]
-    return sorted(out, key=lambda row: (row.get("sourceClass", ""), row.get("galaxy", ""), row.get("sourceId", "")))
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for row in labeled:
+        grouped.setdefault((row.get("galaxy", ""), row.get("sourceClass", "")), []).append(row)
+    out: list[dict] = []
+    for (galaxy, source_class), group in grouped.items():
+        merged: dict = {
+            "galaxy": galaxy,
+            "sourceClass": source_class,
+            "external2DRowCount": len(group),
+            "sourceId": ";".join(sorted({row.get("sourceId", "") for row in group if row.get("sourceId", "")})),
+            "sourceFamily": ";".join(sorted({v19_external_2d_source_family(row.get("sourceId", "")) for row in group})),
+            "sourcePath": ";".join(sorted({row.get("sourcePath", "") for row in group if row.get("sourcePath", "")})),
+        }
+        for feature in V19_EXTERNAL_2D_ADMISSIBILITY_FEATURES:
+            values = [parse_float(row.get(feature), math.nan) for row in group]
+            values = [value for value in values if math.isfinite(value)]
+            merged[feature] = safe_median(values) if values else ""
+            merged[f"{feature}Count"] = len(values)
+        out.append(merged)
+    return sorted(out, key=lambda row: (row.get("sourceClass", ""), row.get("galaxy", "")))
 
 
 def v19_external_2d_source_family(source_id: str) -> str:
     if source_id.startswith("cds-whisp-morphology"):
         return "WHISP-HI-morphology"
+    if source_id.startswith("cds-things-whisp-morphology"):
+        return "THINGS-WHISP-stellar-HI-morphology"
+    if source_id.startswith("cds-whisp-multiwavelength"):
+        return "WHISP-HI-UV-morphology"
     if source_id.startswith("cds-s4g"):
         return "S4G-stellar-lopsidedness"
     if source_id.startswith("cds-blais"):
@@ -105934,7 +106177,20 @@ def v19_external_2d_rule_candidates(rows: list[dict]) -> list[dict]:
     one_variable = list(rules)
     compact = [
         rule for rule in one_variable
-        if rule["feature"] in {"meanSideAsymmetryFraction", "s4gOuterA1", "whispAsymmetryA", "whispLopsidedness", "whispM20", "whispGini"}
+        if rule["feature"] in {
+            "meanSideAsymmetryFraction",
+            "s4gOuterA1",
+            "whispAsymmetryA",
+            "whispLopsidedness",
+            "whispM20",
+            "whispGini",
+            "thingsMorphologyM20",
+            "thingsMorphologyAsymmetryA",
+            "whispP4M20",
+            "whispP4AsymmetryA",
+            "whispP6M20",
+            "whispP6AsymmetryA",
+        }
     ]
     for left in compact:
         for right in compact:
@@ -106071,7 +106327,7 @@ def v19_external_2d_case_decision(row: dict, best_rule: dict) -> dict:
         decision = "unlabelled"
     return {
         **row,
-        "sourceFamily": v19_external_2d_source_family(row.get("sourceId", "")),
+        "sourceFamily": row.get("sourceFamily") or v19_external_2d_source_family(row.get("sourceId", "")),
         "bestRuleHitUnsafe": hit,
         "admissibilityDecision": decision,
         "candidateSourceAction": "cap/reject source response" if hit else "admit source response",
