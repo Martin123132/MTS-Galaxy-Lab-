@@ -273,6 +273,7 @@ DEFAULT_V19_SOURCE_BOUNDARY_TEST_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-bounda
 DEFAULT_V19_BOUNDARY_NUMERIC_LAW_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-numeric-law-v1"
 DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_OUT = OUTPUT_PACK_ROOT / "mts-v19-ngc3198-numeric-boundary-v1"
 DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ngc3198-numeric-boundary-v1")
+DEFAULT_V19_SOURCE_BOUNDARY_NUMERIC_GATE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-numeric-gate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -109890,6 +109891,339 @@ def cmd_v19ngc3198numericboundary(args: argparse.Namespace) -> None:
     print(f"Wrote v19 NGC3198 numeric boundary evidence to {out_dir.resolve()}")
 
 
+def v19_source_boundary_numeric_matrix() -> list[dict]:
+    numeric_dir = DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_OUT
+    radial_path = numeric_dir / "mts_v19_ngc3198_numeric_boundary_radial_flow_table.csv"
+    feature_path = numeric_dir / "mts_v19_ngc3198_numeric_boundary_derived_features.csv"
+    if not radial_path.exists() or not feature_path.exists():
+        write_v19_ngc3198_numeric_boundary_artifacts(
+            DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_OUT,
+            DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE,
+            True,
+        )
+    radial_rows = {row["galaxy"]: row for row in read_csv_rows(radial_path)} if radial_path.exists() else {}
+    feature_rows = {row["feature"]: row for row in read_csv_rows(feature_path)} if feature_path.exists() else {}
+    rows: list[dict] = []
+    for name, role in V19_SOURCE_BOUNDARY_TARGET_ROLES.items():
+        radial = radial_rows.get(name, {})
+        gamma = parse_float(radial.get("gammaHiOutsideR25MsunYr"), math.nan)
+        sfr = parse_float(radial.get("sfrMsunYr"), math.nan)
+        flow_sign = "inflow" if math.isfinite(gamma) and gamma < 0 else ("outflow" if math.isfinite(gamma) and gamma > 0 else "MISSING")
+        ratio = abs(gamma) / sfr if math.isfinite(gamma) and math.isfinite(sfr) and sfr > 0 else math.nan
+        # Direct matched velfit/HALOGAS variables are currently table-grade only for NGC3198 and NGC2403.
+        if name == "NGC3198":
+            span = parse_float(feature_rows.get("outerBisymmetricSpanFraction", {}).get("value"), math.nan)
+            growth = parse_float(feature_rows.get("bisymmetricAmplitudeGrowth", {}).get("value"), math.nan)
+            perturb = parse_float(feature_rows.get("outerPerturbationToCircularSpeed", {}).get("value"), math.nan)
+            extraplanar = parse_float(feature_rows.get("extraplanarHiMassFraction", {}).get("value"), math.nan)
+            velfit_source = str(numeric_dir / "mts_v19_ngc3198_numeric_boundary_derived_features.csv")
+        elif name == "NGC2403":
+            span = (844.0 - 450.0) / 844.0
+            growth = 2.12 - 11.86
+            perturb = 11.86 / 120.0
+            extraplanar = math.nan
+            velfit_source = str(DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE / "arxiv-0912.5493-source-extract" / "velfit.tex")
+        else:
+            span = math.nan
+            growth = math.nan
+            perturb = math.nan
+            extraplanar = math.nan
+            velfit_source = "MISSING"
+        inflow_sfr_matched = math.isfinite(ratio) and flow_sign == "inflow" and 0.75 <= ratio <= 1.50
+        positive_outer_growth = math.isfinite(growth) and growth >= 5.0
+        broad_boundary = math.isfinite(span) and span >= 0.40
+        quiet_perturbation = math.isfinite(perturb) and perturb <= 0.11
+        soft_gate = inflow_sfr_matched and positive_outer_growth and broad_boundary and quiet_perturbation
+        radial_only_gate = inflow_sfr_matched
+        rows.append(
+            {
+                "galaxy": name,
+                "targetRole": role,
+                "radialFlowGammaMsunYr": gamma if math.isfinite(gamma) else "",
+                "sfrMsunYr": sfr if math.isfinite(sfr) else "",
+                "flowSign": flow_sign,
+                "absFlowToSfrRatio": ratio if math.isfinite(ratio) else "",
+                "outerBisymmetricSpanFraction": span if math.isfinite(span) else "",
+                "outerPerturbationGrowthKmS": growth if math.isfinite(growth) else "",
+                "outerPerturbationToCircularSpeed": perturb if math.isfinite(perturb) else "",
+                "extraplanarHiMassFraction": extraplanar if math.isfinite(extraplanar) else "",
+                "inflowSfrMatched": inflow_sfr_matched,
+                "positiveOuterPerturbationGrowth": positive_outer_growth,
+                "broadOuterBoundary": broad_boundary,
+                "quietPerturbation": quiet_perturbation,
+                "radialOnlyMatchedGate": radial_only_gate,
+                "numericSoftBoundaryGate": soft_gate,
+                "coverageClass": "radial+outer-perturbation" if math.isfinite(growth) else ("radial-only" if radial else "missing numeric source coverage"),
+                "radialSourcePath": radial.get("sourcePath", "MISSING"),
+                "outerPerturbationSourcePath": velfit_source,
+            }
+        )
+    return rows
+
+
+def v19_source_boundary_numeric_gate_variant_specs(matrix_rows: list[dict]) -> list[dict]:
+    prior_caps = {"IC2574", "NGC5055", "UGC07089"}
+    numeric_soft = {row["galaxy"] for row in matrix_rows if row.get("numericSoftBoundaryGate") is True}
+    radial_soft = {row["galaxy"] for row in matrix_rows if row.get("radialOnlyMatchedGate") is True}
+    return [
+        {
+            "variantId": "prior-protected-cap-control",
+            "variantClass": "control",
+            "description": "Keep the previous protected cap evidence, with no numeric NGC3198 boundary softening.",
+            "factors": {name: 0.0 for name in prior_caps},
+            "formula": "prior protected evidence only; no new numeric source-boundary gate",
+            "promotable": False,
+        },
+        {
+            "variantId": "radial-sfr-match-soft050",
+            "variantClass": "numeric-gate-pilot",
+            "description": "Prior protected caps plus 50% source response where outer HI inflow is SFR-matched.",
+            "factors": {**{name: 0.0 for name in prior_caps}, **{name: 0.50 for name in radial_soft}},
+            "formula": "if gamma_HI<0 and 0.75<=abs(gamma_HI)/SFR<=1.50: f_boundary=0.50",
+            "promotable": False,
+        },
+        {
+            "variantId": "radial-plus-growth-soft050",
+            "variantClass": "numeric-gate-pilot",
+            "description": "Prior protected caps plus 50% source response when SFR-matched inflow also has outward-growing outer perturbation.",
+            "factors": {**{name: 0.0 for name in prior_caps}, **{name: 0.50 for name in numeric_soft}},
+            "formula": "if gamma_HI<0 and 0.75<=abs(gamma_HI)/SFR<=1.50 and outer perturbation grows by >=5 km/s over broad outer domain: f_boundary=0.50",
+            "promotable": False,
+        },
+        {
+            "variantId": "radial-plus-growth-soft025",
+            "variantClass": "numeric-gate-pilot",
+            "description": "Same numeric soft-boundary gate, but only 25% source response.",
+            "factors": {**{name: 0.0 for name in prior_caps}, **{name: 0.25 for name in numeric_soft}},
+            "formula": "same as radial-plus-growth-soft050, f_boundary=0.25",
+            "promotable": False,
+        },
+        {
+            "variantId": "any-inflow-soft050-negative-control",
+            "variantClass": "negative-control",
+            "description": "Prior protected caps plus 50% source response for any target with inflow, regardless of SFR matching or perturbation direction.",
+            "factors": {
+                **{name: 0.0 for name in prior_caps},
+                **{row["galaxy"]: 0.50 for row in matrix_rows if row.get("flowSign") == "inflow"},
+            },
+            "formula": "unsafe negative control: if gamma_HI<0, f_boundary=0.50",
+            "promotable": False,
+        },
+    ]
+
+
+def v19_source_boundary_numeric_gate_nulls(
+    curves: dict[str, dict],
+    source_supports: dict[str, list[float]],
+    canonical_supports: dict[str, list[float]],
+    v18_supports: dict[str, list[float]],
+    counter_context: dict[str, dict],
+    facts_context: dict[str, dict],
+    active_count: int,
+    seed: int = 20260525,
+    draws: int = 500,
+) -> list[dict]:
+    prior_caps = {"IC2574", "NGC5055", "UGC07089"}
+    eligible = [name for name in V19_SOURCE_BOUNDARY_TARGET_ROLES if name not in prior_caps and name in curves]
+    rng = random.Random(seed)
+    rows: list[dict] = []
+    for draw in range(draws):
+        selected = set(rng.sample(eligible, min(active_count, len(eligible))))
+        variant = {
+            "variantId": f"random-numeric-soft-{draw}",
+            "variantClass": "same-active-count-soft-null",
+            "description": "Prior protected caps plus random numeric-soft boundary targets.",
+            "factors": {**{name: 0.0 for name in prior_caps}, **{name: 0.50 for name in selected}},
+            "promotable": False,
+        }
+        metric, _ = v19_source_boundary_score_variant(
+            variant,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            counter_context,
+            facts_context,
+        )
+        rows.append(
+            {
+                "nullType": "same-active-count-random-numeric-soft",
+                "draw": draw,
+                "activeCount": len(selected),
+                "activeTargets": ";".join(sorted(selected)),
+                "targetUtilityKmS": metric["targetUtilityKmS"],
+                "ngc3198ImprovementVsFullSourceKmS": metric["ngc3198ImprovementVsFullSourceKmS"],
+                "admitMeanPenaltyVsFullSourceKmS": metric["admitMeanPenaltyVsFullSourceKmS"],
+                "admitMaxPenaltyVsFullSourceKmS": metric["admitMaxPenaltyVsFullSourceKmS"],
+            }
+        )
+    return rows
+
+
+def write_v19_source_boundary_numeric_gate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_source_boundary_numeric_gate"
+    if not (DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_OUT / "mts_v19_ngc3198_numeric_boundary_capsule.json").exists():
+        write_v19_ngc3198_numeric_boundary_artifacts(
+            DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_OUT,
+            DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE,
+            True,
+        )
+    curves, source_supports, canonical_supports, v18_supports, _context = v19_source_boundary_case_base()
+    counter_context, facts_context = v19_source_boundary_evidence_context()
+    matrix_rows = v19_source_boundary_numeric_matrix()
+    score_rows: list[dict] = []
+    case_rows: list[dict] = []
+    branch_rows: list[dict] = []
+    for variant in v19_source_boundary_numeric_gate_variant_specs(matrix_rows):
+        metric, cases = v19_source_boundary_score_variant(
+            variant,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            counter_context,
+            facts_context,
+        )
+        metric["numericFormula"] = variant["formula"]
+        score_rows.append(metric)
+        case_rows.extend(cases)
+        branch_rows.append(
+            {
+                "variantId": variant["variantId"],
+                "variantClass": variant["variantClass"],
+                "formula": variant["formula"],
+                "activeFactors": ";".join(f"{name}:{factor}" for name, factor in sorted(variant["factors"].items())) or "all targets:1.0",
+                "description": variant["description"],
+                "promotableAsLaw": False,
+            }
+        )
+    best = next(row for row in score_rows if row["variantId"] == "radial-plus-growth-soft050")
+    active_count = sum(1 for row in matrix_rows if row.get("numericSoftBoundaryGate") is True)
+    null_rows = v19_source_boundary_numeric_gate_nulls(
+        curves,
+        source_supports,
+        canonical_supports,
+        v18_supports,
+        counter_context,
+        facts_context,
+        active_count,
+    )
+    null_utils = [parse_float(row["targetUtilityKmS"], math.nan) for row in null_rows]
+    null_utils = [value for value in null_utils if math.isfinite(value)]
+    null_p95 = v19_quantile(null_utils, 0.95) if null_utils else math.nan
+    null_margin = parse_float(best["targetUtilityKmS"], math.nan) - null_p95 if math.isfinite(null_p95) else math.nan
+    coverage_ready_count = sum(1 for row in matrix_rows if row["coverageClass"] == "radial+outer-perturbation")
+    if (
+        parse_float(best["ngc3198ImprovementVsFullSourceKmS"], 0.0) >= 5.0
+        and parse_float(best["admitMaxPenaltyVsFullSourceKmS"], math.inf) <= 1.0
+        and coverage_ready_count >= 5
+        and null_margin >= 2.0
+    ):
+        verdict = "numeric source-boundary gate candidate"
+    elif parse_float(best["ngc3198ImprovementVsFullSourceKmS"], 0.0) >= 5.0 and parse_float(best["admitMaxPenaltyVsFullSourceKmS"], math.inf) <= 1.0:
+        verdict = "single-case numeric boundary input; broader controls needed"
+    else:
+        verdict = "numeric source-boundary gate not supported"
+    formula = {
+        "candidateId": "mts-v19-source-boundary-numeric-gate-v1",
+        "status": verdict,
+        "bestVariant": best,
+        "formula": "prior protected caps unchanged; source-boundary softening only when gamma_HI<0, 0.75<=abs(gamma_HI)/SFR<=1.50, outer perturbation growth>=5 km/s, outer span>=0.40, and perturbation/circular speed<=0.11",
+        "formulaInputs": ["gamma_HI outside r25", "SFR", "outer perturbation span", "outer perturbation amplitude growth", "outer perturbation/circular-speed ratio"],
+        "notPromotedReason": "Coverage-ready direct numeric controls are too sparse; this is a candidate input for the next acquisition/test pass.",
+        "forbiddenInputs": ["galaxy name", "raw residual", "raw RMSE", "NFW parameter", "MOND parameter", "weak/systematics fitting"],
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    write_csv(out_dir / f"{prefix}_numeric_matrix.csv", matrix_rows)
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_branch_ledger.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-source-boundary-numeric-gate-v1",
+        "verdict": verdict,
+        "bestVariant": best["variantId"],
+        "activeNumericSoftGateCount": active_count,
+        "coverageReadyCount": coverage_ready_count,
+        "targetUtilityKmS": best["targetUtilityKmS"],
+        "ngc3198ImprovementVsFullSourceKmS": best["ngc3198ImprovementVsFullSourceKmS"],
+        "admitMaxPenaltyVsFullSourceKmS": best["admitMaxPenaltyVsFullSourceKmS"],
+        "nullP95UtilityKmS": null_p95,
+        "nullMarginKmS": null_margin,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    report = [
+        "# MTS v19 Source-Boundary Numeric Gate",
+        "",
+        "This mode tests whether the new NGC3198 numeric source-paper facts can replace the name-labelled quiet-boundary softening. It does not change the browser or release law.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Best numeric variant: `{best['variantId']}`.",
+        f"NGC3198 improvement vs full source equation: `{fmt(best['ngc3198ImprovementVsFullSourceKmS'])}` km/s.",
+        f"Admitted-control max penalty: `{fmt(best['admitMaxPenaltyVsFullSourceKmS'])}` km/s.",
+        f"Target utility: `{fmt(best['targetUtilityKmS'])}` km/s; same-active null p95 `{fmt(null_p95)}` km/s.",
+        f"Coverage-ready direct numeric controls: `{coverage_ready_count}`.",
+        "",
+        "## Tested Numeric Gate",
+        "",
+        "```text",
+        "if gamma_HI < 0",
+        "and 0.75 <= abs(gamma_HI) / SFR <= 1.50",
+        "and outer perturbation amplitude grows by at least 5 km/s",
+        "and the outer perturbation spans at least 40% of the mapped disk",
+        "and A_outer / V_c <= 0.11:",
+        "    f_boundary = 0.50",
+        "```",
+        "",
+        "## Numeric Matrix",
+        "",
+        "| Galaxy | role | flow/SFR | growth | span | gate | coverage |",
+        "| --- | --- | ---: | ---: | ---: | --- | --- |",
+    ]
+    for row in matrix_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['targetRole']} | {fmt(row['absFlowToSfrRatio'])} | {fmt(row['outerPerturbationGrowthKmS'])} | {fmt(row['outerBisymmetricSpanFraction'])} | {row['numericSoftBoundaryGate']} | {row['coverageClass']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "NGC3198 is recovered by a physical-looking numeric condition: outer inflow roughly matches star formation, and the outer perturbation grows across a broad boundary domain. NGC2403 has boundary/streaming evidence too, but its perturbation fades outward and its inflow is not SFR-matched, so the numeric gate does not suppress it.",
+            "",
+            "This is not promotable yet because the full direct numeric coverage exists for only NGC3198 and NGC2403. The next acquisition step should get matched outer-perturbation/radial-flow numbers for the protected controls and admitted controls.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19sourceboundarynumericgate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SOURCE_BOUNDARY_NUMERIC_GATE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_source_boundary_numeric_gate_artifacts(out_dir)
+    print("MTS v19 source-boundary numeric gate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={capsule['bestVariant']}",
+                f"ngc3198_improve={fmt(capsule['ngc3198ImprovementVsFullSourceKmS'])}",
+                f"admit_penalty={fmt(capsule['admitMaxPenaltyVsFullSourceKmS'])}",
+                f"null_margin={fmt(capsule['nullMarginKmS'])}",
+                f"coverage={capsule['coverageReadyCount']}",
+            ]
+        )
+    )
+    print(f"Wrote v19 source-boundary numeric gate to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -110163,6 +110497,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19boundarynumericlaw",
             "v19ngc3198numericboundary",
             "observedstatev19ngc3198numericboundary",
+            "v19sourceboundarynumericgate",
+            "observedstatev19sourceboundarynumericgate",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -110612,6 +110948,8 @@ def main() -> None:
         cmd_v19boundarynumericlaw(args)
     elif args.mode in {"v19ngc3198numericboundary", "observedstatev19ngc3198numericboundary"}:
         cmd_v19ngc3198numericboundary(args)
+    elif args.mode in {"v19sourceboundarynumericgate", "observedstatev19sourceboundarynumericgate"}:
+        cmd_v19sourceboundarynumericgate(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
