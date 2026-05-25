@@ -255,6 +255,7 @@ DEFAULT_V19_SOURCE_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-provenanc
 DEFAULT_V19_SOURCE_REGIME_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-regime-candidate-v1"
 DEFAULT_V19_FIELD_COHERENCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-field-coherence-v1"
 DEFAULT_V19_DISTRIBUTED_FLOW_OUT = OUTPUT_PACK_ROOT / "mts-v19-distributed-flow-v1"
+DEFAULT_V19_SOURCE_ENVIRONMENT_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-environment-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -104262,6 +104263,369 @@ def cmd_v19distributedflow(args: argparse.Namespace) -> None:
     print(f"Wrote v19 distributed-flow source test to {out_dir.resolve()}")
 
 
+V19_SOURCE_ENVIRONMENT_IDS = [
+    "quality-geometry-veto",
+    "distance-inclination-veto",
+    "dwarf-source-stability-veto",
+    "source-paper-provenance-veto",
+    "combined-environment-admissibility",
+]
+
+
+def v19_source_environment_external_rows() -> dict[str, dict]:
+    rows: dict[str, dict] = {}
+    candidate_paths = [
+        OUTPUT_PACK_ROOT / "mts-v18-50-non-ml-provenance-v1" / "mts_v18_50_non_ml_provenance_case_ledger.csv",
+        OUTPUT_PACK_ROOT / "mts-v18-51-source-provenance-v1" / "mts_v18_51_source_provenance_case_verdicts.csv",
+    ]
+    for path in candidate_paths:
+        if not path.exists():
+            continue
+        for row in read_csv_rows(path):
+            name = str(row.get("galaxy", "")).strip()
+            if not name:
+                continue
+            existing = rows.setdefault(name, {})
+            for key, value in row.items():
+                if key == "galaxy":
+                    continue
+                existing[f"{path.stem}_{key}"] = value
+    return rows
+
+
+def v19_source_environment_features(curve: dict, table1_by_name: dict[str, dict], external_by_name: dict[str, dict]) -> dict:
+    prov = v19_source_provenance_features(curve, table1_by_name)
+    local = v19_admissibility_features(curve)
+    flow = v19_distributed_flow_features(curve)
+    coherence = v19_field_coherence_features(curve)
+    external = external_by_name.get(curve["name"], {})
+    quality = parse_float(prov.get("qualityCode"), math.nan)
+    inclination = parse_float(prov.get("inclinationDeg"), math.nan)
+    inc_unc = parse_float(prov.get("inclinationUncertaintyDeg"), math.nan)
+    dist_unc = parse_float(prov.get("distanceUncertaintyFraction"), math.nan)
+    vflat_unc = parse_float(prov.get("vflatUncertaintyFraction"), math.nan)
+    lum = max(1.0e-9, parse_float(prov.get("luminosity36_1e9Lsun"), 0.0))
+    hi_mass = max(1.0e-9, parse_float(prov.get("hiMass_1e9Msun"), 0.0))
+    h_type = parse_float(prov.get("hubbleType"), math.nan)
+    vflat = parse_float(prov.get("vflatKmS"), math.nan)
+    q_risk = clamp(((quality if math.isfinite(quality) else 1.0) - 1.0) / 2.0, 0.0, 1.0)
+    low_inc_risk = 1.0 - v19_regime_sigmoid(inclination if math.isfinite(inclination) else 55.0, 35.0, 7.5)
+    inc_unc_risk = clamp((inc_unc if math.isfinite(inc_unc) else 4.0) / 12.0, 0.0, 1.0)
+    dist_unc_risk = clamp((dist_unc if math.isfinite(dist_unc) else 0.10) / 0.28, 0.0, 1.0)
+    vflat_unc_risk = clamp((vflat_unc if math.isfinite(vflat_unc) else 0.05) / 0.16, 0.0, 1.0)
+    dwarf_risk = clamp(
+        0.38 * (1.0 - v19_regime_sigmoid(math.log10(lum), math.log10(12.0), 0.42))
+        + 0.24 * (1.0 - v19_regime_sigmoid(math.log10(hi_mass), math.log10(1.0), 0.42))
+        + 0.20 * v19_regime_sigmoid(h_type if math.isfinite(h_type) else 6.0, 8.0, 1.0)
+        + 0.18 * (1.0 - v19_regime_sigmoid(vflat if math.isfinite(vflat) else 120.0, 85.0, 28.0)),
+        0.0,
+        1.0,
+    )
+    flags = " ".join(str(value).lower() for value in external.values())
+    source_context_risk = clamp(
+        (0.45 if "provenance-first" in flags else 0.0)
+        + (0.35 if "direct source-paper provenance evidence found" in flags else 0.0)
+        + (0.25 if "source-wide provenance context found" in flags else 0.0)
+        + (0.25 if "low inclination" in flags else 0.0)
+        + (0.20 if "large fractional distance uncertainty" in flags else 0.0),
+        0.0,
+        1.0,
+    )
+    two_d_proxy_risk = clamp(
+        0.30 * q_risk
+        + 0.20 * low_inc_risk
+        + 0.16 * inc_unc_risk
+        + 0.14 * dist_unc_risk
+        + 0.10 * vflat_unc_risk
+        + 0.10 * (1.0 - flow["distributedFlow"]),
+        0.0,
+        1.0,
+    )
+    environment_stability = clamp(
+        1.0
+        - 0.30 * q_risk
+        - 0.22 * low_inc_risk
+        - 0.16 * inc_unc_risk
+        - 0.14 * dist_unc_risk
+        - 0.10 * source_context_risk
+        - 0.08 * dwarf_risk,
+        0.0,
+        1.0,
+    )
+    return {
+        **prov,
+        **local,
+        **flow,
+        **coherence,
+        "qualityRisk": q_risk,
+        "lowInclinationRisk": low_inc_risk,
+        "inclinationUncertaintyRisk": inc_unc_risk,
+        "distanceUncertaintyRisk": dist_unc_risk,
+        "vflatUncertaintyRisk": vflat_unc_risk,
+        "dwarfSourceRisk": dwarf_risk,
+        "sourceContextRisk": source_context_risk,
+        "twoDProxyRisk": two_d_proxy_risk,
+        "environmentStability": environment_stability,
+        "externalProvenanceMatched": bool(external),
+        "externalProvenanceText": "; ".join(f"{key}={value}" for key, value in sorted(external.items()) if value)[:420],
+    }
+
+
+def v19_source_environment_activation(curve: dict, family_id: str, table1_by_name: dict[str, dict], external_by_name: dict[str, dict]) -> tuple[float, dict]:
+    features = v19_source_environment_features(curve, table1_by_name, external_by_name)
+    base_activation, base_features = v19_distributed_flow_activation(curve, "local-pair-dominance-barrier")
+    if family_id == "quality-geometry-veto":
+        safety = clamp(1.0 - 0.75 * features["qualityRisk"] - 0.45 * features["twoDProxyRisk"], 0.0, 1.0)
+    elif family_id == "distance-inclination-veto":
+        safety = clamp(1.0 - 0.65 * features["lowInclinationRisk"] - 0.55 * features["distanceUncertaintyRisk"] - 0.35 * features["inclinationUncertaintyRisk"], 0.0, 1.0)
+    elif family_id == "dwarf-source-stability-veto":
+        safety = clamp(1.0 - 0.72 * features["dwarfSourceRisk"] + 0.18 * features["distributedFlow"], 0.0, 1.0)
+    elif family_id == "source-paper-provenance-veto":
+        safety = clamp(1.0 - 0.85 * features["sourceContextRisk"] - 0.25 * features["twoDProxyRisk"], 0.0, 1.0)
+    elif family_id == "combined-environment-admissibility":
+        safety = clamp(
+            0.55 * features["environmentStability"]
+            + 0.20 * (1.0 - features["sourceContextRisk"])
+            + 0.15 * (1.0 - features["dwarfSourceRisk"])
+            + 0.10 * features["distributedFlow"],
+            0.0,
+            1.0,
+        )
+    else:
+        raise ValueError(f"Unknown v19 source-environment family: {family_id}")
+    return clamp(base_activation * safety, 0.0, 1.0), {**base_features, **features, "baseDistributedActivation": base_activation, "environmentSafety": safety}
+
+
+def v19_source_environment_scale(curves: list[dict], weak_names: set[str], supports_by_name: dict[str, list[float]], family_id: str, table1_by_name: dict[str, dict], external_by_name: dict[str, dict]) -> float:
+    numerator = 0.0
+    denominator = 0.0
+    for curve in curves:
+        if curve["name"] in weak_names:
+            continue
+        target = supports_by_name.get(curve["name"], [])
+        if len(target) != len(curve["points"]):
+            continue
+        raw, _ = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        activation, _ = v19_source_environment_activation(curve, family_id, table1_by_name, external_by_name)
+        for raw_value, target_value in zip(raw, target):
+            candidate = max(0.0, raw_value) * activation
+            numerator += candidate * max(0.0, target_value)
+            denominator += candidate * candidate
+    return numerator / denominator if denominator > 1.0e-12 else 0.0
+
+
+def v19_source_environment_case_rows(family_id: str) -> tuple[list[dict], dict]:
+    context = observed_state_candidate_context()
+    curves = context["curves"]
+    weak_names = set(context["weakNames"])
+    high_names = set(context["highNames"])
+    table1_by_name = v18_mass_scale_table1()[0]
+    external_by_name = v19_source_environment_external_rows()
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    scale = v19_source_environment_scale(curves, weak_names, supports_by_name, family_id, table1_by_name, external_by_name)
+    rows: list[dict] = []
+    for curve in curves:
+        target = supports_by_name.get(curve["name"], [])
+        if len(target) != len(curve["points"]):
+            continue
+        raw, _ = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        activation, features = v19_source_environment_activation(curve, family_id, table1_by_name, external_by_name)
+        supports = [max(0.0, scale * activation * value) for value in raw]
+        score = v18_competitor_support_score(curve, supports)
+        target_score = v18_competitor_support_score(curve, target)
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        target_gain = pct_improvement(canonical["rmse"], target_score["rmse"])
+        candidate_gain = pct_improvement(canonical["rmse"], score["rmse"])
+        set_name = "weak-systematics-excluded" if curve["name"] in weak_names else ("clean-high-rmse" if curve["name"] in high_names else "clean-protected")
+        rows.append(
+            {
+                "galaxy": curve["name"],
+                "set": set_name,
+                "familyId": family_id,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "activation": activation,
+                "baseDistributedActivation": features["baseDistributedActivation"],
+                "environmentSafety": features["environmentSafety"],
+                "globalScale": scale,
+                "canonicalRmse": canonical["rmse"],
+                "lockedV18Rmse": target_score["rmse"],
+                "sourceEnvironmentRmse": score["rmse"],
+                "sourceMinusV18KmS": score["rmse"] - target_score["rmse"],
+                "gainVsCanonicalPct": candidate_gain,
+                "v18RepairRetentionPct": candidate_gain / target_gain * 100.0 if abs(target_gain) > 1.0e-9 else math.nan,
+                **v19_source_acceleration_shape_metrics(curve, target, supports),
+                **features,
+            }
+        )
+    return rows, {"globalScale": scale, "externalMatchedCount": len(external_by_name)}
+
+
+def v19_source_environment_score_rows() -> tuple[list[dict], list[dict], str, dict]:
+    score_rows: list[dict] = []
+    all_case_rows: list[dict] = []
+    for family_id in V19_SOURCE_ENVIRONMENT_IDS:
+        rows, meta = v19_source_environment_case_rows(family_id)
+        all_case_rows.extend(rows)
+        clean = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+        high = [row for row in clean if row["set"] == "clean-high-rmse"]
+        protected = [row for row in clean if row["set"] == "clean-protected"]
+        canonical_clean = safe_mean(parse_float(row["canonicalRmse"]) for row in clean)
+        v18_clean = safe_mean(parse_float(row["lockedV18Rmse"]) for row in clean)
+        candidate_clean = safe_mean(parse_float(row["sourceEnvironmentRmse"]) for row in clean)
+        canonical_high = safe_mean(parse_float(row["canonicalRmse"]) for row in high)
+        v18_high = safe_mean(parse_float(row["lockedV18Rmse"]) for row in high)
+        candidate_high = safe_mean(parse_float(row["sourceEnvironmentRmse"]) for row in high)
+        score_rows.append(
+            {
+                "familyId": family_id,
+                "globalScale": meta["globalScale"],
+                "externalMatchedCount": meta["externalMatchedCount"],
+                "cleanMeanRmse": candidate_clean,
+                "cleanGainVsCanonicalPct": pct_improvement(canonical_clean, candidate_clean),
+                "cleanV18RepairRetentionPct": (canonical_clean - candidate_clean) / (canonical_clean - v18_clean) * 100.0 if abs(canonical_clean - v18_clean) > 1.0e-9 else math.nan,
+                "highMeanRmse": candidate_high,
+                "highGainVsCanonicalPct": pct_improvement(canonical_high, candidate_high),
+                "highV18RepairRetentionPct": (canonical_high - candidate_high) / (canonical_high - v18_high) * 100.0 if abs(canonical_high - v18_high) > 1.0e-9 else math.nan,
+                "protectedMaxRegressionVsV18KmS": max([parse_float(row["sourceMinusV18KmS"], 0.0) for row in protected] or [0.0]),
+                "protectedMeanRegressionVsV18KmS": safe_mean(max(0.0, parse_float(row["sourceMinusV18KmS"], 0.0)) for row in protected),
+                "meanAccelerationShapeRmse": safe_mean(parse_float(row["accelerationShapeRmse"]) for row in clean),
+                "meanHighEnvironmentSafety": safe_mean(parse_float(row["environmentSafety"]) for row in high),
+                "meanProtectedEnvironmentSafety": safe_mean(parse_float(row["environmentSafety"]) for row in protected),
+                "activeHighCount": sum(1 for row in high if parse_float(row["activation"], 0.0) >= 0.5),
+                "activeProtectedCount": sum(1 for row in protected if parse_float(row["activation"], 0.0) >= 0.5),
+                "weakSystematicsLeakage": 0,
+            }
+        )
+    best = min(
+        score_rows,
+        key=lambda row: (
+            parse_float(row["protectedMaxRegressionVsV18KmS"], math.inf),
+            -parse_float(row["highV18RepairRetentionPct"], -math.inf),
+            parse_float(row["meanAccelerationShapeRmse"], math.inf),
+        ),
+    )
+    if (
+        parse_float(best["protectedMaxRegressionVsV18KmS"], math.inf) <= 3.0
+        and parse_float(best["highV18RepairRetentionPct"], 0.0) >= 45.0
+        and parse_float(best["cleanV18RepairRetentionPct"], 0.0) > 0.0
+    ):
+        verdict = "source-environment admissibility candidate"
+    elif parse_float(best["protectedMaxRegressionVsV18KmS"], math.inf) < 20.0 and parse_float(best["highV18RepairRetentionPct"], 0.0) >= 30.0:
+        verdict = "source-environment partially separates"
+    else:
+        verdict = "catalogue environment not sufficient"
+    return score_rows, all_case_rows, verdict, best
+
+
+def write_v19_source_environment_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_source_environment"
+    score_rows, case_rows, verdict, best = v19_source_environment_score_rows()
+    best_cases = [row for row in case_rows if row["familyId"] == best["familyId"]]
+    false_rows = sorted(
+        [row for row in best_cases if row["set"] == "clean-protected" and parse_float(row["sourceMinusV18KmS"], 0.0) > 3.0],
+        key=lambda row: parse_float(row["sourceMinusV18KmS"], 0.0),
+        reverse=True,
+    )
+    retained_high_rows = sorted(
+        [row for row in best_cases if row["set"] == "clean-high-rmse" and parse_float(row["v18RepairRetentionPct"], 0.0) >= 50.0],
+        key=lambda row: parse_float(row["v18RepairRetentionPct"], 0.0),
+        reverse=True,
+    )
+    contrast_rows = []
+    for label, group in [("false-protected", false_rows), ("retained-high", retained_high_rows)]:
+        contrast_rows.append(
+            {
+                "group": label,
+                "count": len(group),
+                "medianEnvironmentSafety": safe_median(parse_float(row.get("environmentSafety"), math.nan) for row in group),
+                "medianQualityRisk": safe_median(parse_float(row.get("qualityRisk"), math.nan) for row in group),
+                "medianLowInclinationRisk": safe_median(parse_float(row.get("lowInclinationRisk"), math.nan) for row in group),
+                "medianDistanceUncertaintyRisk": safe_median(parse_float(row.get("distanceUncertaintyRisk"), math.nan) for row in group),
+                "medianDwarfSourceRisk": safe_median(parse_float(row.get("dwarfSourceRisk"), math.nan) for row in group),
+                "medianSourceContextRisk": safe_median(parse_float(row.get("sourceContextRisk"), math.nan) for row in group),
+                "medianTwoDProxyRisk": safe_median(parse_float(row.get("twoDProxyRisk"), math.nan) for row in group),
+            }
+        )
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_false_activation_ledger.csv", false_rows)
+    write_csv(out_dir / f"{prefix}_retained_high_ledger.csv", retained_high_rows)
+    write_csv(out_dir / f"{prefix}_group_contrast.csv", contrast_rows)
+    formula = {
+        "candidateId": "mts-v19-source-environment-v1",
+        "status": verdict,
+        "bestFamily": best,
+        "baseEquation": "curvature-memory-growth-equation with distributed-flow source activation",
+        "physicalReading": "source loading may require environmental/2D regularity, not merely 1D radial field coherence",
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameter", "MOND parameter", "weak/systematics fitting"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 Source-Environment Admissibility",
+        "",
+        "This mode tests the next implication of the Motion-TimeSpace source work: one-dimensional radial coherence is not enough, so source loading may need observational/environmental regularity that approximates the missing 2D velocity-field condition.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Best family: `{best['familyId']}`.",
+        f"High v18 repair retention: `{fmt(best['highV18RepairRetentionPct'])}%`.",
+        f"Clean v18 repair retention: `{fmt(best['cleanV18RepairRetentionPct'])}%`.",
+        f"Protected max regression vs v18: `{fmt(best['protectedMaxRegressionVsV18KmS'])}` km/s.",
+        f"Mean high environment safety: `{fmt(best['meanHighEnvironmentSafety'])}`.",
+        f"Mean protected environment safety: `{fmt(best['meanProtectedEnvironmentSafety'])}`.",
+        "",
+        "## Interpretation",
+        "",
+        "A pass would mean catalogue/provenance variables can stand in for the missing source-admissibility condition. A failure means the missing variable is probably a genuine 2D kinematic/morphological field condition: warp, asymmetry, non-circular motion, velocity dispersion, bar-driven streaming, or HI surface-density structure.",
+        "",
+        verdict,
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-source-environment-v1",
+        "verdict": verdict,
+        "bestFamily": best,
+        "falseActivationCount": len(false_rows),
+        "retainedHighCount": len(retained_high_rows),
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "weakSystematicsLeakage": 0,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_false_activation_ledger.csv",
+            f"{prefix}_retained_high_ledger.csv",
+            f"{prefix}_group_contrast.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19sourceenvironment(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SOURCE_ENVIRONMENT_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_source_environment_artifacts(out_dir)
+    best = capsule["bestFamily"]
+    print("MTS v19 source-environment admissibility")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['familyId']}",
+                f"high_retention={fmt(best['highV18RepairRetentionPct'])}%",
+                f"clean_retention={fmt(best['cleanV18RepairRetentionPct'])}%",
+                f"protected_reg={fmt(best['protectedMaxRegressionVsV18KmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v19 source-environment admissibility to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -104509,6 +104873,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19fieldcoherence",
             "v19distributedflow",
             "observedstatev19distributedflow",
+            "v19sourceenvironment",
+            "observedstatev19sourceenvironment",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -104932,6 +105298,8 @@ def main() -> None:
         cmd_v19fieldcoherence(args)
     elif args.mode in {"v19distributedflow", "observedstatev19distributedflow"}:
         cmd_v19distributedflow(args)
+    elif args.mode in {"v19sourceenvironment", "observedstatev19sourceenvironment"}:
+        cmd_v19sourceenvironment(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
