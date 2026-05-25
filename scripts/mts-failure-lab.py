@@ -251,6 +251,7 @@ DEFAULT_V19_THEORY_KERNEL_OUT = OUTPUT_PACK_ROOT / "mts-v19-theory-kernel-v1"
 DEFAULT_V19_MOTION_FIELD_LAW_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-law-v1"
 DEFAULT_V19_SOURCE_EQUATION_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-equation-v1"
 DEFAULT_V19_SOURCE_ADMISSIBILITY_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-admissibility-v1"
+DEFAULT_V19_SOURCE_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-provenance-discriminator-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -103040,6 +103041,251 @@ def cmd_v19sourceadmissibility(args: argparse.Namespace) -> None:
     print(f"Wrote v19 source-admissibility test to {out_dir.resolve()}")
 
 
+V19_PROVENANCE_FEATURES = [
+    "qualityCode",
+    "inclinationDeg",
+    "inclinationUncertaintyDeg",
+    "distanceUncertaintyFraction",
+    "hubbleType",
+    "luminosity36_1e9Lsun",
+    "hiMass_1e9Msun",
+    "hiRadiusOverRout",
+    "vflatKmS",
+    "vflatUncertaintyFraction",
+]
+
+
+def v19_source_provenance_features(curve: dict, table1_by_name: dict[str, dict]) -> dict:
+    table = table1_by_name.get(curve["name"], {})
+    r_out = max(1.0e-9, parse_float(curve.get("rOut"), 0.0))
+    distance = parse_float(table.get("distanceMpc"), math.nan)
+    distance_unc = parse_float(table.get("distanceUncertaintyMpc"), math.nan)
+    vflat = parse_float(table.get("vflatKmS"), math.nan)
+    vflat_unc = parse_float(table.get("vflatUncertaintyKmS"), math.nan)
+    refs = str(table.get("rotationCurveRefCodes", ""))
+    return {
+        "qualityCode": parse_float(table.get("qualityCode"), math.nan),
+        "qualityLabel": table.get("qualityLabel", ""),
+        "inclinationDeg": parse_float(table.get("inclinationDeg"), math.nan),
+        "inclinationUncertaintyDeg": parse_float(table.get("inclinationUncertaintyDeg"), math.nan),
+        "distanceMpc": distance,
+        "distanceUncertaintyMpc": distance_unc,
+        "distanceUncertaintyFraction": distance_unc / distance if math.isfinite(distance) and distance > 0 else math.nan,
+        "distanceMethod": table.get("distanceMethod", ""),
+        "distanceMethodCode": table.get("distanceMethodCode", ""),
+        "hubbleType": parse_float(table.get("hubbleType"), math.nan),
+        "luminosity36_1e9Lsun": parse_float(table.get("luminosity36_1e9Lsun"), math.nan),
+        "hiMass_1e9Msun": parse_float(table.get("hiMass_1e9Msun"), math.nan),
+        "hiRadiusKpc": parse_float(table.get("hiRadiusKpc"), math.nan),
+        "hiRadiusOverRout": parse_float(table.get("hiRadiusKpc"), math.nan) / r_out if r_out > 0 else math.nan,
+        "vflatKmS": vflat,
+        "vflatUncertaintyKmS": vflat_unc,
+        "vflatUncertaintyFraction": vflat_unc / vflat if math.isfinite(vflat) and vflat > 0 else math.nan,
+        "rotationCurveRefCodes": refs,
+        "rotationCurveRefCount": len([item for item in refs.replace(",", ";").split(";") if item.strip()]),
+    }
+
+
+def v19_source_provenance_case_rows() -> list[dict]:
+    context = observed_state_candidate_context()
+    table1_by_name = v18_mass_scale_table1()[0]
+    curves_by_name = {curve["name"]: curve for curve in context["curves"]}
+    _, best_cases = v19_admissibility_score_spec(
+        context["curves"],
+        set(context["weakNames"]),
+        set(context["highNames"]),
+        v18_39_remaining_nfw_gap_artifact_supports(),
+        min(
+            [
+                v19_admissibility_score_spec(
+                    context["curves"],
+                    set(context["weakNames"]),
+                    set(context["highNames"]),
+                    v18_39_remaining_nfw_gap_artifact_supports(),
+                    spec,
+                )[0]
+                for spec in v19_admissibility_candidate_specs(context["curves"], set(context["weakNames"]))
+            ],
+            key=lambda row: (
+                parse_float(row["protectedMaxRegressionVsV18KmS"], math.inf),
+                -parse_float(row["highV18RepairRetentionPct"], -math.inf),
+                parse_float(row["meanAccelerationShapeRmse"], math.inf),
+            ),
+        ),
+    )
+    rows = []
+    for row in best_cases:
+        curve = curves_by_name.get(row["galaxy"])
+        if not curve:
+            continue
+        source_minus = parse_float(row.get("sourceMinusV18KmS"), 0.0)
+        retention = parse_float(row.get("v18RepairRetentionPct"), math.nan)
+        if row["set"] == "clean-protected" and source_minus > 3.0:
+            class_label = "protected-false-activation"
+        elif row["set"] == "clean-high-rmse" and retention >= 50.0 and source_minus <= 5.0:
+            class_label = "true-high-retained"
+        elif row["set"] == "clean-high-rmse":
+            class_label = "high-not-retained"
+        else:
+            class_label = "other-clean"
+        rows.append(
+            {
+                **row,
+                **v19_source_provenance_features(curve, table1_by_name),
+                "sourceClass": class_label,
+            }
+        )
+    return rows
+
+
+def v19_source_provenance_threshold_scores(rows: list[dict]) -> list[dict]:
+    labeled = [row for row in rows if row["sourceClass"] in {"protected-false-activation", "true-high-retained"}]
+    false_rows = [row for row in labeled if row["sourceClass"] == "protected-false-activation"]
+    true_rows = [row for row in labeled if row["sourceClass"] == "true-high-retained"]
+    out = []
+    for feature in V19_PROVENANCE_FEATURES:
+        values = [parse_float(row.get(feature), math.nan) for row in labeled]
+        values = [value for value in values if math.isfinite(value)]
+        if len(values) < 4:
+            continue
+        thresholds = sorted({v19_quantile(values, q) for q in [0.20, 0.33, 0.50, 0.66, 0.80]})
+        for threshold in thresholds:
+            for direction in ["high", "low"]:
+                def hit(row: dict) -> bool:
+                    value = parse_float(row.get(feature), math.nan)
+                    if not math.isfinite(value):
+                        return False
+                    return value >= threshold if direction == "high" else value <= threshold
+                false_recall = sum(1 for row in false_rows if hit(row)) / len(false_rows) if false_rows else 0.0
+                true_hit = sum(1 for row in true_rows if hit(row)) / len(true_rows) if true_rows else 0.0
+                utility = false_recall - true_hit
+                out.append(
+                    {
+                        "feature": feature,
+                        "direction": direction,
+                        "threshold": threshold,
+                        "falseActivationCount": len(false_rows),
+                        "trueHighRetainedCount": len(true_rows),
+                        "falseActivationRecall": false_recall,
+                        "trueHighSuppressionRate": true_hit,
+                        "utilityFalseRecallMinusTrueSuppression": utility,
+                    }
+                )
+    return sorted(out, key=lambda row: parse_float(row["utilityFalseRecallMinusTrueSuppression"], -math.inf), reverse=True)
+
+
+def write_v19_source_provenance_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_source_provenance"
+    rows = v19_source_provenance_case_rows()
+    threshold_rows = v19_source_provenance_threshold_scores(rows)
+    false_rows = [row for row in rows if row["sourceClass"] == "protected-false-activation"]
+    true_rows = [row for row in rows if row["sourceClass"] == "true-high-retained"]
+    top = threshold_rows[0] if threshold_rows else {}
+    serious = (
+        parse_float(top.get("falseActivationRecall"), 0.0) >= 0.70
+        and parse_float(top.get("trueHighSuppressionRate"), 1.0) <= 0.30
+        and parse_float(top.get("utilityFalseRecallMinusTrueSuppression"), 0.0) >= 0.40
+    )
+    verdict = "provenance admissibility candidate" if serious else "provenance alone not sufficient"
+    group_rows = []
+    for label, group in [("protected-false-activation", false_rows), ("true-high-retained", true_rows)]:
+        group_rows.append(
+            {
+                "sourceClass": label,
+                "count": len(group),
+                **{f"median_{feature}": safe_median(parse_float(row.get(feature), math.nan) for row in group) for feature in V19_PROVENANCE_FEATURES},
+            }
+        )
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", rows)
+    write_csv(out_dir / f"{prefix}_threshold_scores.csv", threshold_rows)
+    write_csv(out_dir / f"{prefix}_group_contrast.csv", group_rows)
+    write_csv(out_dir / f"{prefix}_false_activation_cases.csv", sorted(false_rows, key=lambda row: parse_float(row["sourceMinusV18KmS"], 0.0), reverse=True))
+    formula = {
+        "candidateId": "mts-v19-source-provenance-discriminator-v1",
+        "status": verdict,
+        "bestThreshold": top,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "inputFamily": "official SPARC Table1 provenance/quality metadata only",
+        "forbiddenInputs": ["galaxy name", "raw residual", "raw RMSE", "NFW parameter", "MOND parameter", "weak/systematics fitting"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19.3 Source Provenance Discriminator",
+        "",
+        "This mode tests whether official SPARC provenance/quality metadata separates source-equation false activations from true high-RMSE retained cases.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Protected false activations: `{len(false_rows)}`.",
+        f"True high retained cases: `{len(true_rows)}`.",
+        "",
+        "## Best Threshold",
+        "",
+    ]
+    if top:
+        report.extend(
+            [
+                f"- Feature: `{top['feature']}`.",
+                f"- Direction: `{top['direction']}`.",
+                f"- Threshold: `{fmt(top['threshold'])}`.",
+                f"- False activation recall: `{fmt(100*parse_float(top['falseActivationRecall']))}%`.",
+                f"- True high suppression rate: `{fmt(100*parse_float(top['trueHighSuppressionRate']))}%`.",
+                f"- Utility: `{fmt(top['utilityFalseRecallMinusTrueSuppression'])}`.",
+            ]
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "If this passes, provenance/quality can be carried as an observational admissibility gate for source-equation testing. If it fails, the missing variable is likely physical morphology/kinematics not present in SPARC Table1.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-source-provenance-discriminator-v1",
+        "verdict": verdict,
+        "protectedFalseActivationCount": len(false_rows),
+        "trueHighRetainedCount": len(true_rows),
+        "bestThreshold": top,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_threshold_scores.csv",
+            f"{prefix}_group_contrast.csv",
+            f"{prefix}_false_activation_cases.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19sourceprovenance(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SOURCE_PROVENANCE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_source_provenance_artifacts(out_dir)
+    best = capsule["bestThreshold"]
+    print("MTS v19.3 source-provenance discriminator")
+    print(f"verdict={capsule['verdict']}")
+    if best:
+        print(
+            "\t".join(
+                [
+                    f"best={best['feature']} {best['direction']} {fmt(best['threshold'])}",
+                    f"false_recall={fmt(100*parse_float(best['falseActivationRecall']))}%",
+                    f"true_suppression={fmt(100*parse_float(best['trueHighSuppressionRate']))}%",
+                ]
+            )
+        )
+    print(f"Wrote v19 source-provenance discriminator to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -103279,6 +103525,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19sourceequation",
             "v19sourceadmissibility",
             "observedstatev19sourceadmissibility",
+            "v19sourceprovenance",
+            "observedstatev19sourceprovenance",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -103694,6 +103942,8 @@ def main() -> None:
         cmd_v19sourceequation(args)
     elif args.mode in {"v19sourceadmissibility", "observedstatev19sourceadmissibility"}:
         cmd_v19sourceadmissibility(args)
+    elif args.mode in {"v19sourceprovenance", "observedstatev19sourceprovenance"}:
+        cmd_v19sourceprovenance(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
