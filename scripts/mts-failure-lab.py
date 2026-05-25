@@ -260,6 +260,7 @@ DEFAULT_V19_TWO_D_SOURCE_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-two-d-source-fi
 DEFAULT_V19_EXTERNAL_TWO_D_ACQUIRE_OUT = OUTPUT_PACK_ROOT / "mts-v19-external-2d-acquisition-v1"
 DEFAULT_V19_EXTERNAL_TWO_D_ACQUIRE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-external-2d-acquisition-v1")
 DEFAULT_V19_EXTERNAL_TWO_D_PARSER_OUT = OUTPUT_PACK_ROOT / "mts-v19-external-2d-parser-v1"
+DEFAULT_V19_EXTERNAL_TWO_D_ADMISSIBILITY_OUT = OUTPUT_PACK_ROOT / "mts-v19-external-2d-admissibility-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -105858,6 +105859,365 @@ def cmd_v19external2dparser(args: argparse.Namespace) -> None:
     print(f"Wrote v19 external 2D parser pilot to {out_dir.resolve()}")
 
 
+V19_EXTERNAL_2D_ADMISSIBILITY_FEATURES = [
+    "meanSideAsymmetryFraction",
+    "meanSideDiffKmS",
+    "meanSideSigmaKmS",
+    "meanFieldResidualSigmaKmS",
+    "inclinationMismatchDeg",
+    "positionAngleMismatchDeg",
+    "fieldModelChi2",
+    "s4gOuterA1",
+    "s4gInnerA1",
+    "s4gOuterA2",
+    "s4gInnerA2",
+    "s4gBarClass",
+    "whispAsymmetryA",
+    "whispLopsidedness",
+    "whispGini",
+    "whispM20",
+    "whispConcentration2080",
+    "whispConcentration5080",
+    "whispEllipticity",
+    "whispSmoothnessS",
+    "whispMomentGini",
+]
+
+
+def v19_external_2d_admissibility_rows(parser_dir: Path) -> list[dict]:
+    case_path = parser_dir / "mts_v19_external_2d_parser_case_metrics.csv"
+    if not case_path.exists():
+        write_v19_external_2d_parser_artifacts(parser_dir, DEFAULT_V19_EXTERNAL_TWO_D_ACQUIRE_CACHE)
+    rows = read_csv_rows(case_path) if case_path.exists() else []
+    out = [
+        row for row in rows
+        if row.get("sourceClass") in {"protected-false-activation", "retained-high-source-load"}
+    ]
+    return sorted(out, key=lambda row: (row.get("sourceClass", ""), row.get("galaxy", ""), row.get("sourceId", "")))
+
+
+def v19_external_2d_source_family(source_id: str) -> str:
+    if source_id.startswith("cds-whisp-morphology"):
+        return "WHISP-HI-morphology"
+    if source_id.startswith("cds-s4g"):
+        return "S4G-stellar-lopsidedness"
+    if source_id.startswith("cds-blais"):
+        return "Blais-Halpha-HI-sides"
+    if source_id.startswith("cds-ghasp"):
+        return "GHASP-Halpha-field"
+    return source_id or "unknown"
+
+
+def v19_external_2d_rule_candidates(rows: list[dict]) -> list[dict]:
+    rules: list[dict] = []
+    for feature in V19_EXTERNAL_2D_ADMISSIBILITY_FEATURES:
+        values = [parse_float(row.get(feature), math.nan) for row in rows]
+        values = [value for value in values if math.isfinite(value)]
+        if len(values) < 3:
+            continue
+        thresholds = sorted({v19_quantile(values, fraction) for fraction in [0.20, 0.33, 0.50, 0.66, 0.80]})
+        for threshold in thresholds:
+            for direction in ["high", "low"]:
+                rules.append(
+                    {
+                        "ruleId": f"{feature}-{direction}-{fmt(threshold)}",
+                        "ruleType": "one-variable",
+                        "feature": feature,
+                        "direction": direction,
+                        "threshold": threshold,
+                        "feature2": "",
+                        "direction2": "",
+                        "threshold2": "",
+                        "logic": "unsafe if condition is true",
+                    }
+                )
+    one_variable = list(rules)
+    compact = [
+        rule for rule in one_variable
+        if rule["feature"] in {"meanSideAsymmetryFraction", "s4gOuterA1", "whispAsymmetryA", "whispLopsidedness", "whispM20", "whispGini"}
+    ]
+    for left in compact:
+        for right in compact:
+            if left["feature"] >= right["feature"]:
+                continue
+            rules.append(
+                {
+                    "ruleId": f"{left['ruleId']} AND {right['ruleId']}",
+                    "ruleType": "two-variable-monotonic",
+                    "feature": left["feature"],
+                    "direction": left["direction"],
+                    "threshold": left["threshold"],
+                    "feature2": right["feature"],
+                    "direction2": right["direction"],
+                    "threshold2": right["threshold"],
+                    "logic": "unsafe if both conditions are true",
+                }
+            )
+    return rules
+
+
+def v19_external_2d_rule_hit(row: dict, rule: dict) -> bool:
+    def one(feature: str, direction: str, threshold) -> bool:
+        value = parse_float(row.get(feature), math.nan)
+        thresh = parse_float(threshold, math.nan)
+        if not math.isfinite(value) or not math.isfinite(thresh):
+            return False
+        return value >= thresh if direction == "high" else value <= thresh
+
+    hit = one(rule["feature"], rule["direction"], rule["threshold"])
+    if rule.get("ruleType") == "two-variable-monotonic":
+        hit = hit and one(rule["feature2"], rule["direction2"], rule["threshold2"])
+    return hit
+
+
+def v19_external_2d_score_rule(rows: list[dict], rule: dict, label_key: str = "sourceClass") -> dict:
+    false_rows = [row for row in rows if row.get(label_key) == "protected-false-activation"]
+    high_rows = [row for row in rows if row.get(label_key) == "retained-high-source-load"]
+    false_hits = [row for row in false_rows if v19_external_2d_rule_hit(row, rule)]
+    high_hits = [row for row in high_rows if v19_external_2d_rule_hit(row, rule)]
+    false_recall = len(false_hits) / len(false_rows) if false_rows else 0.0
+    high_suppression = len(high_hits) / len(high_rows) if high_rows else 1.0
+    high_admit = 1.0 - high_suppression
+    utility = false_recall - high_suppression
+    return {
+        **rule,
+        "caseCount": len(rows),
+        "protectedFalseCount": len(false_rows),
+        "retainedHighCount": len(high_rows),
+        "protectedFalseUnsafeHits": len(false_hits),
+        "retainedHighUnsafeHits": len(high_hits),
+        "protectedFalseRecall": false_recall,
+        "retainedHighSuppressionRate": high_suppression,
+        "retainedHighAdmitRate": high_admit,
+        "admissibilityUtility": utility,
+    }
+
+
+def v19_external_2d_best_rule(rows: list[dict]) -> tuple[dict, list[dict]]:
+    rules = v19_external_2d_rule_candidates(rows)
+    scores = [v19_external_2d_score_rule(rows, rule) for rule in rules]
+    scores.sort(
+        key=lambda row: (
+            -parse_float(row["admissibilityUtility"], -math.inf),
+            -parse_float(row["protectedFalseRecall"], -math.inf),
+            parse_float(row["retainedHighSuppressionRate"], math.inf),
+            row["ruleType"],
+            row["ruleId"],
+        )
+    )
+    return (scores[0] if scores else {}, scores)
+
+
+def v19_external_2d_null_controls(rows: list[dict], rules: list[dict], seed: int = 20260525, draws: int = 500) -> list[dict]:
+    labels = [row.get("sourceClass", "") for row in rows]
+    out: list[dict] = []
+    rng = random.Random(seed)
+    for draw in range(draws):
+        shuffled = labels[:]
+        rng.shuffle(shuffled)
+        shuffled_rows = []
+        for row, label in zip(rows, shuffled):
+            copy = dict(row)
+            copy["shuffledSourceClass"] = label
+            shuffled_rows.append(copy)
+        best = max(
+            (v19_external_2d_score_rule(shuffled_rows, rule, "shuffledSourceClass") for rule in rules),
+            key=lambda score: parse_float(score["admissibilityUtility"], -math.inf),
+            default={},
+        )
+        if best:
+            out.append(
+                {
+                    "nullType": "shuffled-source-class-labels",
+                    "draw": draw,
+                    "bestUtility": best["admissibilityUtility"],
+                    "bestProtectedFalseRecall": best["protectedFalseRecall"],
+                    "bestRetainedHighSuppressionRate": best["retainedHighSuppressionRate"],
+                    "bestRuleId": best["ruleId"],
+                }
+            )
+    active_count = sum(1 for row in rows if row.get("sourceClass") == "protected-false-activation")
+    for draw in range(draws):
+        unsafe_indices = set(rng.sample(range(len(rows)), min(active_count, len(rows))))
+        false_rows = [row for row in rows if row.get("sourceClass") == "protected-false-activation"]
+        high_rows = [row for row in rows if row.get("sourceClass") == "retained-high-source-load"]
+        false_recall = sum(1 for index, row in enumerate(rows) if index in unsafe_indices and row in false_rows) / len(false_rows) if false_rows else 0.0
+        high_suppression = sum(1 for index, row in enumerate(rows) if index in unsafe_indices and row in high_rows) / len(high_rows) if high_rows else 1.0
+        out.append(
+            {
+                "nullType": "same-active-count-random-unsafe",
+                "draw": draw,
+                "bestUtility": false_recall - high_suppression,
+                "bestProtectedFalseRecall": false_recall,
+                "bestRetainedHighSuppressionRate": high_suppression,
+                "bestRuleId": "random unsafe set",
+            }
+        )
+    return out
+
+
+def v19_external_2d_case_decision(row: dict, best_rule: dict) -> dict:
+    hit = v19_external_2d_rule_hit(row, best_rule) if best_rule else False
+    label = row.get("sourceClass", "")
+    if hit and label == "protected-false-activation":
+        decision = "correctly cap/reject protected false activation"
+    elif hit and label == "retained-high-source-load":
+        decision = "false cap of retained high/source-load case"
+    elif not hit and label == "retained-high-source-load":
+        decision = "correctly admit retained high/source-load case"
+    elif not hit and label == "protected-false-activation":
+        decision = "missed protected false activation"
+    else:
+        decision = "unlabelled"
+    return {
+        **row,
+        "sourceFamily": v19_external_2d_source_family(row.get("sourceId", "")),
+        "bestRuleHitUnsafe": hit,
+        "admissibilityDecision": decision,
+        "candidateSourceAction": "cap/reject source response" if hit else "admit source response",
+    }
+
+
+def write_v19_external_2d_admissibility_artifacts(out_dir: Path, parser_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_external_2d_admissibility"
+    rows = v19_external_2d_admissibility_rows(parser_dir)
+    best, score_rows = v19_external_2d_best_rule(rows)
+    case_rows = [v19_external_2d_case_decision(row, best) for row in rows]
+    null_rows = v19_external_2d_null_controls(rows, v19_external_2d_rule_candidates(rows)) if best else []
+    null_by_type: dict[str, list[float]] = {}
+    for row in null_rows:
+        null_by_type.setdefault(row["nullType"], []).append(parse_float(row["bestUtility"], math.nan))
+    null_summary = []
+    for null_type, values in sorted(null_by_type.items()):
+        values = [value for value in values if math.isfinite(value)]
+        null_summary.append(
+            {
+                "nullType": null_type,
+                "draws": len(values),
+                "medianBestUtility": safe_median(values),
+                "p95BestUtility": v19_quantile(values, 0.95) if values else math.nan,
+                "candidateUtilityMarginVsP95": parse_float(best.get("admissibilityUtility"), math.nan) - (v19_quantile(values, 0.95) if values else math.nan),
+            }
+        )
+    leave_rows = []
+    for family in sorted({v19_external_2d_source_family(row.get("sourceId", "")) for row in rows}):
+        subset = [row for row in rows if v19_external_2d_source_family(row.get("sourceId", "")) != family]
+        sub_best, _scores = v19_external_2d_best_rule(subset)
+        leave_rows.append(
+            {
+                "leftOutSourceFamily": family,
+                "remainingCases": len(subset),
+                "bestRuleId": sub_best.get("ruleId", ""),
+                "protectedFalseRecall": sub_best.get("protectedFalseRecall", ""),
+                "retainedHighSuppressionRate": sub_best.get("retainedHighSuppressionRate", ""),
+                "admissibilityUtility": sub_best.get("admissibilityUtility", ""),
+            }
+        )
+    protected_recall = parse_float(best.get("protectedFalseRecall"), 0.0)
+    high_suppression = parse_float(best.get("retainedHighSuppressionRate"), 1.0)
+    utility = parse_float(best.get("admissibilityUtility"), 0.0)
+    strongest_null_p95 = max([parse_float(row.get("p95BestUtility"), -math.inf) for row in null_summary] or [-math.inf])
+    null_margin = utility - strongest_null_p95 if math.isfinite(strongest_null_p95) else math.nan
+    enough_overlap = len(rows) >= 8 and sum(1 for row in rows if row.get("sourceClass") == "protected-false-activation") >= 3 and sum(1 for row in rows if row.get("sourceClass") == "retained-high-source-load") >= 2
+    stable_leave_one = safe_median(parse_float(row.get("admissibilityUtility"), math.nan) for row in leave_rows) >= max(0.0, 0.5 * utility) if leave_rows else False
+    if enough_overlap and protected_recall >= 0.70 and high_suppression <= 0.34 and null_margin >= 0.10 and stable_leave_one:
+        verdict = "external 2D admissibility candidate"
+    elif enough_overlap and protected_recall >= 0.50 and utility > 0.0:
+        verdict = "external 2D admissibility anatomy"
+    elif enough_overlap:
+        verdict = "external 2D not above null"
+    else:
+        verdict = "insufficient external 2D overlap"
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", v19_external_2d_union_rows(case_rows))
+    write_csv(out_dir / f"{prefix}_rule_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_null_summary.csv", null_summary)
+    write_csv(out_dir / f"{prefix}_leave_one_source_family.csv", leave_rows)
+    formula = {
+        "candidateId": "mts-v19-external-2d-admissibility-v1",
+        "status": verdict,
+        "bestRule": best,
+        "sourceAction": "If the external 2D rule hits, cap/reject source-field response for review; otherwise admit source response.",
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "allowedInputs": V19_EXTERNAL_2D_ADMISSIBILITY_FEATURES,
+        "forbiddenInputs": ["galaxy name", "raw residual", "raw RMSE", "NFW parameter", "MOND parameter", "weak/systematics fitting"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 External 2D Source-Admissibility Test",
+        "",
+        "This mode tests whether external 2D morphology/kinematic-source variables can flag unsafe source-field activations while admitting retained high-RMSE source-load cases. It does not change canonical MTS, v18, v19, or the browser law.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"External v19 overlap cases: `{len(rows)}`.",
+        f"Protected false activations: `{sum(1 for row in rows if row.get('sourceClass') == 'protected-false-activation')}`.",
+        f"Retained high/source-load cases: `{sum(1 for row in rows if row.get('sourceClass') == 'retained-high-source-load')}`.",
+        "",
+        "## Best Rule",
+        "",
+        f"- Rule: `{best.get('ruleId', 'none')}`.",
+        f"- Protected false recall: `{fmt(100 * protected_recall)}%`.",
+        f"- Retained-high suppression: `{fmt(100 * high_suppression)}%`.",
+        f"- Utility: `{fmt(utility)}`.",
+        f"- Strongest null p95 margin: `{fmt(null_margin)}`.",
+        "",
+        "## Meaning",
+        "",
+        "A passing result would justify an external-data admissibility gate for the source-field idea. A non-passing but positive result is anatomy: external 2D state is probably relevant, but the current overlap is not strong enough to become a law constraint.",
+        "",
+        verdict,
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-external-2d-admissibility-v1",
+        "verdict": verdict,
+        "caseCount": len(rows),
+        "protectedFalseActivationCount": sum(1 for row in rows if row.get("sourceClass") == "protected-false-activation"),
+        "retainedHighSourceLoadCount": sum(1 for row in rows if row.get("sourceClass") == "retained-high-source-load"),
+        "bestRule": best,
+        "strongestNullP95Utility": strongest_null_p95,
+        "nullMargin": null_margin,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "parserDir": str(parser_dir),
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_rule_scores.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_null_summary.csv",
+            f"{prefix}_leave_one_source_family.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19external2dadmissibility(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_EXTERNAL_TWO_D_ADMISSIBILITY_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    parser_dir = Path(args.source_dir) if args.source_dir else DEFAULT_V19_EXTERNAL_TWO_D_PARSER_OUT
+    capsule = write_v19_external_2d_admissibility_artifacts(out_dir, parser_dir)
+    best = capsule["bestRule"]
+    print("MTS v19 external 2D source-admissibility test")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"cases={capsule['caseCount']}",
+                f"false={capsule['protectedFalseActivationCount']}",
+                f"high={capsule['retainedHighSourceLoadCount']}",
+                f"best={best.get('ruleId', 'none')}",
+                f"null_margin={fmt(capsule['nullMargin'])}",
+            ]
+        )
+    )
+    print(f"Wrote v19 external 2D admissibility test to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -106113,6 +106473,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19external2dacquire",
             "v19external2dparser",
             "observedstatev19external2dparser",
+            "v19external2dadmissibility",
+            "observedstatev19external2dadmissibility",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -106544,6 +106906,8 @@ def main() -> None:
         cmd_v19external2dacquire(args)
     elif args.mode in {"v19external2dparser", "observedstatev19external2dparser"}:
         cmd_v19external2dparser(args)
+    elif args.mode in {"v19external2dadmissibility", "observedstatev19external2dadmissibility"}:
+        cmd_v19external2dadmissibility(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
