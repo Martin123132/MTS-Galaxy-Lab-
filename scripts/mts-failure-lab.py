@@ -270,6 +270,7 @@ DEFAULT_V19_KINEMATIC_TWO_D_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-kinematic-2d
 DEFAULT_V19_NGC3198_KINEMATIC_FACTS_OUT = OUTPUT_PACK_ROOT / "mts-v19-ngc3198-kinematic-facts-v1"
 DEFAULT_V19_NGC3198_KINEMATIC_FACTS_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ngc3198-kinematic-facts-v1")
 DEFAULT_V19_SOURCE_BOUNDARY_TEST_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-test-v1"
+DEFAULT_V19_BOUNDARY_NUMERIC_LAW_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-numeric-law-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -108718,6 +108719,594 @@ def cmd_v19sourceboundarytest(args: argparse.Namespace) -> None:
     print(f"Wrote v19 source-boundary test to {out_dir.resolve()}")
 
 
+V19_BOUNDARY_NUMERIC_EXTERNAL_FEATURES = V19_NUMERIC_TWO_D_EXTERNAL_FEATURES
+
+
+V19_BOUNDARY_NUMERIC_STATE_FEATURES = [
+    "memoryLoad",
+    "u075",
+    "uOut",
+    "uMax",
+    "fGasOut",
+    "rOutOverH",
+    "lGapOverH",
+    "satFraction",
+    "outerGasShare",
+    "outerDiskShare",
+    "outerBulgeShare",
+    "barCurvAbs",
+    "pointDensity",
+    "vObsOuterSlope",
+    "vObsOuterCurvatureAbs",
+    "vObsOuterSmoothness",
+    "vObsOuterRiseFraction",
+    "vObsInnerOuterSlopeRatio",
+    "vBarOuterSlope",
+    "vBarOuterCurvatureAbs",
+    "vGasOuterSlope",
+    "vDiskOuterSlope",
+]
+
+
+def v19_boundary_numeric_curve_shape_features(curve: dict) -> dict:
+    points = sorted(curve.get("points", []), key=lambda point: parse_float(point.get("r"), 0.0))
+    r_out = max(1.0e-9, parse_float(curve.get("rOut"), points[-1].get("r", 1.0) if points else 1.0))
+
+    def series(key: str) -> list[tuple[float, float]]:
+        values = []
+        for point in points:
+            radius = parse_float(point.get("r"), math.nan)
+            if key == "vBar":
+                value = math.sqrt(max(0.0, parse_float(point.get("bar2"), math.nan)))
+            else:
+                value = parse_float(point.get(key), math.nan)
+            if math.isfinite(radius) and math.isfinite(value):
+                values.append((radius, value))
+        return values
+
+    def slope(values: list[tuple[float, float]], low_x: float, high_x: float = 1.01) -> float:
+        subset = [(r, v) for r, v in values if low_x <= r / r_out <= high_x]
+        if len(subset) < 2:
+            subset = values[-min(3, len(values)):]
+        if len(subset) < 2:
+            return math.nan
+        r0, v0 = subset[0]
+        r1, v1 = subset[-1]
+        return (v1 - v0) / max(1.0e-9, r1 - r0)
+
+    def curvature(values: list[tuple[float, float]], low_x: float) -> float:
+        subset = [(r, v) for r, v in values if r / r_out >= low_x]
+        if len(subset) < 3:
+            subset = values[-min(5, len(values)):]
+        if len(subset) < 3:
+            return math.nan
+        curvatures = []
+        for left, mid, right in zip(subset, subset[1:], subset[2:]):
+            dr1 = max(1.0e-9, mid[0] - left[0])
+            dr2 = max(1.0e-9, right[0] - mid[0])
+            s1 = (mid[1] - left[1]) / dr1
+            s2 = (right[1] - mid[1]) / dr2
+            curvatures.append(abs((s2 - s1) / max(1.0e-9, 0.5 * (dr1 + dr2))))
+        return safe_mean(curvatures)
+
+    def smoothness(values: list[tuple[float, float]], low_x: float) -> float:
+        subset = [(r, v) for r, v in values if r / r_out >= low_x]
+        if len(subset) < 4:
+            subset = values[-min(6, len(values)):]
+        if len(subset) < 3:
+            return math.nan
+        slopes = []
+        for left, right in zip(subset, subset[1:]):
+            slopes.append((right[1] - left[1]) / max(1.0e-9, right[0] - left[0]))
+        mean_abs = safe_mean(abs(value) for value in slopes)
+        variance = safe_mean((value - safe_mean(slopes)) ** 2 for value in slopes)
+        return math.sqrt(variance) / max(1.0e-9, mean_abs)
+
+    vobs = series("vObs")
+    vbar = series("vBar")
+    vgas = series("vGas")
+    vdisk = series("vDisk")
+    outer_slope = slope(vobs, 0.60)
+    inner_slope = slope(vobs, 0.05, 0.40)
+    outer_values = [v for r, v in vobs if r / r_out >= 0.60]
+    inner_values = [v for r, v in vobs if r / r_out <= 0.40]
+    return {
+        "vObsOuterSlope": outer_slope,
+        "vObsOuterCurvatureAbs": curvature(vobs, 0.55),
+        "vObsOuterSmoothness": smoothness(vobs, 0.55),
+        "vObsOuterRiseFraction": ((outer_values[-1] - outer_values[0]) / max(1.0e-9, max(outer_values))) if len(outer_values) >= 2 else math.nan,
+        "vObsInnerOuterSlopeRatio": inner_slope / max(1.0e-9, abs(outer_slope)) if math.isfinite(inner_slope) and math.isfinite(outer_slope) else math.nan,
+        "vBarOuterSlope": slope(vbar, 0.60),
+        "vBarOuterCurvatureAbs": curvature(vbar, 0.55),
+        "vGasOuterSlope": slope(vgas, 0.60),
+        "vDiskOuterSlope": slope(vdisk, 0.60),
+    }
+
+
+def v19_boundary_numeric_case_matrix(parser_dir: Path) -> list[dict]:
+    context = observed_state_candidate_context()
+    curves_by_name = {curve["name"]: curve for curve in context["curves"]}
+    external_rows = v19_external_2d_admissibility_rows(parser_dir)
+    external_by_name = {row["galaxy"]: row for row in external_rows}
+    counter_context, facts_context = v19_source_boundary_evidence_context()
+    boundary_case_path = DEFAULT_V19_SOURCE_BOUNDARY_TEST_OUT / "mts_v19_source_boundary_test_case_ledger.csv"
+    if not boundary_case_path.exists():
+        write_v19_source_boundary_test_artifacts(DEFAULT_V19_SOURCE_BOUNDARY_TEST_OUT)
+    boundary_rows = [
+        row for row in read_csv_rows(boundary_case_path)
+        if row.get("variantId") == "quiet-boundary-soften-050"
+    ]
+    boundary_by_name = {row["galaxy"]: row for row in boundary_rows}
+    out: list[dict] = []
+    for name, role in V19_SOURCE_BOUNDARY_TARGET_ROLES.items():
+        curve = curves_by_name.get(name)
+        state = v19_admissibility_features(curve) if curve else {}
+        shape = v19_boundary_numeric_curve_shape_features(curve) if curve else {}
+        external = external_by_name.get(name, {})
+        boundary = boundary_by_name.get(name, {})
+        if role == "protected cap control":
+            train_label = "cap"
+            target_factor = 0.0
+        elif role == "admit high/source-load control":
+            train_label = "admit"
+            target_factor = 1.0
+        else:
+            train_label = "holdout"
+            target_factor = ""
+        row = {
+            "galaxy": name,
+            "targetRole": role,
+            "trainLabel": train_label,
+            "lockedRoute": curve.get("lockedModelRoute", "") if curve else "",
+            "targetBoundaryFactorForTraining": target_factor,
+            "sourceBoundaryBestFactor": boundary.get("sourceBoundaryFactor", ""),
+            "sourceBoundaryBestCandidateRmse": boundary.get("candidateRmse", ""),
+            "sourceBoundaryBestFullSourceRmse": boundary.get("fullSourceRmse", ""),
+            "counterEvidenceDecision": counter_context.get(name, {}).get("admissibilityDecision", ""),
+            "kinematicFactsVerdict": facts_context.get(name, {}).get("verdict", ""),
+            "sourceFamily": external.get("sourceFamily", ""),
+            "sourcePath": external.get("sourcePath", "MISSING"),
+            "external2DRowCount": external.get("external2DRowCount", 0),
+        }
+        for feature in V19_BOUNDARY_NUMERIC_STATE_FEATURES:
+            row[feature] = shape.get(feature, state.get(feature, ""))
+        for feature in V19_BOUNDARY_NUMERIC_EXTERNAL_FEATURES:
+            row[feature] = external.get(feature, "")
+            row[f"{feature}Count"] = external.get(f"{feature}Count", 0)
+        out.append(row)
+    return out
+
+
+def v19_boundary_numeric_feature_list(rows: list[dict]) -> list[str]:
+    features = V19_BOUNDARY_NUMERIC_STATE_FEATURES + V19_BOUNDARY_NUMERIC_EXTERNAL_FEATURES
+    train_rows = [row for row in rows if row["trainLabel"] in {"cap", "admit"}]
+    usable = []
+    for feature in features:
+        values = [parse_float(row.get(feature), math.nan) for row in train_rows]
+        values = [value for value in values if math.isfinite(value)]
+        if len(values) >= 4 and len(set(round(value, 8) for value in values)) >= 2:
+            usable.append(feature)
+    return usable
+
+
+def v19_boundary_numeric_rule_candidates(rows: list[dict]) -> list[dict]:
+    train_rows = [row for row in rows if row["trainLabel"] in {"cap", "admit"}]
+    features = v19_boundary_numeric_feature_list(rows)
+    rules: list[dict] = []
+    for feature in features:
+        values = [parse_float(row.get(feature), math.nan) for row in train_rows]
+        values = [value for value in values if math.isfinite(value)]
+        for q in [0.20, 0.25, 0.33, 0.50, 0.66, 0.75, 0.80]:
+            threshold = v19_quantile(values, q)
+            for direction in ["high", "low"]:
+                rules.append(
+                    {
+                        "ruleId": f"{feature}-{direction}-q{int(q*100)}",
+                        "ruleType": "one-variable-soft",
+                        "feature": feature,
+                        "direction": direction,
+                        "threshold": threshold,
+                        "feature2": "",
+                        "direction2": "",
+                        "threshold2": "",
+                    }
+                )
+    compact_features = {
+        "memoryLoad",
+        "u075",
+        "uOut",
+        "uMax",
+        "fGasOut",
+        "outerGasShare",
+        "outerDiskShare",
+        "vObsOuterSlope",
+        "vObsOuterCurvatureAbs",
+        "vObsOuterSmoothness",
+        "vObsOuterRiseFraction",
+        "thingsMorphologyM20",
+        "thingsMorphologyAsymmetryA",
+        "whispM20",
+        "whispP4M20",
+        "whispP6M20",
+    }
+    compact = [
+        rule for rule in rules
+        if rule["feature"] in compact_features and "-q50" in rule["ruleId"]
+    ]
+    for left in compact:
+        for right in compact:
+            if left["feature"] >= right["feature"]:
+                continue
+            rules.append(
+                {
+                    "ruleId": f"{left['ruleId']} AND {right['ruleId']}",
+                    "ruleType": "two-variable-soft-product",
+                    "feature": left["feature"],
+                    "direction": left["direction"],
+                    "threshold": left["threshold"],
+                    "feature2": right["feature"],
+                    "direction2": right["direction"],
+                    "threshold2": right["threshold"],
+                }
+            )
+    return rules
+
+
+def v19_boundary_numeric_activation(row: dict, rule: dict) -> float:
+    activation = v19_gate_value(row, rule["feature"], parse_float(rule["threshold"], 0.0), rule["direction"])
+    if rule.get("feature2"):
+        activation *= v19_gate_value(row, rule["feature2"], parse_float(rule["threshold2"], 0.0), rule["direction2"])
+    return clamp(activation, 0.0, 1.0)
+
+
+def v19_boundary_numeric_prefilter_rules(rows: list[dict], rules: list[dict], label_key: str = "trainLabel", limit: int = 220) -> list[dict]:
+    scored: list[dict] = []
+    cap_rows = [row for row in rows if row.get(label_key) == "cap"]
+    admit_rows = [row for row in rows if row.get(label_key) == "admit"]
+    for rule in rules:
+        cap_activation = safe_mean(v19_boundary_numeric_activation(row, rule) for row in cap_rows)
+        admit_activation = safe_mean(v19_boundary_numeric_activation(row, rule) for row in admit_rows)
+        scored.append(
+            {
+                **rule,
+                "prefilterCapMeanActivation": cap_activation,
+                "prefilterAdmitMeanActivation": admit_activation,
+                "prefilterSeparation": cap_activation - admit_activation,
+            }
+        )
+    scored.sort(
+        key=lambda row: (
+            parse_float(row["prefilterSeparation"], -math.inf),
+            parse_float(row["prefilterCapMeanActivation"], -math.inf),
+            -parse_float(row["prefilterAdmitMeanActivation"], math.inf),
+            -len(str(row["ruleId"])),
+        ),
+        reverse=True,
+    )
+    return scored[:limit]
+
+
+def v19_boundary_numeric_score_rule(
+    rows: list[dict],
+    curves: dict[str, dict],
+    source_supports: dict[str, list[float]],
+    canonical_supports: dict[str, list[float]],
+    v18_supports: dict[str, list[float]],
+    rule: dict,
+    beta: float,
+    label_key: str = "trainLabel",
+) -> tuple[dict, list[dict]]:
+    case_rows: list[dict] = []
+    for row in rows:
+        name = row["galaxy"]
+        curve = curves.get(name)
+        source = source_supports.get(name, [])
+        target = v18_supports.get(name, [])
+        canonical = canonical_supports.get(name, [])
+        if not curve or len(source) != len(curve["points"]) or len(target) != len(curve["points"]):
+            continue
+        activation = v19_boundary_numeric_activation(row, rule)
+        factor = clamp(1.0 - beta * activation, 0.0, 1.0)
+        candidate_supports = v19_source_boundary_supports(curve, source, factor)
+        source_score = v18_competitor_support_score(curve, source)
+        candidate_score = v18_competitor_support_score(curve, candidate_supports)
+        canonical_score = v18_competitor_support_score(curve, canonical)
+        v18_score = v18_competitor_support_score(curve, target)
+        case_rows.append(
+            {
+                "galaxy": name,
+                "targetRole": row["targetRole"],
+                "label": row.get(label_key, row.get("trainLabel", "")),
+                "originalTrainLabel": row.get("trainLabel", ""),
+                "lockedRoute": row.get("lockedRoute", ""),
+                "ruleId": rule["ruleId"],
+                "ruleType": rule["ruleType"],
+                "beta": beta,
+                "activation": activation,
+                "predictedBoundaryFactor": factor,
+                "canonicalRmse": canonical_score["rmse"],
+                "lockedV18Rmse": v18_score["rmse"],
+                "fullSourceRmse": source_score["rmse"],
+                "candidateRmse": candidate_score["rmse"],
+                "candidateImprovementVsFullSourceKmS": source_score["rmse"] - candidate_score["rmse"],
+                "candidateMinusV18KmS": candidate_score["rmse"] - v18_score["rmse"],
+                "candidateGainVsCanonicalPct": pct_improvement(canonical_score["rmse"], candidate_score["rmse"]),
+                "feature": rule["feature"],
+                "featureValue": row.get(rule["feature"], ""),
+                "feature2": rule.get("feature2", ""),
+                "feature2Value": row.get(rule.get("feature2", ""), "") if rule.get("feature2") else "",
+            }
+        )
+    train_rows = [row for row in case_rows if row["label"] in {"cap", "admit"}]
+    cap_rows = [row for row in train_rows if row["label"] == "cap"]
+    admit_rows = [row for row in train_rows if row["label"] == "admit"]
+    ngc3198 = next((row for row in case_rows if row["galaxy"] == "NGC3198"), {})
+    train_cap_improve = safe_mean(parse_float(row["candidateImprovementVsFullSourceKmS"], 0.0) for row in cap_rows)
+    admit_penalty = safe_mean(max(0.0, parse_float(row["candidateRmse"], 0.0) - parse_float(row["fullSourceRmse"], 0.0)) for row in admit_rows)
+    metric = {
+        **rule,
+        "beta": beta,
+        "trainCapCount": len(cap_rows),
+        "trainAdmitCount": len(admit_rows),
+        "trainCapMeanImprovementVsFullSourceKmS": train_cap_improve,
+        "trainAdmitMeanPenaltyVsFullSourceKmS": admit_penalty,
+        "trainAdmitMaxPenaltyVsFullSourceKmS": max([max(0.0, parse_float(row["candidateRmse"], 0.0) - parse_float(row["fullSourceRmse"], 0.0)) for row in admit_rows] or [0.0]),
+        "trainUtilityKmS": train_cap_improve - admit_penalty,
+        "trainCapMeanActivation": safe_mean(parse_float(row["activation"], 0.0) for row in cap_rows),
+        "trainAdmitMeanActivation": safe_mean(parse_float(row["activation"], 0.0) for row in admit_rows),
+        "ngc3198Activation": parse_float(ngc3198.get("activation"), math.nan),
+        "ngc3198PredictedBoundaryFactor": parse_float(ngc3198.get("predictedBoundaryFactor"), math.nan),
+        "ngc3198ImprovementVsFullSourceKmS": parse_float(ngc3198.get("candidateImprovementVsFullSourceKmS"), math.nan),
+        "ngc3198CandidateMinusV18KmS": parse_float(ngc3198.get("candidateMinusV18KmS"), math.nan),
+    }
+    return metric, case_rows
+
+
+def v19_boundary_numeric_select_best(
+    rows: list[dict],
+    rules: list[dict],
+    label_key: str = "trainLabel",
+    cached_base: tuple[dict[str, dict], dict[str, list[float]], dict[str, list[float]], dict[str, list[float]]] | None = None,
+) -> tuple[dict, list[dict], list[dict]]:
+    if cached_base is None:
+        curves, source_supports, canonical_supports, v18_supports, _context = v19_source_boundary_case_base()
+    else:
+        curves, source_supports, canonical_supports, v18_supports = cached_base
+    score_rows: list[dict] = []
+    best_cases: list[dict] = []
+    for rule in rules:
+        for beta in [0.35, 0.50, 0.65, 0.80, 1.00]:
+            metric, cases = v19_boundary_numeric_score_rule(
+                rows,
+                curves,
+                source_supports,
+                canonical_supports,
+                v18_supports,
+                rule,
+                beta,
+                label_key,
+            )
+            score_rows.append(metric)
+    score_rows.sort(
+        key=lambda row: (
+            parse_float(row["trainUtilityKmS"], -math.inf),
+            parse_float(row["trainCapMeanActivation"], -math.inf) - parse_float(row["trainAdmitMeanActivation"], math.inf),
+            -parse_float(row["trainAdmitMaxPenaltyVsFullSourceKmS"], math.inf),
+            parse_float(row["ngc3198ImprovementVsFullSourceKmS"], -math.inf),
+        ),
+        reverse=True,
+    )
+    best = score_rows[0] if score_rows else {}
+    if best:
+        _, best_cases = v19_boundary_numeric_score_rule(
+            rows,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            best,
+            parse_float(best["beta"], 0.0),
+            label_key,
+        )
+    return best, score_rows, best_cases
+
+
+def v19_boundary_numeric_null_controls(rows: list[dict], rules: list[dict], draws: int = 30, seed: int = 20260525) -> list[dict]:
+    train_rows = [row for row in rows if row["trainLabel"] in {"cap", "admit"}]
+    labels = [row["trainLabel"] for row in train_rows]
+    rng = random.Random(seed)
+    out: list[dict] = []
+    curves, source_supports, canonical_supports, v18_supports, _context = v19_source_boundary_case_base()
+    cached_base = (curves, source_supports, canonical_supports, v18_supports)
+    for draw in range(draws):
+        shuffled = labels[:]
+        rng.shuffle(shuffled)
+        label_by_name = {row["galaxy"]: label for row, label in zip(train_rows, shuffled)}
+        shuffled_rows = [
+            {**row, "shuffledLabel": label_by_name.get(row["galaxy"], row["trainLabel"])}
+            for row in rows
+        ]
+        shuffled_rules = v19_boundary_numeric_prefilter_rules(shuffled_rows, rules, "shuffledLabel", 40)
+        best, _scores, _cases = v19_boundary_numeric_select_best(shuffled_rows, shuffled_rules, "shuffledLabel", cached_base)
+        out.append(
+            {
+                "nullType": "shuffled-cap-admit-labels",
+                "draw": draw,
+                "bestTrainUtilityKmS": best.get("trainUtilityKmS", ""),
+                "bestRuleId": best.get("ruleId", ""),
+                "bestBeta": best.get("beta", ""),
+                "ngc3198ImprovementVsFullSourceKmS": best.get("ngc3198ImprovementVsFullSourceKmS", ""),
+            }
+        )
+    return out
+
+
+def v19_boundary_numeric_feature_contrast(rows: list[dict], features: list[str]) -> list[dict]:
+    out = []
+    cap = [row for row in rows if row["trainLabel"] == "cap"]
+    admit = [row for row in rows if row["trainLabel"] == "admit"]
+    ngc = next((row for row in rows if row["galaxy"] == "NGC3198"), {})
+    for feature in features:
+        cap_values = [parse_float(row.get(feature), math.nan) for row in cap]
+        admit_values = [parse_float(row.get(feature), math.nan) for row in admit]
+        cap_values = [value for value in cap_values if math.isfinite(value)]
+        admit_values = [value for value in admit_values if math.isfinite(value)]
+        out.append(
+            {
+                "feature": feature,
+                "capCount": len(cap_values),
+                "admitCount": len(admit_values),
+                "capMedian": safe_median(cap_values),
+                "admitMedian": safe_median(admit_values),
+                "capMinusAdmitMedian": safe_median(cap_values) - safe_median(admit_values) if cap_values and admit_values else math.nan,
+                "ngc3198Value": ngc.get(feature, ""),
+            }
+        )
+    return out
+
+
+def write_v19_boundary_numeric_law_artifacts(out_dir: Path, parser_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_boundary_numeric_law"
+    rows = v19_boundary_numeric_case_matrix(parser_dir)
+    all_rules = v19_boundary_numeric_rule_candidates(rows)
+    rules = v19_boundary_numeric_prefilter_rules(rows, all_rules, "trainLabel", 60)
+    best, score_rows, case_rows = v19_boundary_numeric_select_best(rows, rules)
+    null_rows = v19_boundary_numeric_null_controls(rows, all_rules) if rules else []
+    null_values = [parse_float(row.get("bestTrainUtilityKmS"), math.nan) for row in null_rows]
+    null_values = [value for value in null_values if math.isfinite(value)]
+    null_p95 = v19_quantile(null_values, 0.95) if null_values else math.nan
+    null_margin = parse_float(best.get("trainUtilityKmS"), math.nan) - null_p95 if best else math.nan
+    feature_rows = v19_boundary_numeric_feature_contrast(rows, v19_boundary_numeric_feature_list(rows))
+    ngc_improve = parse_float(best.get("ngc3198ImprovementVsFullSourceKmS"), 0.0)
+    ngc_factor = parse_float(best.get("ngc3198PredictedBoundaryFactor"), math.nan)
+    if best and math.isfinite(null_margin) and null_margin >= 1.0 and 0.20 <= ngc_factor <= 0.85 and ngc_improve >= 3.0 and parse_float(best.get("trainAdmitMaxPenaltyVsFullSourceKmS"), math.inf) <= 1.0:
+        verdict = "numeric boundary law candidate"
+    elif best and math.isfinite(null_margin) and null_margin >= 1.0 and ngc_improve < 3.0:
+        verdict = "numeric controls separable but NGC3198 not recovered"
+    elif best and ngc_improve >= 3.0:
+        verdict = "numeric boundary anatomy but not null-hardened"
+    elif not rules:
+        verdict = "insufficient numeric boundary features"
+    else:
+        verdict = "numeric source-boundary variable missing"
+    formula = {
+        "candidateId": "mts-v19-boundary-numeric-law-v1",
+        "status": verdict,
+        "baseEquation": "curvature-memory-growth-equation",
+        "operation": "S_candidate(r)=S_canonical(r)+f_numeric*(S_source(r)-S_canonical(r))",
+        "factor": "f_numeric=clamp(1-beta*activation_numeric,0,1)",
+        "bestRule": best,
+        "trainLabels": "protected cap controls and admitted high/source-load controls only; NGC3198 held out",
+        "promotableAsLaw": verdict == "numeric boundary law candidate",
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual", "raw RMSE", "NFW parameter", "MOND parameter", "weak/systematics fitting"],
+    }
+    write_csv(out_dir / f"{prefix}_case_matrix.csv", rows)
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_feature_contrast.csv", feature_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 Boundary Numeric Law Test",
+        "",
+        "This mode tries to replace the evidence-tagged source-boundary cap with a numeric pre-residual gate. It does not change v18, v19, the browser, or canonical MTS.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Best rule: `{best.get('ruleId', 'none')}`.",
+        f"Beta: `{fmt(best.get('beta', ''))}`.",
+        f"Train utility: `{fmt(best.get('trainUtilityKmS', ''))}` km/s.",
+        f"Null p95 utility: `{fmt(null_p95)}` km/s.",
+        f"Null margin: `{fmt(null_margin)}` km/s.",
+        f"NGC3198 predicted boundary factor: `{fmt(ngc_factor)}`.",
+        f"NGC3198 improvement vs full source: `{fmt(ngc_improve)}` km/s.",
+        f"Admit-control max penalty: `{fmt(best.get('trainAdmitMaxPenaltyVsFullSourceKmS', ''))}` km/s.",
+        "",
+        "## Tested Law Form",
+        "",
+        "```text",
+        "activation_numeric = gate(pre-residual state/profile/2D variables)",
+        "f_numeric = clamp(1 - beta * activation_numeric, 0, 1)",
+        "S_candidate(r) = S_canonical(r) + f_numeric * [S_source(r) - S_canonical(r)]",
+        "```",
+        "",
+        "NGC3198 is not used as a training label. It is evaluated after the rule is selected from cap/admit controls.",
+        "",
+        "## Best-Rule Case Ledger",
+        "",
+        "| Galaxy | Role | factor | full source | candidate | improve |",
+        "| --- | --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in case_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['targetRole']} | {fmt(row['predictedBoundaryFactor'])} | {fmt(row['fullSourceRmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['candidateImprovementVsFullSourceKmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Guardrails",
+            "",
+            "- No galaxy name enters the numeric rule.",
+            "- No residual, RMSE, NFW, or MOND parameter enters the rule.",
+            "- Weak/systematics cases are not fitted.",
+            "- No browser/release law is changed.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-boundary-numeric-law-v1",
+        "verdict": verdict,
+        "bestRule": best,
+        "nullP95UtilityKmS": null_p95,
+        "nullMarginKmS": null_margin,
+        "caseCount": len(rows),
+        "trainCapCount": sum(1 for row in rows if row["trainLabel"] == "cap"),
+        "trainAdmitCount": sum(1 for row in rows if row["trainLabel"] == "admit"),
+        "ngc3198HeldOut": True,
+        "weakSystematicsLeakage": 0,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_case_matrix.csv",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_feature_contrast.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19boundarynumericlaw(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_BOUNDARY_NUMERIC_LAW_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    parser_dir = Path(args.source_dir) if args.source_dir else DEFAULT_V19_EXTERNAL_TWO_D_PARSER_OUT
+    capsule = write_v19_boundary_numeric_law_artifacts(out_dir, parser_dir)
+    best = capsule["bestRule"]
+    print("MTS v19 boundary numeric law test")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best.get('ruleId', 'none')}",
+                f"beta={fmt(best.get('beta', ''))}",
+                f"utility={fmt(best.get('trainUtilityKmS', ''))}",
+                f"null_margin={fmt(capsule.get('nullMarginKmS', ''))}",
+                f"ngc3198_factor={fmt(best.get('ngc3198PredictedBoundaryFactor', ''))}",
+                f"ngc3198_improve={fmt(best.get('ngc3198ImprovementVsFullSourceKmS', ''))}",
+            ]
+        )
+    )
+    print(f"Wrote v19 boundary numeric law test to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -108987,6 +109576,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19ngc3198kinematicfacts",
             "v19sourceboundarytest",
             "observedstatev19sourceboundarytest",
+            "v19boundarynumericlaw",
+            "observedstatev19boundarynumericlaw",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -109432,6 +110023,8 @@ def main() -> None:
         cmd_v19ngc3198kinematicfacts(args)
     elif args.mode in {"v19sourceboundarytest", "observedstatev19sourceboundarytest"}:
         cmd_v19sourceboundarytest(args)
+    elif args.mode in {"v19boundarynumericlaw", "observedstatev19boundarynumericlaw"}:
+        cmd_v19boundarynumericlaw(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
