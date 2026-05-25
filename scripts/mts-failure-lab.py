@@ -256,6 +256,7 @@ DEFAULT_V19_SOURCE_REGIME_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-regime-candid
 DEFAULT_V19_FIELD_COHERENCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-field-coherence-v1"
 DEFAULT_V19_DISTRIBUTED_FLOW_OUT = OUTPUT_PACK_ROOT / "mts-v19-distributed-flow-v1"
 DEFAULT_V19_SOURCE_ENVIRONMENT_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-environment-v1"
+DEFAULT_V19_TWO_D_SOURCE_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-two-d-source-field-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -104626,6 +104627,286 @@ def cmd_v19sourceenvironment(args: argparse.Namespace) -> None:
     print(f"Wrote v19 source-environment admissibility to {out_dir.resolve()}")
 
 
+V19_TWO_D_SOURCE_FIELD_FEATURES = [
+    "qualityMediumOrWorse",
+    "caseSpecificMorphologyEvidence",
+    "caseSpecificBeamEvidence",
+    "caseSpecificErrorEvidence",
+    "sourceWideMethodEvidence",
+    "directV18SourceEvidence",
+    "sourceWideV18Context",
+    "lowInclinationFlag",
+    "largeDistanceUncertaintyFlag",
+    "twoDEvidenceRisk",
+]
+
+
+def v19_twod_source_field_evidence_maps() -> tuple[dict[str, dict], dict[str, dict]]:
+    v21_map: dict[str, dict] = {}
+    v21_path = OUTPUT_PACK_ROOT / "mts-v21-source-evidence-v10" / "mts_v21_source_paper_case_verdicts.csv"
+    if v21_path.exists():
+        for row in read_csv_rows(v21_path):
+            name = str(row.get("name", "")).strip()
+            if name:
+                v21_map[name] = row
+    v18_map: dict[str, dict] = {}
+    v18_path = OUTPUT_PACK_ROOT / "mts-v18-51-source-provenance-v1" / "mts_v18_51_source_provenance_case_verdicts.csv"
+    if v18_path.exists():
+        for row in read_csv_rows(v18_path):
+            name = str(row.get("galaxy", "")).strip()
+            if name:
+                v18_map[name] = row
+    return v21_map, v18_map
+
+
+def v19_twod_bool(row: dict, key: str) -> bool:
+    return parse_bool(row.get(key)) or str(row.get(key, "")).strip().lower() in {"true", "yes", "1", "1.0"}
+
+
+def v19_twod_source_field_case_rows() -> list[dict]:
+    env_dir = DEFAULT_V19_SOURCE_ENVIRONMENT_OUT
+    false_path = env_dir / "mts_v19_source_environment_false_activation_ledger.csv"
+    retained_path = env_dir / "mts_v19_source_environment_retained_high_ledger.csv"
+    if not false_path.exists() or not retained_path.exists():
+        write_v19_source_environment_artifacts(env_dir)
+    false_rows = read_csv_rows(false_path) if false_path.exists() else []
+    retained_rows = read_csv_rows(retained_path) if retained_path.exists() else []
+    v21_map, v18_map = v19_twod_source_field_evidence_maps()
+    table1_by_name = v18_mass_scale_table1()[0]
+    out: list[dict] = []
+    for source_class, rows in [("protected-false-activation", false_rows), ("retained-high-source-load", retained_rows)]:
+        for row in rows:
+            name = row.get("galaxy", "")
+            table = table1_by_name.get(name, {})
+            v21 = v21_map.get(name, {})
+            v18 = v18_map.get(name, {})
+            quality = parse_float(table.get("qualityCode"), parse_float(row.get("qualityCode"), math.nan))
+            inc = parse_float(table.get("inclinationDeg"), parse_float(row.get("inclinationDeg"), math.nan))
+            dist_unc = parse_float(table.get("distanceUncertaintyMpc"), math.nan)
+            dist = parse_float(table.get("distanceMpc"), math.nan)
+            dist_frac = dist_unc / dist if math.isfinite(dist_unc) and math.isfinite(dist) and dist > 0 else parse_float(row.get("distanceUncertaintyRisk"), math.nan)
+            flags = " ".join(str(value).lower() for value in v18.values())
+            case_morph = v19_twod_bool(v21, "hasCaseSpecificMorphologyEvidence")
+            case_beam = v19_twod_bool(v21, "hasCaseSpecificBeamResolutionEvidence")
+            case_error = v19_twod_bool(v21, "hasCaseSpecificErrorModelEvidence")
+            source_wide = v19_twod_bool(v21, "hasSourceWideMethodEvidence")
+            direct_v18 = "direct source-paper provenance evidence found" in flags
+            source_wide_v18 = "source-wide provenance context found" in flags
+            low_inc = math.isfinite(inc) and inc < 35.0
+            large_dist = math.isfinite(dist_frac) and dist_frac >= 0.25
+            quality_medium = math.isfinite(quality) and quality >= 2.0
+            risk = clamp(
+                0.28 * (1.0 if quality_medium else 0.0)
+                + 0.18 * (1.0 if case_morph else 0.0)
+                + 0.14 * (1.0 if case_beam else 0.0)
+                + 0.14 * (1.0 if case_error else 0.0)
+                + 0.10 * (1.0 if source_wide else 0.0)
+                + 0.10 * (1.0 if low_inc else 0.0)
+                + 0.06 * (1.0 if large_dist else 0.0),
+                0.0,
+                1.0,
+            )
+            evidence_available = bool(v21 or v18)
+            direct_case_evidence = case_morph or case_beam or case_error or direct_v18
+            out.append(
+                {
+                    "galaxy": name,
+                    "sourceClass": source_class,
+                    "lockedRoute": row.get("lockedRoute", ""),
+                    "sourceMinusV18KmS": row.get("sourceMinusV18KmS", ""),
+                    "v18RepairRetentionPct": row.get("v18RepairRetentionPct", ""),
+                    "activation": row.get("activation", ""),
+                    "environmentSafety": row.get("environmentSafety", ""),
+                    "qualityCode": quality,
+                    "inclinationDeg": inc,
+                    "distanceUncertaintyFraction": dist_frac,
+                    "referenceCodes": table.get("rotationCurveRefCodes", v21.get("referenceCodes", "")),
+                    "v21TargetRole": v21.get("targetRole", ""),
+                    "v21CaseVerdict": v21.get("caseVerdict", ""),
+                    "v18SourceVerdict": v18.get("sourceVerdict", ""),
+                    "v18ProvenanceFlags": v18.get("provenanceFlags", ""),
+                    "evidenceAvailable": evidence_available,
+                    "directCase2DEvidence": direct_case_evidence,
+                    "qualityMediumOrWorse": quality_medium,
+                    "caseSpecificMorphologyEvidence": case_morph,
+                    "caseSpecificBeamEvidence": case_beam,
+                    "caseSpecificErrorEvidence": case_error,
+                    "sourceWideMethodEvidence": source_wide,
+                    "directV18SourceEvidence": direct_v18,
+                    "sourceWideV18Context": source_wide_v18,
+                    "lowInclinationFlag": low_inc,
+                    "largeDistanceUncertaintyFlag": large_dist,
+                    "twoDEvidenceRisk": risk,
+                    "transportLawFittingAllowed": False,
+                }
+            )
+    out.sort(key=lambda item: (item["sourceClass"], item["galaxy"]))
+    return out
+
+
+def v19_twod_source_field_discriminator_rows(case_rows: list[dict]) -> list[dict]:
+    false_rows = [row for row in case_rows if row["sourceClass"] == "protected-false-activation"]
+    high_rows = [row for row in case_rows if row["sourceClass"] == "retained-high-source-load"]
+    out: list[dict] = []
+    for feature in V19_TWO_D_SOURCE_FIELD_FEATURES:
+        if feature == "twoDEvidenceRisk":
+            values = [parse_float(row.get(feature), math.nan) for row in case_rows]
+            values = [value for value in values if math.isfinite(value)]
+            thresholds = sorted({v19_quantile(values, q) for q in [0.33, 0.50, 0.66, 0.80]}) if values else []
+            for threshold in thresholds:
+                for direction in ["high", "low"]:
+                    def hit(row: dict) -> bool:
+                        value = parse_float(row.get(feature), math.nan)
+                        if not math.isfinite(value):
+                            return False
+                        return value >= threshold if direction == "high" else value <= threshold
+                    false_recall = sum(1 for row in false_rows if hit(row)) / len(false_rows) if false_rows else 0.0
+                    high_suppression = sum(1 for row in high_rows if hit(row)) / len(high_rows) if high_rows else 0.0
+                    out.append(
+                        {
+                            "feature": feature,
+                            "direction": direction,
+                            "threshold": threshold,
+                            "falseActivationRecall": false_recall,
+                            "retainedHighSuppressionRate": high_suppression,
+                            "utilityFalseRecallMinusHighSuppression": false_recall - high_suppression,
+                        }
+                    )
+        else:
+            false_recall = sum(1 for row in false_rows if parse_bool(row.get(feature))) / len(false_rows) if false_rows else 0.0
+            high_suppression = sum(1 for row in high_rows if parse_bool(row.get(feature))) / len(high_rows) if high_rows else 0.0
+            out.append(
+                {
+                    "feature": feature,
+                    "direction": "flag-true",
+                    "threshold": True,
+                    "falseActivationRecall": false_recall,
+                    "retainedHighSuppressionRate": high_suppression,
+                    "utilityFalseRecallMinusHighSuppression": false_recall - high_suppression,
+                }
+            )
+    out.sort(key=lambda row: parse_float(row["utilityFalseRecallMinusHighSuppression"], -math.inf), reverse=True)
+    return out
+
+
+def write_v19_twod_source_field_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_two_d_source_field"
+    case_rows = v19_twod_source_field_case_rows()
+    discriminator_rows = v19_twod_source_field_discriminator_rows(case_rows)
+    false_rows = [row for row in case_rows if row["sourceClass"] == "protected-false-activation"]
+    high_rows = [row for row in case_rows if row["sourceClass"] == "retained-high-source-load"]
+    coverage_rows = []
+    for label, rows in [("protected-false-activation", false_rows), ("retained-high-source-load", high_rows), ("combined", case_rows)]:
+        coverage_rows.append(
+            {
+                "group": label,
+                "count": len(rows),
+                "evidenceAvailableCount": sum(1 for row in rows if parse_bool(row.get("evidenceAvailable"))),
+                "directCase2DEvidenceCount": sum(1 for row in rows if parse_bool(row.get("directCase2DEvidence"))),
+                "sourceWideMethodEvidenceCount": sum(1 for row in rows if parse_bool(row.get("sourceWideMethodEvidence")) or parse_bool(row.get("sourceWideV18Context"))),
+                "qualityMediumOrWorseCount": sum(1 for row in rows if parse_bool(row.get("qualityMediumOrWorse"))),
+                "medianTwoDEvidenceRisk": safe_median(parse_float(row.get("twoDEvidenceRisk"), math.nan) for row in rows),
+            }
+        )
+    top = discriminator_rows[0] if discriminator_rows else {}
+    direct_coverage = sum(1 for row in case_rows if parse_bool(row.get("directCase2DEvidence"))) / len(case_rows) if case_rows else 0.0
+    evidence_coverage = sum(1 for row in case_rows if parse_bool(row.get("evidenceAvailable"))) / len(case_rows) if case_rows else 0.0
+    if direct_coverage < 0.35:
+        verdict = "external 2D kinematic data required"
+    elif parse_float(top.get("falseActivationRecall"), 0.0) >= 0.70 and parse_float(top.get("retainedHighSuppressionRate"), 1.0) <= 0.30:
+        verdict = "2D source-field discriminator candidate"
+    else:
+        verdict = "current 2D proxies not sufficient"
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_coverage.csv", coverage_rows)
+    write_csv(out_dir / f"{prefix}_discriminator_scores.csv", discriminator_rows)
+    formula = {
+        "candidateId": "mts-v19-two-d-source-field-v1",
+        "status": verdict,
+        "bestDiscriminator": top,
+        "direct2DEvidenceCoverage": direct_coverage,
+        "anyEvidenceCoverage": evidence_coverage,
+        "physicalReading": "MTS source loading likely needs a 2D kinematic/morphology admissibility condition beyond 1D radial curves and catalogue metadata.",
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "lawScoringChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameter", "MOND parameter", "weak/systematics fitting"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 2D Source-Field Evidence Audit",
+        "",
+        "This mode does not test a new galaxy law. It asks whether the v19 source-admissibility failure can be separated by actual 2D/source-field evidence: morphology, beam/resolution, error-model, source-wide method flags, and provenance context.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Cases audited: `{len(case_rows)}`.",
+        f"Any evidence coverage: `{fmt(100 * evidence_coverage)}%`.",
+        f"Direct case-specific 2D evidence coverage: `{fmt(100 * direct_coverage)}%`.",
+        "",
+        "## Best Available Discriminator",
+        "",
+    ]
+    if top:
+        report.extend(
+            [
+                f"- Feature: `{top['feature']}`.",
+                f"- Direction: `{top['direction']}`.",
+                f"- Threshold: `{top['threshold']}`.",
+                f"- False activation recall: `{fmt(100 * parse_float(top['falseActivationRecall']))}%`.",
+                f"- Retained high suppression: `{fmt(100 * parse_float(top['retainedHighSuppressionRate']))}%`.",
+            ]
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "If direct case-specific 2D evidence is sparse, the next real framework step is not another radial threshold. It is acquisition or construction of source-field descriptors: HI velocity-field asymmetry, warp/bar/non-circular-motion flags, beam/resolution, velocity dispersion/asymmetric drift, and 2D surface-density coherence.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-two-d-source-field-v1",
+        "verdict": verdict,
+        "caseCount": len(case_rows),
+        "direct2DEvidenceCoverage": direct_coverage,
+        "anyEvidenceCoverage": evidence_coverage,
+        "bestDiscriminator": top,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_coverage.csv",
+            f"{prefix}_discriminator_scores.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19twodsourcefield(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_TWO_D_SOURCE_FIELD_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_twod_source_field_artifacts(out_dir)
+    print("MTS v19 2D source-field evidence audit")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"cases={capsule['caseCount']}",
+                f"any_evidence={fmt(100*capsule['anyEvidenceCoverage'])}%",
+                f"direct_2d={fmt(100*capsule['direct2DEvidenceCoverage'])}%",
+            ]
+        )
+    )
+    print(f"Wrote v19 2D source-field audit to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -104875,6 +105156,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19distributedflow",
             "v19sourceenvironment",
             "observedstatev19sourceenvironment",
+            "v19twodsourcefield",
+            "observedstatev19twodsourcefield",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -105300,6 +105583,8 @@ def main() -> None:
         cmd_v19distributedflow(args)
     elif args.mode in {"v19sourceenvironment", "observedstatev19sourceenvironment"}:
         cmd_v19sourceenvironment(args)
+    elif args.mode in {"v19twodsourcefield", "observedstatev19twodsourcefield"}:
+        cmd_v19twodsourcefield(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
