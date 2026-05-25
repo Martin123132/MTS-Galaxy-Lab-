@@ -278,6 +278,7 @@ DEFAULT_V19_SOURCE_BOUNDARY_CONTROL_COVERAGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-s
 DEFAULT_V19_BOUNDARY_OUTER_PERTURBATION_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-outer-perturbation-v1"
 DEFAULT_V19_SOURCE_BOUNDARY_NUMERIC_GATE_V2_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-numeric-gate-v2"
 DEFAULT_V19_BROAD_SOURCE_BOUNDARY_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-v19-broad-source-boundary-audit-v1"
+DEFAULT_V19_MISSING_BOUNDARY_STATE_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-v19-missing-boundary-state-audit-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -111538,6 +111539,234 @@ def cmd_v19broadsourceboundaryaudit(args: argparse.Namespace) -> None:
     print(f"Wrote v19 broad source-boundary audit to {out_dir.resolve()}")
 
 
+V19_MISSING_BOUNDARY_ARCHETYPES = {
+    "NGC3198": "quiet-boundary-soft",
+    "IC2574": "protected-cap",
+    "NGC5055": "protected-cap",
+    "NGC2403": "source-load-admit",
+    "NGC3521": "source-load-admit",
+    "NGC7331": "source-load-admit",
+    "NGC2903": "weak-excluded-soft-analog",
+}
+
+V19_MISSING_BOUNDARY_BLOCKERS = {
+    "UGC07089": "protected low-load missing source proxy",
+    "UGC03205": "buffered high-RMSE missing source proxy",
+    "UGC05253": "buffered high-RMSE missing source proxy",
+    "NGC4157": "low-load NFW/source gap missing proxy",
+    "NGC4100": "low-load NFW/source gap missing proxy",
+}
+
+V19_MISSING_BOUNDARY_STATE_FEATURES = [
+    "fGasOut",
+    "memoryLoad",
+    "leffOverH",
+    "uOut",
+    "u075",
+    "uMax",
+    "routeMargin",
+    "routeBreakRisk",
+    "innerGasShare",
+    "midGasShare",
+    "outerGasShare",
+    "diskConcentration",
+    "gasOuterDominance",
+    "barShapeCurvature",
+    "pointDensity",
+]
+
+
+def v19_missing_boundary_state_rows() -> list[dict]:
+    context = observed_state_candidate_context()
+    curves = {curve["name"]: curve for curve in context["curves"]}
+    names = sorted(set(V19_MISSING_BOUNDARY_ARCHETYPES) | set(V19_MISSING_BOUNDARY_BLOCKERS))
+    rows = []
+    for name in names:
+        curve = curves.get(name)
+        if not curve:
+            continue
+        profile = v21_full_profile_features(curve)
+        row = {
+            "galaxy": name,
+            "role": V19_MISSING_BOUNDARY_ARCHETYPES.get(name, V19_MISSING_BOUNDARY_BLOCKERS.get(name, "")),
+            "roleClass": "archetype" if name in V19_MISSING_BOUNDARY_ARCHETYPES else "missing-blocker",
+            "setLabel": "weak/systematics" if name in context["weakNames"] else ("clean-high" if name in context["highNames"] else "clean-stable"),
+            "lockedRoute": curve.get("lockedModelRoute", ""),
+            "canonicalRmse": score_curve(curve)["rmse"],
+            "rOut": curve.get("rOut", math.nan),
+            "h": curve.get("h", math.nan),
+            "hOverROut": curve.get("h", math.nan) / curve.get("rOut", math.nan) if curve.get("rOut", 0.0) else math.nan,
+            "fGasOut": curve.get("fGasOut", math.nan),
+            "memoryLoad": curve.get("memoryLoad", math.nan),
+            "leffOverH": curve.get("leffOverH", math.nan),
+            "uOut": curve.get("uOut", math.nan),
+            "u075": curve.get("u075", math.nan),
+            "uMax": curve.get("uMax", math.nan),
+            "routeMargin": curve.get("routeMargin", math.nan),
+            "routeBreakRisk": curve.get("routeBreakRisk", math.nan),
+        }
+        for key in [
+            "innerGasShare",
+            "midGasShare",
+            "outerGasShare",
+            "diskConcentration",
+            "gasOuterDominance",
+            "barShapeCurvature",
+            "pointDensity",
+            "barPeakX",
+            "diskPeakX",
+            "gasPeakX",
+        ]:
+            row[key] = profile.get(key, math.nan)
+        rows.append(row)
+    return rows
+
+
+def v19_missing_boundary_feature_distance(row_a: dict, row_b: dict, scales: dict[str, tuple[float, float]]) -> float:
+    total = 0.0
+    count = 0
+    for key in V19_MISSING_BOUNDARY_STATE_FEATURES:
+        a = parse_float(row_a.get(key), math.nan)
+        b = parse_float(row_b.get(key), math.nan)
+        if not math.isfinite(a) or not math.isfinite(b):
+            continue
+        if key in {"uMax", "gasOuterDominance", "diskConcentration"}:
+            a = math.log10(max(a, 1e-9))
+            b = math.log10(max(b, 1e-9))
+        low, high = scales[key]
+        denom = high - low
+        if denom <= 1e-12:
+            continue
+        total += ((a - b) / denom) ** 2
+        count += 1
+    return math.sqrt(total / count) if count else math.nan
+
+
+def v19_missing_boundary_state_distances(rows: list[dict]) -> list[dict]:
+    scale_values: dict[str, list[float]] = {key: [] for key in V19_MISSING_BOUNDARY_STATE_FEATURES}
+    for row in rows:
+        for key in V19_MISSING_BOUNDARY_STATE_FEATURES:
+            value = parse_float(row.get(key), math.nan)
+            if not math.isfinite(value):
+                continue
+            if key in {"uMax", "gasOuterDominance", "diskConcentration"}:
+                value = math.log10(max(value, 1e-9))
+            scale_values[key].append(value)
+    scales = {key: (min(values), max(values)) for key, values in scale_values.items() if values}
+    row_by_name = {row["galaxy"]: row for row in rows}
+    out = []
+    for blocker in sorted(V19_MISSING_BOUNDARY_BLOCKERS):
+        blocker_row = row_by_name.get(blocker)
+        if not blocker_row:
+            continue
+        distances = []
+        for archetype, archetype_role in V19_MISSING_BOUNDARY_ARCHETYPES.items():
+            archetype_row = row_by_name.get(archetype)
+            if not archetype_row:
+                continue
+            distances.append((v19_missing_boundary_feature_distance(blocker_row, archetype_row, scales), archetype, archetype_role))
+        distances = sorted(item for item in distances if math.isfinite(item[0]))
+        nearest = distances[0] if distances else (math.nan, "", "")
+        nearest_three = ";".join(f"{name}:{role}:{fmt(distance)}" for distance, name, role in distances[:3])
+        decision = "needs external source proxy"
+        if nearest[2] == "protected-cap":
+            decision = "state/profile leans protected-cap"
+        elif nearest[2] == "source-load-admit":
+            decision = "state/profile leans source-load"
+        elif nearest[2] == "quiet-boundary-soft":
+            decision = "state/profile leans quiet-boundary but needs numeric source proof"
+        elif nearest[2] == "weak-excluded-soft-analog":
+            decision = "closest analog is weak-excluded; cannot fit"
+        out.append(
+            {
+                "galaxy": blocker,
+                "blockerRole": V19_MISSING_BOUNDARY_BLOCKERS[blocker],
+                "nearestArchetype": nearest[1],
+                "nearestArchetypeRole": nearest[2],
+                "nearestDistance": nearest[0],
+                "nearestThree": nearest_three,
+                "stateDecision": decision,
+            }
+        )
+    return out
+
+
+def write_v19_missing_boundary_state_audit_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_missing_boundary_state_audit"
+    rows = v19_missing_boundary_state_rows()
+    distance_rows = v19_missing_boundary_state_distances(rows)
+    decision_counts: dict[str, int] = {}
+    for row in distance_rows:
+        decision_counts[row["stateDecision"]] = decision_counts.get(row["stateDecision"], 0) + 1
+    if decision_counts.get("state/profile leans quiet-boundary but needs numeric source proof", 0) >= 2:
+        verdict = "more clean boundary candidates likely; source evidence needed"
+    elif decision_counts.get("state/profile leans protected-cap", 0) and decision_counts.get("state/profile leans source-load", 0):
+        verdict = "missing blockers split by state/profile; no single boundary fix"
+    else:
+        verdict = "missing source-boundary variable remains unresolved"
+    next_rows = []
+    for row in distance_rows:
+        next_rows.append(
+            {
+                "galaxy": row["galaxy"],
+                "nextAction": "fetch 2D/radial-flow provenance" if row["stateDecision"] != "state/profile leans source-load" else "source-load check before any cap/softening",
+                "reason": row["stateDecision"],
+                "nearestThree": row["nearestThree"],
+            }
+        )
+    write_csv(out_dir / f"{prefix}_state_table.csv", rows)
+    write_csv(out_dir / f"{prefix}_nearest_archetypes.csv", distance_rows)
+    write_csv(out_dir / f"{prefix}_next_actions.csv", next_rows)
+    capsule = {
+        "analysisName": "mts-v19-missing-boundary-state-audit-v1",
+        "verdict": verdict,
+        "stateRows": len(rows),
+        "blockerRows": len(distance_rows),
+        "decisionCounts": decision_counts,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    report = [
+        "# MTS v19 Missing Boundary State Audit",
+        "",
+        "This mode compares the non-THINGS blockers against the current numeric source-boundary archetypes using only local MTS state/profile variables. It does not change any law.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "| Galaxy | nearest archetype | archetype role | distance | decision |",
+        "| --- | --- | --- | ---: | --- |",
+    ]
+    for row in distance_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['nearestArchetype']} | {row['nearestArchetypeRole']} | {fmt(row['nearestDistance'])} | {row['stateDecision']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Meaning",
+            "",
+            "The missing blockers do not form one NGC3198-like family. UGC07089 is closer to protected-cap anatomy, NGC4157 and NGC4100 are closer to source-load/admit controls, and the buffered high-RMSE cases are mixed. That argues against a single broader source-boundary threshold from the current state/profile vector.",
+            "",
+            "The next useful evidence is case-specific 2D/radial-flow provenance for the mixed or protected-leaning blockers, not another all-case threshold.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19missingboundarystateaudit(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_MISSING_BOUNDARY_STATE_AUDIT_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_missing_boundary_state_audit_artifacts(out_dir)
+    print("MTS v19 missing-boundary state audit")
+    print(f"verdict={capsule['verdict']}")
+    print("\t".join([f"rows={capsule['stateRows']}", f"blockers={capsule['blockerRows']}"]))
+    print(f"Wrote v19 missing-boundary state audit to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -111821,6 +112050,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19sourceboundarynumericgatev2",
             "v19broadsourceboundaryaudit",
             "observedstatev19broadsourceboundaryaudit",
+            "v19missingboundarystateaudit",
+            "observedstatev19missingboundarystateaudit",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -112280,6 +112511,8 @@ def main() -> None:
         cmd_v19sourceboundarynumericgatev2(args)
     elif args.mode in {"v19broadsourceboundaryaudit", "observedstatev19broadsourceboundaryaudit"}:
         cmd_v19broadsourceboundaryaudit(args)
+    elif args.mode in {"v19missingboundarystateaudit", "observedstatev19missingboundarystateaudit"}:
+        cmd_v19missingboundarystateaudit(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
