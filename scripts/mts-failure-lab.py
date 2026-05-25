@@ -265,6 +265,7 @@ DEFAULT_V19_COUNTER_EVIDENCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-counter-evidence-
 DEFAULT_V19_COUNTER_EVIDENCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-counter-evidence-v1")
 DEFAULT_V19_NGC3198_COUNTERCASE_OUT = OUTPUT_PACK_ROOT / "mts-v19-ngc3198-countercase-v1"
 DEFAULT_V19_NGC3198_COUNTERCASE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ngc3198-countercase-v1")
+DEFAULT_V19_NUMERIC_TWO_D_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-numeric-2d-field-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -107353,6 +107354,325 @@ def cmd_v19ngc3198countercase(args: argparse.Namespace) -> None:
     print(f"Wrote v19.5 NGC3198 countercase to {out_dir.resolve()}")
 
 
+V19_NUMERIC_TWO_D_TARGETS = {
+    "NGC3198": "held-out unresolved protected false activation",
+    "IC2574": "cap-control",
+    "NGC5055": "cap-control",
+    "UGC07089": "cap-control",
+    "NGC2403": "admit-control",
+    "NGC3521": "admit-control",
+    "NGC7331": "admit-control",
+    "UGC03205": "admit-control",
+    "UGC05253": "admit-control",
+    "NGC4157": "unexplained-gap-control",
+    "NGC4100": "unexplained-gap-control",
+}
+
+
+V19_NUMERIC_TWO_D_STATE_FEATURES = [
+    "memoryLoad",
+    "u075",
+    "uOut",
+    "uMax",
+    "fGasOut",
+    "rOutOverH",
+    "lGapOverH",
+    "satFraction",
+    "outerGasShare",
+    "outerDiskShare",
+    "barCurvAbs",
+    "pointDensity",
+]
+
+
+V19_NUMERIC_TWO_D_EXTERNAL_FEATURES = [
+    "whispM20",
+    "whispGini",
+    "whispAsymmetryA",
+    "whispLopsidedness",
+    "thingsMorphologyM20",
+    "thingsMorphologyAsymmetryA",
+    "thingsMorphologyGini",
+    "thingsMorphologyConcentration",
+    "whispP4M20",
+    "whispP4AsymmetryA",
+    "whispP4Gini",
+    "whispP6M20",
+    "whispP6AsymmetryA",
+    "whispP6Gini",
+    "meanSideAsymmetryFraction",
+    "meanSideDiffKmS",
+]
+
+
+def v19_numeric_2d_case_matrix(parser_dir: Path) -> list[dict]:
+    context = observed_state_candidate_context()
+    curves_by_name = {curve["name"]: curve for curve in context["curves"]}
+    external_rows = v19_external_2d_admissibility_rows(parser_dir)
+    external_by_name = {row["galaxy"]: row for row in external_rows}
+    counter_path = DEFAULT_V19_COUNTER_EVIDENCE_OUT / "mts_v19_counter_evidence_admissibility_decisions.csv"
+    if not counter_path.exists():
+        write_v19_counter_evidence_artifacts(DEFAULT_V19_COUNTER_EVIDENCE_OUT, DEFAULT_V19_COUNTER_EVIDENCE_CACHE, True)
+    counter_by_name = {row["galaxy"]: row for row in read_csv_rows(counter_path)}
+    out: list[dict] = []
+    for name, role in V19_NUMERIC_TWO_D_TARGETS.items():
+        curve = curves_by_name.get(name)
+        state = v19_admissibility_features(curve) if curve else {}
+        external = external_by_name.get(name, {})
+        counter = counter_by_name.get(name, {})
+        if role == "cap-control":
+            train_label = "cap"
+        elif role == "admit-control":
+            train_label = "admit"
+        else:
+            train_label = "holdout"
+        row = {
+            "galaxy": name,
+            "comparisonRole": role,
+            "trainLabel": train_label,
+            "lockedRoute": curve.get("lockedModelRoute", "") if curve else "",
+            "priorDecision": counter.get("admissibilityDecision", ""),
+            "sourceFamily": external.get("sourceFamily", ""),
+            "sourcePath": external.get("sourcePath", "MISSING"),
+            "external2DRowCount": external.get("external2DRowCount", 0),
+        }
+        for feature in V19_NUMERIC_TWO_D_STATE_FEATURES:
+            row[feature] = state.get(feature, "")
+        for feature in V19_NUMERIC_TWO_D_EXTERNAL_FEATURES:
+            row[feature] = external.get(feature, "")
+            row[f"{feature}Count"] = external.get(f"{feature}Count", 0)
+        out.append(row)
+    return out
+
+
+def v19_numeric_2d_feature_list(rows: list[dict]) -> list[str]:
+    features = V19_NUMERIC_TWO_D_STATE_FEATURES + V19_NUMERIC_TWO_D_EXTERNAL_FEATURES
+    usable = []
+    train_rows = [row for row in rows if row["trainLabel"] in {"cap", "admit"}]
+    for feature in features:
+        finite = [parse_float(row.get(feature), math.nan) for row in train_rows]
+        finite = [value for value in finite if math.isfinite(value)]
+        if len(finite) >= 4 and len(set(round(value, 8) for value in finite)) >= 2:
+            usable.append(feature)
+    return usable
+
+
+def v19_numeric_2d_rule_hit(row: dict, rule: dict) -> bool:
+    def one(feature: str, direction: str, threshold: float) -> bool:
+        value = parse_float(row.get(feature), math.nan)
+        if not math.isfinite(value):
+            return False
+        return value >= threshold if direction == "high" else value <= threshold
+    hit = one(rule["feature"], rule["direction"], parse_float(rule["threshold"]))
+    if rule.get("feature2"):
+        hit = hit and one(rule["feature2"], rule["direction2"], parse_float(rule["threshold2"]))
+    return hit
+
+
+def v19_numeric_2d_rule_candidates(rows: list[dict]) -> list[dict]:
+    train_rows = [row for row in rows if row["trainLabel"] in {"cap", "admit"}]
+    features = v19_numeric_2d_feature_list(rows)
+    rules: list[dict] = []
+    for feature in features:
+        values = [parse_float(row.get(feature), math.nan) for row in train_rows]
+        values = [value for value in values if math.isfinite(value)]
+        for q in [0.25, 0.33, 0.50, 0.66, 0.75]:
+            threshold = v19_quantile(values, q)
+            for direction in ["high", "low"]:
+                rules.append(
+                    {
+                        "ruleId": f"{feature}-{direction}-q{int(q*100)}",
+                        "ruleType": "one-variable",
+                        "feature": feature,
+                        "direction": direction,
+                        "threshold": threshold,
+                        "feature2": "",
+                        "direction2": "",
+                        "threshold2": "",
+                    }
+                )
+    compact = [rule for rule in rules if rule["feature"] in {"uOut", "u075", "memoryLoad", "whispM20", "thingsMorphologyM20", "thingsMorphologyAsymmetryA", "whispP4M20", "whispP6M20", "meanSideAsymmetryFraction"}]
+    for left in compact:
+        for right in compact:
+            if left["feature"] >= right["feature"]:
+                continue
+            rules.append(
+                {
+                    "ruleId": f"{left['ruleId']} AND {right['ruleId']}",
+                    "ruleType": "two-variable",
+                    "feature": left["feature"],
+                    "direction": left["direction"],
+                    "threshold": left["threshold"],
+                    "feature2": right["feature"],
+                    "direction2": right["direction"],
+                    "threshold2": right["threshold"],
+                }
+            )
+    return rules
+
+
+def v19_numeric_2d_score_rule(rows: list[dict], rule: dict, label_key: str = "trainLabel") -> dict:
+    train_rows = [row for row in rows if row.get(label_key) in {"cap", "admit"}]
+    cap_rows = [row for row in train_rows if row.get(label_key) == "cap"]
+    admit_rows = [row for row in train_rows if row.get(label_key) == "admit"]
+    cap_hits = [row for row in cap_rows if v19_numeric_2d_rule_hit(row, rule)]
+    admit_hits = [row for row in admit_rows if v19_numeric_2d_rule_hit(row, rule)]
+    ngc_row = next((row for row in rows if row["galaxy"] == "NGC3198"), {})
+    ngc_hit = v19_numeric_2d_rule_hit(ngc_row, rule) if ngc_row else False
+    cap_recall = len(cap_hits) / len(cap_rows) if cap_rows else 0.0
+    admit_false_cap = len(admit_hits) / len(admit_rows) if admit_rows else 1.0
+    utility = cap_recall - admit_false_cap
+    return {
+        **rule,
+        "trainCaseCount": len(train_rows),
+        "capControlCount": len(cap_rows),
+        "admitControlCount": len(admit_rows),
+        "capControlHits": len(cap_hits),
+        "admitControlFalseCapHits": len(admit_hits),
+        "capRecall": cap_recall,
+        "admitFalseCapRate": admit_false_cap,
+        "utility": utility,
+        "ngc3198PredictedCap": ngc_hit,
+        "ngc3198Value": ngc_row.get(rule["feature"], ""),
+        "ngc3198Value2": ngc_row.get(rule.get("feature2", ""), "") if rule.get("feature2") else "",
+    }
+
+
+def v19_numeric_2d_null_controls(rows: list[dict], rules: list[dict], draws: int = 500, seed: int = 20260525) -> list[dict]:
+    train_rows = [row for row in rows if row["trainLabel"] in {"cap", "admit"}]
+    labels = [row["trainLabel"] for row in train_rows]
+    rng = random.Random(seed)
+    out = []
+    for draw in range(draws):
+        shuffled = labels[:]
+        rng.shuffle(shuffled)
+        label_by_name = {row["galaxy"]: label for row, label in zip(train_rows, shuffled)}
+        shuffled_rows = [{**row, "shuffledLabel": label_by_name.get(row["galaxy"], row["trainLabel"])} for row in rows]
+        best = max((v19_numeric_2d_score_rule(shuffled_rows, rule, "shuffledLabel") for rule in rules), key=lambda row: parse_float(row["utility"], -math.inf), default={})
+        out.append({"nullType": "shuffled-cap-admit-labels", "draw": draw, "bestUtility": best.get("utility", ""), "bestRuleId": best.get("ruleId", "")})
+    return out
+
+
+def write_v19_numeric_2d_field_artifacts(out_dir: Path, parser_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_numeric_2d_field"
+    rows = v19_numeric_2d_case_matrix(parser_dir)
+    rules = v19_numeric_2d_rule_candidates(rows)
+    scores = [v19_numeric_2d_score_rule(rows, rule) for rule in rules]
+    scores.sort(key=lambda row: (parse_float(row["utility"], -math.inf), parse_float(row["capRecall"], -math.inf), -parse_float(row["admitFalseCapRate"], math.inf)), reverse=True)
+    best = scores[0] if scores else {}
+    null_rows = v19_numeric_2d_null_controls(rows, rules) if rules else []
+    null_p95 = v19_quantile([parse_float(row["bestUtility"], math.nan) for row in null_rows if math.isfinite(parse_float(row["bestUtility"], math.nan))], 0.95) if null_rows else math.nan
+    null_margin = parse_float(best.get("utility"), math.nan) - null_p95 if best else math.nan
+    feature_rows = []
+    for feature in v19_numeric_2d_feature_list(rows):
+        cap_values = [parse_float(row.get(feature), math.nan) for row in rows if row["trainLabel"] == "cap"]
+        admit_values = [parse_float(row.get(feature), math.nan) for row in rows if row["trainLabel"] == "admit"]
+        cap_values = [value for value in cap_values if math.isfinite(value)]
+        admit_values = [value for value in admit_values if math.isfinite(value)]
+        feature_rows.append(
+            {
+                "feature": feature,
+                "capCount": len(cap_values),
+                "admitCount": len(admit_values),
+                "capMedian": safe_median(cap_values),
+                "admitMedian": safe_median(admit_values),
+                "medianDifferenceCapMinusAdmit": safe_median(cap_values) - safe_median(admit_values) if cap_values and admit_values else math.nan,
+                "ngc3198Value": next((row.get(feature, "") for row in rows if row["galaxy"] == "NGC3198"), ""),
+            }
+        )
+    ngc_placement = []
+    ngc = next((row for row in rows if row["galaxy"] == "NGC3198"), {})
+    for score in scores[:25]:
+        ngc_placement.append(
+            {
+                "ruleId": score["ruleId"],
+                "utility": score["utility"],
+                "capRecall": score["capRecall"],
+                "admitFalseCapRate": score["admitFalseCapRate"],
+                "ngc3198PredictedCap": score["ngc3198PredictedCap"],
+                "feature": score["feature"],
+                "ngc3198Value": ngc.get(score["feature"], ""),
+                "feature2": score.get("feature2", ""),
+                "ngc3198Value2": ngc.get(score.get("feature2", ""), "") if score.get("feature2") else "",
+            }
+        )
+    serious = best and parse_float(best.get("utility"), 0.0) >= 0.50 and math.isfinite(null_margin) and null_margin >= 0.10
+    if not rules:
+        verdict = "insufficient numeric overlap"
+    elif serious and parse_bool(best.get("ngc3198PredictedCap")):
+        verdict = "NGC3198 numerically cap-like"
+    elif serious and not parse_bool(best.get("ngc3198PredictedCap")):
+        verdict = "NGC3198 numerically admit-like"
+    elif parse_bool(best.get("ngc3198PredictedCap")):
+        verdict = "weak numeric cap anatomy"
+    else:
+        verdict = "numeric 2D/state discriminator not stable"
+    write_csv(out_dir / f"{prefix}_case_matrix.csv", rows)
+    write_csv(out_dir / f"{prefix}_rule_scores.csv", scores)
+    write_csv(out_dir / f"{prefix}_ngc3198_placement.csv", ngc_placement)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_feature_contrast.csv", feature_rows)
+    capsule = {
+        "analysisName": "mts-v19-numeric-2d-field-v1",
+        "verdict": verdict,
+        "caseCount": len(rows),
+        "trainCapCount": sum(1 for row in rows if row["trainLabel"] == "cap"),
+        "trainAdmitCount": sum(1 for row in rows if row["trainLabel"] == "admit"),
+        "featureCount": len(v19_numeric_2d_feature_list(rows)),
+        "bestRule": best,
+        "nullP95Utility": null_p95,
+        "nullMargin": null_margin,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    report = [
+        "# MTS v19 Numeric 2D/Field Discriminator",
+        "",
+        "This mode tests actual imported numeric 2D morphology/source metrics plus MTS state variables. NGC3198 is held out and compared against known cap/admit controls. It does not change the framework law.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Train cap controls: `{capsule['trainCapCount']}`.",
+        f"Train admit controls: `{capsule['trainAdmitCount']}`.",
+        f"Usable numeric features: `{capsule['featureCount']}`.",
+        f"Best rule: `{best.get('ruleId', 'none')}`.",
+        f"Best utility: `{fmt(parse_float(best.get('utility'), math.nan))}`.",
+        f"Null p95 utility: `{fmt(null_p95)}`.",
+        f"Null margin: `{fmt(null_margin)}`.",
+        f"NGC3198 predicted cap by best rule: `{best.get('ngc3198PredictedCap', '')}`.",
+        "",
+        "| Galaxy | role | route | external rows | source family |",
+        "| --- | --- | --- | ---: | --- |",
+    ]
+    for row in rows:
+        report.append(f"| {row['galaxy']} | {row['comparisonRole']} | {row['lockedRoute']} | {row['external2DRowCount']} | {row['sourceFamily']} |")
+    report.extend(["", verdict])
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19numeric2dfield(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_NUMERIC_TWO_D_FIELD_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    parser_dir = Path(args.source_dir) if args.source_dir else DEFAULT_V19_EXTERNAL_TWO_D_PARSER_OUT
+    capsule = write_v19_numeric_2d_field_artifacts(out_dir, parser_dir)
+    best = capsule.get("bestRule", {})
+    print("MTS v19 numeric 2D/field discriminator")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"features={capsule['featureCount']}",
+                f"best={best.get('ruleId', 'none')}",
+                f"utility={fmt(parse_float(best.get('utility'), math.nan))}",
+                f"null_margin={fmt(parse_float(capsule.get('nullMargin'), math.nan))}",
+                f"ngc3198_cap={best.get('ngc3198PredictedCap', '')}",
+            ]
+        )
+    )
+    print(f"Wrote v19 numeric 2D/field discriminator to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -107614,6 +107934,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19counterevidence",
             "v19ngc3198countercase",
             "observedstatev19ngc3198countercase",
+            "v19numeric2dfield",
+            "observedstatev19numeric2dfield",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -108051,6 +108373,8 @@ def main() -> None:
         cmd_v19counterevidence(args)
     elif args.mode in {"v19ngc3198countercase", "observedstatev19ngc3198countercase"}:
         cmd_v19ngc3198countercase(args)
+    elif args.mode in {"v19numeric2dfield", "observedstatev19numeric2dfield"}:
+        cmd_v19numeric2dfield(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
