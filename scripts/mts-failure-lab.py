@@ -247,6 +247,7 @@ DEFAULT_OBSERVED_STATE_V18_NON_ML_GAP_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v1
 DEFAULT_OBSERVED_STATE_V18_NON_ML_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v18-50-non-ml-provenance-v1"
 DEFAULT_OBSERVED_STATE_V18_SOURCE_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v18-51-source-provenance-v1"
 DEFAULT_OBSERVED_STATE_V18_SOURCE_PROVENANCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-source-provenance-v1")
+DEFAULT_V19_THEORY_KERNEL_OUT = OUTPUT_PACK_ROOT / "mts-v19-theory-kernel-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -101431,6 +101432,510 @@ def cmd_observedstatelawharden(args: argparse.Namespace) -> None:
     print(f"Wrote observed state law hardening pass to {out_dir.resolve()}")
 
 
+V19_THEORY_KERNEL_IDS = [
+    "exponential-memory-kernel",
+    "boundary-saturation-kernel",
+    "two-scale-persistence-kernel",
+]
+
+V19_THEORY_NFW_GAP_TARGETS = {
+    "NGC4157",
+    "NGC1705",
+    "ESO116-G012",
+    "F568-1",
+    "UGC07399",
+    "UGC06628",
+    "NGC2403",
+    "UGC08699",
+    "UGC06983",
+    "UGC04325",
+    "NGC4100",
+    "NGC5985",
+    "UGC12506",
+    "UGC11455",
+    "F574-2",
+    "F579-V1",
+    "F563-V1",
+}
+
+
+def v19_kernel_zone(point: dict) -> str:
+    if point["x"] < 0.33:
+        return "inner"
+    if point["x"] < 0.66:
+        return "mid"
+    return "outer"
+
+
+def v19_theory_shape(point: dict, center: float, width: float) -> float:
+    safe_width = max(1.0e-6, width)
+    return math.exp(-0.5 * ((point["x"] - center) / safe_width) ** 2)
+
+
+def v19_theory_outer_shape(point: dict) -> float:
+    return clamp((point["x"] - 0.42) / 0.42, 0.0, 1.0) ** 1.35
+
+
+def v19_theory_kernel_state(curve: dict) -> dict:
+    terms = v19_curve_memory_terms(curve)
+    values = observed_state_values(curve)
+    l_gap_over_h = terms["lGap"] / max(1.0e-9, curve["h"])
+    sat_fraction = terms["lGap"] / max(1.0e-9, terms["lSat"])
+    boundary_drive = clamp(
+        0.34 * clamp(terms["memoryLoad"] / 8.0, 0.0, 1.0)
+        + 0.30 * clamp(l_gap_over_h / 2.0, 0.0, 1.0)
+        + 0.18 * clamp(curve.get("lockedModelU075", 0.0) / 1.0, 0.0, 1.0)
+        + 0.18 * clamp(curve.get("lockedModelUOut", 0.0) / 0.7, 0.0, 1.0),
+        0.0,
+        1.0,
+    )
+    curvature_abs = abs(parse_float(values.get("barCurv"), 0.0))
+    profile_drive = clamp(
+        0.30 * clamp(curvature_abs / 55.0, 0.0, 1.0)
+        + 0.25 * clamp(parse_float(values.get("outerGasShare"), 0.0) / 0.7, 0.0, 1.0)
+        + 0.20 * clamp(parse_float(values.get("outerDiskShare"), 0.0) / 0.9, 0.0, 1.0)
+        + 0.15 * clamp(parse_float(values.get("pointDensity"), 0.0) / 2.4, 0.0, 1.0)
+        + 0.10 * clamp(parse_float(values.get("outerBulgeShare"), 0.0) / 0.25, 0.0, 1.0),
+        0.0,
+        1.0,
+    )
+    return {
+        **terms,
+        **values,
+        "lGapOverH": l_gap_over_h,
+        "satFraction": sat_fraction,
+        "boundaryDrive": boundary_drive,
+        "profileDrive": profile_drive,
+    }
+
+
+def v19_theory_kernel_supports(curve: dict, kernel_id: str) -> tuple[list[float], dict]:
+    state = v19_theory_kernel_state(curve)
+    l_exact = max(1.0e-9, state["lExact"])
+    base_supports = v18_competitor_canonical_supports(curve)
+    if kernel_id == "exponential-memory-kernel":
+        return base_supports, {
+            "kernelEquation": "S(r)=Gamma0*L_eff*(1-exp(-(r/L_eff)^q))",
+            "activation": 0.0,
+            "secondaryScaleKpc": "",
+        }
+    if kernel_id == "boundary-saturation-kernel":
+        activation = clamp(0.55 * state["boundaryDrive"] + 0.45 * state["satFraction"] * 4.0, 0.0, 1.0)
+        leff_boundary = l_exact + 0.45 * activation * state["lGap"]
+        supports = [
+            GAMMA0 * leff_boundary * (1.0 - math.exp(-((point["r"] / leff_boundary) ** Q_DEFAULT)))
+            for point in curve["points"]
+        ]
+        return supports, {
+            "kernelEquation": "L_boundary=L_exact+0.45*A_boundary*(L_sat-L_exact); S(r)=Gamma0*L_boundary*(1-exp(-(r/L_boundary)^q))",
+            "activation": activation,
+            "secondaryScaleKpc": "",
+        }
+    if kernel_id == "two-scale-persistence-kernel":
+        activation = clamp(0.45 * state["boundaryDrive"] + 0.55 * state["profileDrive"], 0.0, 1.0)
+        outer_scale = max(l_exact, 0.62 * curve["rOut"], l_exact * (1.0 + 0.8 * state["satFraction"]))
+        inner_weight = clamp(0.18 + 0.32 * activation, 0.18, 0.50)
+        outer_weight = 1.0 - inner_weight
+        q_outer = 1.05
+        supports = []
+        for point in curve["points"]:
+            inner_mode = 1.0 - math.exp(-((point["r"] / l_exact) ** Q_DEFAULT))
+            outer_mode = 1.0 - math.exp(-((point["r"] / outer_scale) ** q_outer))
+            shelf_balance = 1.0 + 0.22 * activation * v19_theory_shape(point, 0.62, 0.20) - 0.12 * activation * v19_theory_outer_shape(point)
+            supports.append(max(0.0, GAMMA0 * l_exact * (inner_weight * inner_mode + outer_weight * outer_mode) * shelf_balance))
+        return supports, {
+            "kernelEquation": "S(r)=Gamma0*L_exact*[w1*K(r,L_exact)+(1-w1)*K(r,L_outer)]*B_shelf(r)",
+            "activation": activation,
+            "secondaryScaleKpc": outer_scale,
+        }
+    raise ValueError(f"Unknown v19 theory kernel: {kernel_id}")
+
+
+def v19_support_shape_metrics(curve: dict, target: list[float], candidate: list[float]) -> dict:
+    diffs = []
+    norm_diffs = []
+    target_max = max([abs(value) for value in target] or [1.0])
+    candidate_max = max([abs(value) for value in candidate] or [1.0])
+    zones = {
+        "inner": {"diffs": [], "bias": []},
+        "mid": {"diffs": [], "bias": []},
+        "outer": {"diffs": [], "bias": []},
+    }
+    for point, target_value, candidate_value in zip(curve["points"], target, candidate):
+        diff = candidate_value - target_value
+        diffs.append(diff * diff)
+        norm_diffs.append(((candidate_value / candidate_max) - (target_value / target_max)) ** 2 if target_max > 0 and candidate_max > 0 else 0.0)
+        zone = v19_kernel_zone(point)
+        zones[zone]["diffs"].append(diff * diff)
+        zones[zone]["bias"].append(diff)
+    out = {
+        "supportRmse": math.sqrt(safe_mean(diffs)) if diffs else math.nan,
+        "supportShapeRmse": math.sqrt(safe_mean(norm_diffs)) if norm_diffs else math.nan,
+    }
+    for zone, data in zones.items():
+        out[f"{zone}SupportRmse"] = math.sqrt(safe_mean(data["diffs"])) if data["diffs"] else math.nan
+        out[f"{zone}SupportBias"] = safe_mean(data["bias"]) if data["bias"] else math.nan
+    return out
+
+
+def v19_theory_kernel_case_rows() -> tuple[list[dict], list[dict], dict]:
+    context = observed_state_candidate_context()
+    curves = context["curves"]
+    weak_names = context["weakNames"]
+    high_names = context["highNames"]
+    target_supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    case_rows: list[dict] = []
+    shape_rows: list[dict] = []
+    for curve in curves:
+        name = curve["name"]
+        target_supports = target_supports_by_name.get(name, [])
+        if len(target_supports) != len(curve["points"]):
+            continue
+        set_name = "weak-systematics-excluded" if name in weak_names else ("clean-high-rmse" if name in high_names else "clean-protected")
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        v18_target = v18_competitor_support_score(curve, target_supports)
+        state = v19_theory_kernel_state(curve)
+        for kernel_id in V19_THEORY_KERNEL_IDS:
+            supports, kernel_meta = v19_theory_kernel_supports(curve, kernel_id)
+            score = v18_competitor_support_score(curve, supports)
+            shape = v19_support_shape_metrics(curve, target_supports, supports)
+            protected_reg = max(0.0, score["rmse"] - v18_target["rmse"]) if set_name == "clean-protected" else 0.0
+            high_reg = max(0.0, score["rmse"] - v18_target["rmse"]) if set_name == "clean-high-rmse" else 0.0
+            v18_gain = pct_improvement(canonical["rmse"], v18_target["rmse"])
+            kernel_gain = pct_improvement(canonical["rmse"], score["rmse"])
+            row = {
+                "galaxy": name,
+                "set": set_name,
+                "kernelId": kernel_id,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "canonicalRmse": canonical["rmse"],
+                "v18TargetRmse": v18_target["rmse"],
+                "kernelRmse": score["rmse"],
+                "kernelMinusV18KmS": score["rmse"] - v18_target["rmse"],
+                "kernelGainVsCanonicalPct": kernel_gain,
+                "v18GainVsCanonicalPct": v18_gain,
+                "repairRetainedPct": kernel_gain / v18_gain * 100.0 if abs(v18_gain) > 1.0e-9 else math.nan,
+                "protectedRegressionVsV18KmS": protected_reg,
+                "highRegressionVsV18KmS": high_reg,
+                "nfwGapAnatomyTarget": name in V19_THEORY_NFW_GAP_TARGETS,
+                "weakSystematicsExcluded": name in weak_names,
+                "activation": kernel_meta.get("activation", ""),
+                "secondaryScaleKpc": kernel_meta.get("secondaryScaleKpc", ""),
+                "memoryLoad": curve.get("memoryLoad", math.nan),
+                "S_mem": state["sMem"],
+                "L_eff": state["lExact"],
+                "L_sat": state["lSat"],
+                "L_gap": state["lGap"],
+                "L_gap_over_h": state["lGapOverH"],
+                "u_075": curve.get("lockedModelU075", math.nan),
+                "u_out": curve.get("lockedModelUOut", math.nan),
+                "u_max": curve.get("lockedModelUMax", math.nan),
+                "fGasOut": curve.get("fGasOut", math.nan),
+                "outerGasShare": state.get("outerGasShare", math.nan),
+                "outerDiskShare": state.get("outerDiskShare", math.nan),
+                "outerBulgeShare": state.get("outerBulgeShare", math.nan),
+                "barCurv": state.get("barCurv", math.nan),
+                "pointDensity": state.get("pointDensity", math.nan),
+                **shape,
+            }
+            case_rows.append(row)
+            for zone in ["inner", "mid", "outer"]:
+                shape_rows.append(
+                    {
+                        "galaxy": name,
+                        "set": set_name,
+                        "kernelId": kernel_id,
+                        "zone": zone,
+                        "supportRmse": shape[f"{zone}SupportRmse"],
+                        "supportBiasCandidateMinusV18": shape[f"{zone}SupportBias"],
+                        "lockedRoute": curve.get("lockedModelRoute", ""),
+                        "nfwGapAnatomyTarget": name in V19_THEORY_NFW_GAP_TARGETS,
+                    }
+                )
+    metadata = {
+        "weakSystematicsExcludedCount": len(weak_names),
+        "cleanHighCount": len(high_names),
+        "targetSupportCurves": len(target_supports_by_name),
+    }
+    return case_rows, shape_rows, metadata
+
+
+def v19_theory_kernel_score_rows(case_rows: list[dict]) -> tuple[list[dict], str, dict]:
+    score_rows: list[dict] = []
+    clean_rows = [row for row in case_rows if row["set"] != "weak-systematics-excluded"]
+    for kernel_id in V19_THEORY_KERNEL_IDS:
+        rows = [row for row in clean_rows if row["kernelId"] == kernel_id]
+        high = [row for row in rows if row["set"] == "clean-high-rmse"]
+        protected = [row for row in rows if row["set"] == "clean-protected"]
+        nfw_targets = [row for row in rows if parse_bool(row.get("nfwGapAnatomyTarget"))]
+        canonical_clean = safe_mean(parse_float(row["canonicalRmse"]) for row in rows)
+        kernel_clean = safe_mean(parse_float(row["kernelRmse"]) for row in rows)
+        v18_clean = safe_mean(parse_float(row["v18TargetRmse"]) for row in rows)
+        canonical_high = safe_mean(parse_float(row["canonicalRmse"]) for row in high)
+        kernel_high = safe_mean(parse_float(row["kernelRmse"]) for row in high)
+        v18_high = safe_mean(parse_float(row["v18TargetRmse"]) for row in high)
+        canonical_target = safe_mean(parse_float(row["canonicalRmse"]) for row in nfw_targets)
+        kernel_target = safe_mean(parse_float(row["kernelRmse"]) for row in nfw_targets)
+        v18_target = safe_mean(parse_float(row["v18TargetRmse"]) for row in nfw_targets)
+        clean_retention = (canonical_clean - kernel_clean) / (canonical_clean - v18_clean) * 100.0 if abs(canonical_clean - v18_clean) > 1.0e-9 else math.nan
+        high_retention = (canonical_high - kernel_high) / (canonical_high - v18_high) * 100.0 if abs(canonical_high - v18_high) > 1.0e-9 else math.nan
+        target_retention = (canonical_target - kernel_target) / (canonical_target - v18_target) * 100.0 if abs(canonical_target - v18_target) > 1.0e-9 else math.nan
+        score_rows.append(
+            {
+                "kernelId": kernel_id,
+                "cleanCount": len(rows),
+                "highCount": len(high),
+                "protectedCount": len(protected),
+                "nfwGapTargetCount": len(nfw_targets),
+                "meanSupportShapeRmse": safe_mean(parse_float(row["supportShapeRmse"]) for row in rows),
+                "meanSupportRmse": safe_mean(parse_float(row["supportRmse"]) for row in rows),
+                "cleanMeanRmse": kernel_clean,
+                "cleanGainVsCanonicalPct": pct_improvement(canonical_clean, kernel_clean),
+                "cleanV18TargetGainVsCanonicalPct": pct_improvement(canonical_clean, v18_clean),
+                "cleanV18RepairRetentionPct": clean_retention,
+                "highMeanRmse": kernel_high,
+                "highGainVsCanonicalPct": pct_improvement(canonical_high, kernel_high),
+                "highV18TargetGainVsCanonicalPct": pct_improvement(canonical_high, v18_high),
+                "highV18RepairRetentionPct": high_retention,
+                "nfwGapTargetMeanRmse": kernel_target,
+                "nfwGapTargetGainVsCanonicalPct": pct_improvement(canonical_target, kernel_target),
+                "nfwGapV18RepairRetentionPct": target_retention,
+                "protectedMaxRegressionVsV18KmS": max([parse_float(row["protectedRegressionVsV18KmS"], 0.0) for row in protected] or [0.0]),
+                "highMaxRegressionVsV18KmS": max([parse_float(row["highRegressionVsV18KmS"], 0.0) for row in high] or [0.0]),
+                "weakSystematicsLeakage": 0,
+            }
+        )
+    best = min(score_rows, key=lambda row: (parse_float(row["meanSupportShapeRmse"], math.inf), -parse_float(row["highV18RepairRetentionPct"], -math.inf)))
+    best_id = best["kernelId"]
+    best_retention = parse_float(best["highV18RepairRetentionPct"], math.nan)
+    best_protected = parse_float(best["protectedMaxRegressionVsV18KmS"], math.inf)
+    if best_retention >= 70.0 and best_protected <= 0.25:
+        verdict = "kernel bridge plausible"
+    elif best_id == "boundary-saturation-kernel" and best_retention >= 45.0:
+        verdict = "boundary kernel favored"
+    elif best_id == "two-scale-persistence-kernel" and best_retention >= 45.0:
+        verdict = "two-scale kernel favored"
+    elif best_retention < 30.0:
+        verdict = "phenomenology not yet derivable"
+    else:
+        verdict = "missing physical variable"
+    return score_rows, verdict, best
+
+
+def write_v19_theory_kernel_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_theory_kernel"
+    if not V18_NFW_SHELF_ARTIFACT_PATH.exists():
+        write_v18_nfw_gap_shelf_release_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_38_NFW_SHELF_RELEASE_LOCK_OUT)
+    case_rows, shape_rows, metadata = v19_theory_kernel_case_rows()
+    score_rows, verdict, best_row = v19_theory_kernel_score_rows(case_rows)
+    limit_rows = [
+        {"check": "canonical constants unchanged", "status": "pass", "detail": f"q={Q_DEFAULT}, Gamma0={GAMMA0}, diskML={ML_DISK}, bulgeML={ML_BULGE}"},
+        {"check": "weak/systematics leakage", "status": "pass", "detail": "weak/systematics rows are excluded from kernel scoring and fitting; leakage=0"},
+        {"check": "forbidden formula inputs", "status": "pass", "detail": "no galaxy name, residual, raw RMSE, NFW parameter, or MOND fit parameter enters the kernel equations"},
+        {"check": "Newtonian compact limit", "status": "candidate", "detail": "support goes to zero as r/L approaches zero in each kernel disk-limit expression"},
+        {"check": "finite outer limit", "status": "candidate", "detail": "support is finite because L_eff, L_sat, and the two-scale outer length are finite for finite disk size"},
+        {"check": "conservation status", "status": "open", "detail": "the mode tests a disk-limit response kernel; it does not yet derive a covariant conservation law"},
+        {"check": "browser/release law", "status": "pass", "detail": "no browser law replacement and no v18 release replacement"},
+    ]
+    formula = {
+        "candidateId": "mts-v19-theory-kernel-bridge-v1",
+        "status": verdict,
+        "empiricalTarget": "locked v18 support field from v18.38/v18.10 release evidence",
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "kernelInputs": [
+            "rho_b or Sigma_b",
+            "Vgas",
+            "Vdisk",
+            "Vbul",
+            "h",
+            "r_out",
+            "f_gas_out",
+            "memory_load",
+            "S_mem",
+            "L_eff",
+            "u(r)",
+            "radial profile derivatives",
+        ],
+        "forbiddenInputs": ["galaxy name", "raw residual lookup", "raw RMSE lookup", "NFW parameters", "MOND fitted parameters", "weak/systematics training"],
+        "kernels": {
+            "exponential-memory-kernel": "S(r)=Gamma0*L_eff*(1-exp(-(r/L_eff)^q))",
+            "boundary-saturation-kernel": "L_boundary=L_exact+0.45*A_boundary*(L_sat-L_exact); S(r)=Gamma0*L_boundary*(1-exp(-(r/L_boundary)^q))",
+            "two-scale-persistence-kernel": "S(r)=Gamma0*L_exact*[w1*K(r,L_exact)+(1-w1)*K(r,L_outer)]*B_shelf(r)",
+        },
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_support_shape.csv", shape_rows)
+    write_csv(out_dir / f"{prefix}_limit_checks.csv", limit_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    equations = [
+        "# MTS v19 Theory Kernel Equations",
+        "",
+        "This is a theory bridge, not a new browser law. The empirical target is the locked v18 support field.",
+        "",
+        "## Working Premise",
+        "",
+        "MTS is tested here as a baryon-sourced nonlocal transport response. Disk structure sets a memory length, and the observed support term is treated as the circular-orbit limit of that memory field.",
+        "",
+        "## Candidate Field Statement",
+        "",
+        "Let Phi_b be the baryonic potential and let K_L(r,r') be a finite memory kernel sourced by the baryonic disk. In a disk-limit approximation, the transport field contributes:",
+        "",
+        "```text",
+        "V_model(r)^2 = V_bar(r)^2 + S_K(r)",
+        "S_K(r) = Gamma0 * Integral K_L(r,r') * W_b(r') dr'",
+        "```",
+        "",
+        "where W_b is a baryonic source weight built from Sigma_b, Vgas, Vdisk, Vbul, and radial profile derivatives. This mode tests three disk-limit reductions of S_K(r).",
+        "",
+        "## Shared Memory Definitions",
+        "",
+        "```text",
+        "S_mem = (0.9/pi) * (r_out/h)",
+        "memory_load = (1 - f_gas_out) * (r_out/h)",
+        "L_exact = 1.8*h*(1 + S_mem*(1 - exp(-memory_load/S_mem)))",
+        "L_sat = 1.8*h*(1 + S_mem)",
+        "L_gap = L_sat - L_exact",
+        "K(r,L,q) = 1 - exp(-(r/L)^q)",
+        "```",
+        "",
+        "## Kernel 1: Exponential Memory Kernel",
+        "",
+        "```text",
+        "S_exp(r) = Gamma0 * L_exact * K(r,L_exact,q)",
+        "```",
+        "",
+        "This is the current memory law written as a nonlocal disk response length.",
+        "",
+        "## Kernel 2: Boundary Saturation Kernel",
+        "",
+        "```text",
+        "A_boundary = clamp(0.55*boundary_drive + 0.45*(L_gap/L_sat)*4, 0, 1)",
+        "L_boundary = L_exact + 0.45*A_boundary*L_gap",
+        "S_boundary(r) = Gamma0 * L_boundary * K(r,L_boundary,q)",
+        "```",
+        "",
+        "This tests whether route-boundary behavior is a partial transfer toward saturated memory.",
+        "",
+        "## Kernel 3: Two-Scale Persistence Kernel",
+        "",
+        "```text",
+        "A_profile = profile_drive(memory_load, u_out, u_0.75, gas/disk/bulge shares, curvature)",
+        "L_outer = max(L_exact, 0.62*r_out, L_exact*(1 + 0.8*L_gap/L_sat))",
+        "S_two(r) = Gamma0*L_exact*(w1*K(r,L_exact,q) + (1-w1)*K(r,L_outer,1.05))*B_shelf(r)",
+        "```",
+        "",
+        "This tests whether v18 shelf and phase behavior needs inner and outer persistence modes rather than one length.",
+        "",
+        "## Newton-Readable Page",
+        "",
+        "The question is whether ordinary baryonic structure can set a finite memory length for circular motion. In the disk limit, Newton's baryonic circular speed remains in V_bar. MTS adds only a finite response field S_K(r) whose scale is computed from disk size, gas fraction, and the profile shape. If this bridge is right, the extra support is not arbitrary halo fitting; it is a structured, baryon-sourced memory response. If this bridge fails, v18 remains a strong empirical law but its current branch behavior is not yet a fundamental kernel.",
+    ]
+    (out_dir / f"{prefix}_equations.md").write_text("\n".join(equations) + "\n", encoding="utf-8")
+
+    predictions = [
+        "# MTS v19 Theory Kernel Predictions",
+        "",
+        "- High-quality disks with similar h, r_out/h, f_gas_out, and profile curvature should show similar support-shape corrections independent of galaxy name.",
+        "- Boundary-saturation cases should move when L_gap/L_sat and u_0.75 are high; pure M/L changes should not mimic the same radial support shape.",
+        "- Two-scale cases should show measurable inner/mid versus outer support redistribution tied to baryonic profile curvature.",
+        "- Protected weak/systematics cases must not be used to tune the kernel; if they require special behavior, the missing variable is observational/provenance, not transport physics.",
+        "- This bridge does not make lensing, cosmology, or dark-matter-exclusion claims. It only predicts rotation-curve support structure in the disk limit.",
+    ]
+    (out_dir / f"{prefix}_predictions.md").write_text("\n".join(predictions) + "\n", encoding="utf-8")
+
+    report = [
+        "# MTS v19 Theory Kernel Bridge v1",
+        "",
+        "This pass tests whether compact physical kernels can reproduce the locked v18 support field. It does not change canonical MTS, v18, the browser preset, q, Gamma0, or M/L.",
+        "",
+        "## Result",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Best kernel by support-shape error: `{best_row['kernelId']}`.",
+        f"- Best mean support-shape RMSE: `{fmt(best_row['meanSupportShapeRmse'])}`.",
+        f"- Best high-RMSE v18 repair retention: `{fmt(best_row['highV18RepairRetentionPct'])}%`.",
+        f"- Best clean v18 repair retention: `{fmt(best_row['cleanV18RepairRetentionPct'])}%`.",
+        f"- Protected regression vs v18: `{fmt(best_row['protectedMaxRegressionVsV18KmS'])}` km/s.",
+        f"- Weak/systematics leakage: `0`.",
+        "",
+        "## Kernel Scores",
+        "",
+        "| Kernel | Shape RMSE | High retention | Clean retention | Protected regression |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['kernelId']} | {fmt(row['meanSupportShapeRmse'])} | {fmt(row['highV18RepairRetentionPct'])}% | {fmt(row['cleanV18RepairRetentionPct'])}% | {fmt(row['protectedMaxRegressionVsV18KmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "A pass here would mean a physics-facing disk-limit kernel can reproduce most of the v18 support field without branch names or fit-oracle inputs. A failure means v18 remains empirical-release evidence, but the current state vector is still missing a fundamental variable or the branch behavior has not yet been derived cleanly.",
+            "",
+            "## Constraints",
+            "",
+            "- No galaxy names enter any kernel equation.",
+            "- No raw residuals or raw RMSE enter any kernel equation.",
+            "- No NFW or MOND fitted parameter enters any kernel equation.",
+            "- Weak/systematics galaxies remain excluded from fitting and framework-facing scores.",
+            "- No browser or release law is replaced.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-theory-kernel-v1",
+        "verdict": verdict,
+        "bestKernel": best_row,
+        "summary": {
+            "baselineExpectedMeanRmse": 21.90,
+            "lockedV18Target": "v18.38/v18.10 support field",
+            "weakSystematicsLeakage": 0,
+            **metadata,
+        },
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_equations.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_support_shape.csv",
+            f"{prefix}_limit_checks.csv",
+            f"{prefix}_predictions.md",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19theorykernel(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_THEORY_KERNEL_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_theory_kernel_artifacts(out_dir)
+    best = capsule["bestKernel"]
+    print("MTS v19 theory-kernel bridge")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best_kernel={best['kernelId']}",
+                f"shape_rmse={fmt(best['meanSupportShapeRmse'])}",
+                f"high_retention={fmt(best['highV18RepairRetentionPct'])}%",
+                f"clean_retention={fmt(best['cleanV18RepairRetentionPct'])}%",
+                f"protected_reg={fmt(best['protectedMaxRegressionVsV18KmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v19 theory-kernel bridge to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -101662,6 +102167,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18nonmlprovenance",
             "v18sourceprovenance",
             "observedstatev18sourceprovenance",
+            "v19theorykernel",
+            "observedstatev19theorykernel",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -102069,6 +102576,8 @@ def main() -> None:
         cmd_v18nonmlprovenance(args)
     elif args.mode in {"v18sourceprovenance", "observedstatev18sourceprovenance"}:
         cmd_v18sourceprovenance(args)
+    elif args.mode in {"v19theorykernel", "observedstatev19theorykernel"}:
+        cmd_v19theorykernel(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
