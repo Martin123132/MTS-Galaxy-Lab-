@@ -259,6 +259,7 @@ DEFAULT_V19_SOURCE_ENVIRONMENT_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-environm
 DEFAULT_V19_TWO_D_SOURCE_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-two-d-source-field-v1"
 DEFAULT_V19_EXTERNAL_TWO_D_ACQUIRE_OUT = OUTPUT_PACK_ROOT / "mts-v19-external-2d-acquisition-v1"
 DEFAULT_V19_EXTERNAL_TWO_D_ACQUIRE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-external-2d-acquisition-v1")
+DEFAULT_V19_EXTERNAL_TWO_D_PARSER_OUT = OUTPUT_PACK_ROOT / "mts-v19-external-2d-parser-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -105068,7 +105069,10 @@ def v19_external_2d_targets() -> list[dict]:
 def v19_external_2d_scan_text(text: str, target: dict) -> tuple[bool, str, str]:
     compact_text = v19_external_2d_norm_name(text)
     variants = [variant for variant in target.get("nameVariants", "").split(";") if variant]
-    matched = [variant for variant in variants if variant and variant in compact_text]
+    matched = [
+        variant for variant in variants
+        if variant and re.search(rf"(?<![A-Z0-9]){re.escape(variant)}(?![A-Z0-9])", compact_text)
+    ]
     lowered = text.lower()
     keywords = [
         "velocity field",
@@ -105089,6 +105093,23 @@ def v19_external_2d_scan_text(text: str, target: dict) -> tuple[bool, str, str]:
     ]
     hits = [keyword for keyword in keywords if keyword in lowered]
     return bool(matched), ";".join(matched[:5]), ";".join(hits)
+
+
+def v19_external_2d_source_direct_match(source_id: str, target: dict, matched: bool, combined_text: str) -> bool:
+    norm = v19_external_2d_norm_name(target.get("galaxy", ""))
+    if source_id == "cds-blais-halpha-hi":
+        direct_names = {
+            "UGC02259",
+            "NGC2403",
+            "NGC6946",
+            "NGC5055",
+            "NGC2841",
+            "NGC5985",
+        }
+        return norm in direct_names
+    if source_id == "cds-ghasp-108":
+        return matched and bool(re.search(rf"(?<![A-Z0-9]){re.escape(norm)}(?![A-Z0-9])", v19_external_2d_norm_name(combined_text)))
+    return matched
 
 
 def write_v19_external_2d_acquisition_artifacts(out_dir: Path, source_cache: Path, offline: bool) -> dict:
@@ -105138,7 +105159,7 @@ def write_v19_external_2d_acquisition_artifacts(out_dir: Path, source_cache: Pat
                     term in keyword_hits
                     for term in ["velocity field", "residual velocity", "non-circular", "non circular", "warp", "lopsided", "asymmetry", "approaching", "receding", "dispersion"]
                 )
-                direct_candidate = matched and source_has_2d_terms
+                direct_candidate = source_has_2d_terms and v19_external_2d_source_direct_match(source["sourceId"], target, matched, combined_text)
                 hit_rows.append(
                     {
                         "galaxy": target["galaxy"],
@@ -105272,6 +105293,301 @@ def cmd_v19external2dacquire(args: argparse.Namespace) -> None:
         )
     )
     print(f"Wrote v19 external 2D acquisition to {out_dir.resolve()}")
+
+
+def v19_external_2d_substr_float(line: str, start: int, end: int) -> float:
+    return parse_float(line[start - 1:end].strip(), math.nan)
+
+
+def v19_external_2d_substr_text(line: str, start: int, end: int) -> str:
+    return line[start - 1:end].strip()
+
+
+def v19_external_2d_source_class_map() -> dict[str, dict]:
+    rows = read_csv_rows(DEFAULT_V19_TWO_D_SOURCE_FIELD_OUT / "mts_v19_two_d_source_field_case_ledger.csv")
+    out: dict[str, dict] = {}
+    for row in rows:
+        for variant in v19_external_2d_name_variants(row.get("galaxy", "")):
+            out[variant] = row
+    return out
+
+
+def v19_parse_blais_side_tables(source_cache: Path) -> tuple[list[dict], list[dict]]:
+    mapping = {
+        "tablea1": "UGC02259",
+        "tablea2": "NGC2403",
+        "tablea3": "NGC6946",
+        "tablea4": "NGC5055",
+        "tablea5": "NGC2841",
+        "tablea6": "NGC5985",
+    }
+    points: list[dict] = []
+    cases: list[dict] = []
+    source_class = v19_external_2d_source_class_map()
+    base = source_cache / "cds-blais-halpha-hi"
+    for table_id, galaxy in mapping.items():
+        files = sorted(base.glob(f"*{table_id}*"))
+        if not files:
+            continue
+        path = files[0]
+        diffs = []
+        frac_diffs = []
+        sigma_values = []
+        usable = 0
+        for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+            if not line.strip():
+                continue
+            radius_arcsec = v19_external_2d_substr_float(line, 1, 6)
+            n_app = v19_external_2d_substr_float(line, 8, 11)
+            v_app = v19_external_2d_substr_float(line, 13, 15)
+            sig_app = v19_external_2d_substr_float(line, 17, 19)
+            n_rec = v19_external_2d_substr_float(line, 21, 24)
+            v_rec = v19_external_2d_substr_float(line, 26, 28)
+            sig_rec = v19_external_2d_substr_float(line, 30, 32)
+            vel = v19_external_2d_substr_float(line, 34, 36)
+            e_vel = v19_external_2d_substr_float(line, 38, 39)
+            has_both = math.isfinite(v_app) and math.isfinite(v_rec) and math.isfinite(vel) and vel > 0
+            side_diff = abs(v_app - v_rec) if has_both else math.nan
+            frac = side_diff / vel if has_both else math.nan
+            if has_both:
+                usable += 1
+                diffs.append(side_diff)
+                frac_diffs.append(frac)
+            if math.isfinite(sig_app):
+                sigma_values.append(sig_app)
+            if math.isfinite(sig_rec):
+                sigma_values.append(sig_rec)
+            points.append(
+                {
+                    "sourceId": "cds-blais-halpha-hi",
+                    "galaxy": galaxy,
+                    "tableId": table_id,
+                    "lineNumber": line_number,
+                    "radiusArcsec": radius_arcsec,
+                    "nApproaching": n_app,
+                    "vApproachingKmS": v_app,
+                    "sigmaApproachingKmS": sig_app,
+                    "nReceding": n_rec,
+                    "vRecedingKmS": v_rec,
+                    "sigmaRecedingKmS": sig_rec,
+                    "vMeanKmS": vel,
+                    "eVMeanKmS": e_vel,
+                    "sideDiffKmS": side_diff,
+                    "sideAsymmetryFraction": frac,
+                    "sourcePath": str(path),
+                    "provenance": "CDS J/A+A/420/147 Blais-Ouellette et al. 2004 tablea?.dat",
+                }
+            )
+        target = source_class.get(v19_external_2d_norm_name(galaxy), {})
+        cases.append(
+            {
+                "sourceId": "cds-blais-halpha-hi",
+                "galaxy": galaxy,
+                "sourceClass": target.get("sourceClass", "external-context-not-v19-target"),
+                "pointCount": sum(1 for row in points if row["sourceId"] == "cds-blais-halpha-hi" and row["galaxy"] == galaxy),
+                "usableSidePairCount": usable,
+                "meanSideDiffKmS": safe_mean(diffs),
+                "medianSideDiffKmS": safe_median(diffs),
+                "maxSideDiffKmS": max(diffs or [math.nan]),
+                "meanSideAsymmetryFraction": safe_mean(frac_diffs),
+                "medianSideAsymmetryFraction": safe_median(frac_diffs),
+                "meanSideSigmaKmS": safe_mean(sigma_values),
+                "sourcePath": str(path),
+            }
+        )
+    return points, cases
+
+
+def v19_parse_ghasp_side_table(source_cache: Path) -> tuple[list[dict], list[dict]]:
+    base = source_cache / "cds-ghasp-108"
+    files = sorted(base.glob("*tablef*"))
+    if not files:
+        return [], []
+    path = files[0]
+    points: list[dict] = []
+    by_galaxy: dict[str, dict[str, list[dict]]] = {}
+    for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+        if not line.strip():
+            continue
+        galaxy = v19_external_2d_substr_text(line, 1, 9).replace(" ", "")
+        radius = v19_external_2d_substr_float(line, 11, 15)
+        e_radius = v19_external_2d_substr_float(line, 17, 20)
+        radius_arcsec = v19_external_2d_substr_float(line, 22, 26)
+        vrot = v19_external_2d_substr_float(line, 33, 35)
+        e_vrot = v19_external_2d_substr_float(line, 37, 39)
+        side = v19_external_2d_substr_text(line, 44, 44)
+        row = {
+            "sourceId": "cds-ghasp-108",
+            "galaxy": galaxy,
+            "lineNumber": line_number,
+            "radiusKpc": radius,
+            "eRadiusKpc": e_radius,
+            "radiusArcsec": radius_arcsec,
+            "vRotKmS": vrot,
+            "eVRotKmS": e_vrot,
+            "side": side,
+            "sourcePath": str(path),
+            "provenance": "CDS J/MNRAS/388/500 GHASP tablef.dat",
+        }
+        points.append(row)
+        by_galaxy.setdefault(v19_external_2d_norm_name(galaxy), {}).setdefault(side, []).append(row)
+    source_class = v19_external_2d_source_class_map()
+    cases: list[dict] = []
+    target_norms = set(source_class.keys())
+    for norm_name, sides in by_galaxy.items():
+        if norm_name not in target_norms:
+            continue
+        a_rows = sorted(sides.get("a", []), key=lambda row: parse_float(row["radiusKpc"], math.inf))
+        r_rows = sorted(sides.get("r", []), key=lambda row: parse_float(row["radiusKpc"], math.inf))
+        diffs = []
+        frac_diffs = []
+        used_pairs = 0
+        for a in a_rows:
+            ar = parse_float(a.get("radiusKpc"), math.nan)
+            av = parse_float(a.get("vRotKmS"), math.nan)
+            if not math.isfinite(ar) or not math.isfinite(av):
+                continue
+            candidates = [
+                row for row in r_rows
+                if math.isfinite(parse_float(row.get("radiusKpc"), math.nan))
+                and abs(parse_float(row.get("radiusKpc"), 0.0) - ar) <= max(0.18, 0.18 * max(ar, 1.0))
+            ]
+            if not candidates:
+                continue
+            best = min(candidates, key=lambda row: abs(parse_float(row.get("radiusKpc"), 0.0) - ar))
+            rv = parse_float(best.get("vRotKmS"), math.nan)
+            if not math.isfinite(rv):
+                continue
+            denom = max(1.0e-9, 0.5 * (abs(av) + abs(rv)))
+            diffs.append(abs(av - rv))
+            frac_diffs.append(abs(av - rv) / denom)
+            used_pairs += 1
+        target = source_class.get(norm_name, {})
+        cases.append(
+            {
+                "sourceId": "cds-ghasp-108",
+                "galaxy": target.get("galaxy", norm_name),
+                "sourceClass": target.get("sourceClass", "v19-target"),
+                "pointCount": len(a_rows) + len(r_rows),
+                "usableSidePairCount": used_pairs,
+                "meanSideDiffKmS": safe_mean(diffs),
+                "medianSideDiffKmS": safe_median(diffs),
+                "maxSideDiffKmS": max(diffs or [math.nan]),
+                "meanSideAsymmetryFraction": safe_mean(frac_diffs),
+                "medianSideAsymmetryFraction": safe_median(frac_diffs),
+                "meanSideSigmaKmS": safe_mean(parse_float(row.get("eVRotKmS"), math.nan) for row in a_rows + r_rows),
+                "sourcePath": str(path),
+            }
+        )
+    return points, cases
+
+
+def write_v19_external_2d_parser_artifacts(out_dir: Path, source_cache: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_external_2d_parser"
+    b_points, b_cases = v19_parse_blais_side_tables(source_cache)
+    g_points, g_cases = v19_parse_ghasp_side_table(source_cache)
+    points = b_points + g_points
+    cases = b_cases + g_cases
+    v19_cases = [row for row in cases if row.get("sourceClass") in {"protected-false-activation", "retained-high-source-load"}]
+    false_cases = [row for row in v19_cases if row["sourceClass"] == "protected-false-activation"]
+    high_cases = [row for row in v19_cases if row["sourceClass"] == "retained-high-source-load"]
+    threshold_rows = []
+    values = [parse_float(row.get("meanSideAsymmetryFraction"), math.nan) for row in v19_cases]
+    values = [value for value in values if math.isfinite(value)]
+    for threshold in sorted({v19_quantile(values, q) for q in [0.33, 0.50, 0.66, 0.80]}) if values else []:
+        for direction in ["high", "low"]:
+            def hit(row: dict) -> bool:
+                value = parse_float(row.get("meanSideAsymmetryFraction"), math.nan)
+                if not math.isfinite(value):
+                    return False
+                return value >= threshold if direction == "high" else value <= threshold
+            false_recall = sum(1 for row in false_cases if hit(row)) / len(false_cases) if false_cases else 0.0
+            high_suppression = sum(1 for row in high_cases if hit(row)) / len(high_cases) if high_cases else 0.0
+            threshold_rows.append(
+                {
+                    "feature": "meanSideAsymmetryFraction",
+                    "direction": direction,
+                    "threshold": threshold,
+                    "falseActivationRecall": false_recall,
+                    "retainedHighSuppressionRate": high_suppression,
+                    "utilityFalseRecallMinusHighSuppression": false_recall - high_suppression,
+                }
+            )
+    threshold_rows.sort(key=lambda row: parse_float(row["utilityFalseRecallMinusHighSuppression"], -math.inf), reverse=True)
+    if len(v19_cases) >= 5 and false_cases and high_cases:
+        verdict = "external 2D side-asymmetry pilot usable"
+    elif v19_cases:
+        verdict = "external 2D parser works but sample too small"
+    else:
+        verdict = "external 2D parser found no v19 overlap"
+    write_csv(out_dir / f"{prefix}_points.csv", points)
+    write_csv(out_dir / f"{prefix}_case_metrics.csv", cases)
+    write_csv(out_dir / f"{prefix}_discriminator_scores.csv", threshold_rows)
+    report = [
+        "# MTS v19 External 2D Parser Pilot",
+        "",
+        "This parses independent small external tables into side-asymmetry metrics. It does not alter or score the MTS law.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Parsed point rows: `{len(points)}`.",
+        f"Parsed case metrics: `{len(cases)}`.",
+        f"v19 overlap cases: `{len(v19_cases)}`.",
+        f"False-activation overlap cases: `{len(false_cases)}`.",
+        f"Retained-high overlap cases: `{len(high_cases)}`.",
+        "",
+        "## v19 Overlap Cases",
+        "",
+        "| galaxy | class | source | usable pairs | mean side asymmetry | mean side diff |",
+        "| --- | --- | --- | ---: | ---: | ---: |",
+    ]
+    for row in sorted(v19_cases, key=lambda item: item["galaxy"]):
+        report.append(
+            f"| {row['galaxy']} | {row['sourceClass']} | {row['sourceId']} | {row['usableSidePairCount']} | {fmt(row['meanSideAsymmetryFraction'])} | {fmt(row['meanSideDiffKmS'])} |"
+        )
+    report.extend(["", verdict])
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-external-2d-parser-v1",
+        "verdict": verdict,
+        "parsedPointRows": len(points),
+        "caseMetricRows": len(cases),
+        "v19OverlapCases": len(v19_cases),
+        "falseActivationOverlapCases": len(false_cases),
+        "retainedHighOverlapCases": len(high_cases),
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "cacheRoot": str(source_cache),
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_points.csv",
+            f"{prefix}_case_metrics.csv",
+            f"{prefix}_discriminator_scores.csv",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19external2dparser(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_EXTERNAL_TWO_D_PARSER_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_V19_EXTERNAL_TWO_D_ACQUIRE_CACHE
+    capsule = write_v19_external_2d_parser_artifacts(out_dir, source_cache)
+    print("MTS v19 external 2D parser pilot")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"points={capsule['parsedPointRows']}",
+                f"cases={capsule['caseMetricRows']}",
+                f"v19_overlap={capsule['v19OverlapCases']}",
+                f"false={capsule['falseActivationOverlapCases']}",
+                f"high={capsule['retainedHighOverlapCases']}",
+            ]
+        )
+    )
+    print(f"Wrote v19 external 2D parser pilot to {out_dir.resolve()}")
 
 
 def cmd_list_candidates() -> None:
@@ -105527,6 +105843,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19twodsourcefield",
             "v19external2dacquire",
             "observedstatev19external2dacquire",
+            "v19external2dparser",
+            "observedstatev19external2dparser",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -105956,6 +106274,8 @@ def main() -> None:
         cmd_v19twodsourcefield(args)
     elif args.mode in {"v19external2dacquire", "observedstatev19external2dacquire"}:
         cmd_v19external2dacquire(args)
+    elif args.mode in {"v19external2dparser", "observedstatev19external2dparser"}:
+        cmd_v19external2dparser(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
