@@ -235,6 +235,8 @@ DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE = Path(r"D:\Users\ollet\De
 DEFAULT_OBSERVED_STATE_V18_ML_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-v18-ml-sensitivity-discriminator-v1"
 DEFAULT_OBSERVED_STATE_V18_EXTERNAL_ML_GAP_TEST_OUT = OUTPUT_PACK_ROOT / "mts-v18-external-ml-gap-test-v1"
 DEFAULT_OBSERVED_STATE_V18_REMAINING_ML_GAP_TEST_OUT = OUTPUT_PACK_ROOT / "mts-v18-41-remaining-ml-provenance-test-v1"
+DEFAULT_OBSERVED_STATE_V18_INDEPENDENT_ML_SOURCE_HUNT_OUT = OUTPUT_PACK_ROOT / "mts-v18-42-independent-ml-source-hunt-v1"
+DEFAULT_OBSERVED_STATE_V18_INDEPENDENT_ML_SOURCE_HUNT_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-independent-ml-source-hunt-v1")
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -81555,6 +81557,399 @@ def cmd_v18remainingmlgaptest(args: argparse.Namespace) -> None:
     print(f"Wrote v18.41 remaining M/L provenance gap test to {out_dir.resolve()}")
 
 
+V18_42_INDEPENDENT_ML_TARGETS = [
+    "NGC2403",
+    "NGC1705",
+    "NGC4157",
+    "UGC07399",
+    "UGC08699",
+    "NGC4100",
+    "F568-1",
+    "ESO116-G012",
+    "UGC04325",
+    "UGC06628",
+    "UGC06983",
+    "NGC5985",
+]
+
+V18_42_INDEPENDENT_ML_SOURCE_SPECS = [
+    {
+        "sourceId": "sparc-official",
+        "sourceFamily": "SPARC parser/provenance control",
+        "sourceRole": "official-control-html",
+        "url": "https://astroweb.cwru.edu/SPARC/",
+        "suffix": "html",
+        "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+        "reason": "SPARC convention and source provenance control; not an independent per-galaxy M/L prior.",
+    },
+    {
+        "sourceId": "li2020-cds-halo-fit-ml",
+        "sourceFamily": "Li+ 2020 fitted halo M/L reject/control",
+        "sourceRole": "cds-readme-html",
+        "url": "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/ApJS/247/31?format=html&tex=true",
+        "suffix": "html",
+        "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+        "reason": "Numeric per-galaxy Ydisk/Ybul source already tested; classified as halo-fit/dynamical context, not independent MTS input.",
+    },
+    {
+        "sourceId": "s4g-salo2015-decomposition",
+        "sourceFamily": "S4G decomposition/source table candidate",
+        "sourceRole": "cds-readme-html",
+        "url": "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/ApJS/219/4?format=html&tex=true",
+        "suffix": "html",
+        "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+        "reason": "S4G structural decomposition candidate source; may constrain bulge/disk decomposition but not necessarily stellar M/L.",
+    },
+    {
+        "sourceId": "querejeta2015-s4g-massmaps",
+        "sourceFamily": "S4G stellar mass map M/L method",
+        "sourceRole": "arxiv-html",
+        "url": "https://arxiv.org/abs/1410.0003",
+        "suffix": "html",
+        "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+        "reason": "Independent population/dust corrected 3.6um mass-map method; likely source-wide, not per-galaxy.",
+    },
+    {
+        "sourceId": "leroy2008-things-stellar-sigma",
+        "sourceFamily": "THINGS stellar surface-density M/L method",
+        "sourceRole": "arxiv-html",
+        "url": "https://arxiv.org/abs/0810.2556",
+        "suffix": "html",
+        "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+        "reason": "Nearby-galaxy stellar surface-density method source; useful for NGC2403-style provenance.",
+    },
+    {
+        "sourceId": "eskew2012-irac-ml",
+        "sourceFamily": "IRAC stellar mass calibration",
+        "sourceRole": "arxiv-html",
+        "url": "https://arxiv.org/abs/1209.1681",
+        "suffix": "html",
+        "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+        "reason": "Independent IRAC stellar mass calibration context.",
+    },
+    {
+        "sourceId": "mcgaugh2014-stellar-ml",
+        "sourceFamily": "stellar population M/L calibration",
+        "sourceRole": "arxiv-html",
+        "url": "https://arxiv.org/abs/1407.1839",
+        "suffix": "html",
+        "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+        "reason": "Population-synthesis stellar M/L calibration context.",
+    },
+]
+
+V18_42_ML_NUMERIC_PATTERN = re.compile(
+    r"(?:M\s*/\s*L|M/L|mass[-\s]*to[-\s]*light|stellar\s+mass[-\s]*to[-\s]*light|upsilon|\\Upsilon|Ydisk|Ybul)"
+    r"[^.;:\n]{0,120}?([0-9]+(?:\.[0-9]+)?)|"
+    r"([0-9]+(?:\.[0-9]+)?)[^.;:\n]{0,90}?"
+    r"(?:M\s*/\s*L|M/L|mass[-\s]*to[-\s]*light|stellar\s+mass[-\s]*to[-\s]*light|upsilon|\\Upsilon|Ydisk|Ybul)",
+    re.IGNORECASE,
+)
+
+
+def v18_42_independent_ml_source_targets(source_cache: Path) -> list[dict]:
+    rows: list[dict] = []
+    for spec in V18_42_INDEPENDENT_ML_SOURCE_SPECS:
+        rows.append(
+            {
+                **spec,
+                "galaxy": "",
+                "targetRole": "source-family",
+                "cachePath": str(source_cache / spec["sourceRole"] / f"{safe_file_stem(spec['sourceId'])}.{spec['suffix']}"),
+                "largeDownloadAllowed": False,
+            }
+        )
+    for name in V18_42_INDEPENDENT_ML_TARGETS:
+        for source_role, url, suffix, reason in [
+            ("ned-object-html", v21_metadata_page_url_for_galaxy(name), "html", "case-specific NED object page for source links and photometric/provenance hints"),
+            ("simbad-object-txt", v18_ml_provenance_simbad_url(name), "txt", "case-specific SIMBAD object page for identifiers and source hints"),
+        ]:
+            rows.append(
+                {
+                    "sourceId": f"{source_role}-{name}",
+                    "sourceFamily": "case object metadata",
+                    "sourceRole": source_role,
+                    "url": url,
+                    "suffix": suffix,
+                    "maxBytes": V21_SOURCE_MAX_HTML_BYTES,
+                    "reason": reason,
+                    "galaxy": name,
+                    "targetRole": "case-object",
+                    "cachePath": str(source_cache / source_role / f"{safe_file_stem(name)}.{suffix}"),
+                    "largeDownloadAllowed": False,
+                }
+            )
+    return rows
+
+
+def v18_42_independent_ml_fetch_inventory(source_targets: list[dict], offline: bool) -> list[dict]:
+    rows: list[dict] = []
+    for target in source_targets:
+        path = Path(target["cachePath"])
+        existed = path.exists()
+        v21_source_download(target["url"], path, int(target["maxBytes"]), offline)
+        exists = path.exists()
+        rows.append(
+            {
+                **target,
+                "cacheStatus": "available" if exists else "missing",
+                "downloaded": False,
+                "sizeBytes": path.stat().st_size if exists else "",
+                "sha256": file_sha256(path) if exists else "",
+            }
+        )
+    return rows
+
+
+def v18_42_numeric_ml_values(snippet: str) -> list[float]:
+    values: list[float] = []
+    for match in V18_42_ML_NUMERIC_PATTERN.finditer(snippet):
+        raw = match.group(1) or match.group(2)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if 0.05 <= value <= 12.0 and not any(abs(value - prior) < 1.0e-9 for prior in values):
+            values.append(value)
+    return values
+
+
+def v18_42_independent_ml_classify_snippet(source_row: dict, galaxy: str, snippet: str, case_specific: bool, values: list[float]) -> tuple[str, bool, str]:
+    lower = snippet.lower()
+    family = str(source_row.get("sourceFamily", "")).lower()
+    if not values:
+        return "no numeric M/L value", False, "No bounded numeric M/L value found near M/L terms."
+    if any(token in lower or token in family for token in ["nfw", "burkert", "piso", "halo", "mond", "dynamical fit", "rotation curve fit"]):
+        return "rejected fitted/dynamical M/L", False, "Numeric M/L is tied to halo/MOND/dynamical fitting context."
+    if not case_specific:
+        return "source-wide M/L method/context", False, "Numeric M/L is source-wide or method-level, not a per-galaxy prior."
+    if any(token in lower or token in family for token in ["s4g", "spitzer", "irac", "stellar population", "population", "mass map", "surface density", "photometric"]):
+        return "candidate independent per-galaxy M/L prior", True, "Case-specific numeric M/L appears in a photometric/population/decomposition context; manual confirmation required before rescore."
+    return "case-specific numeric M/L context", False, "Case-specific numeric M/L found but independence from dynamical fitting is unclear."
+
+
+def v18_42_independent_ml_evidence_rows(fetch_rows: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    target_names = set(V18_42_INDEPENDENT_ML_TARGETS)
+    keywords = ["M/L", "mass-to-light", "mass to light", "upsilon", "Ydisk", "Ybul", "stellar mass", "spitzer", "irac", "s4g", "decomposition"]
+    for source in fetch_rows:
+        if source.get("cacheStatus") != "available":
+            continue
+        path = Path(source["cachePath"])
+        text, parser_name = v21_source_text(path, source["sourceRole"], True)
+        if not text:
+            continue
+        source_galaxy = source.get("galaxy", "")
+        galaxies = [source_galaxy] if source_galaxy else sorted(target_names)
+        for galaxy in galaxies:
+            variants = v21_source_name_variants(galaxy)
+            lower = text.lower()
+            centers: list[tuple[str, int]] = []
+            for variant in variants:
+                index = lower.find(variant.lower())
+                while index >= 0:
+                    centers.append(("case-neighborhood", index))
+                    index = lower.find(variant.lower(), index + max(len(variant), 1))
+            for pattern in V18_42_ML_NUMERIC_PATTERN.finditer(text):
+                centers.append(("ml-neighborhood", pattern.start()))
+            seen: set[tuple[int, int]] = set()
+            kept = 0
+            for scope_hint, center in centers:
+                start = max(0, center - 800)
+                end = min(len(text), center + 800)
+                key = (start, end)
+                if key in seen:
+                    continue
+                seen.add(key)
+                snippet = text[start:end].strip()
+                snippet_lower = snippet.lower()
+                values = v18_42_numeric_ml_values(snippet)
+                if not values:
+                    continue
+                case_specific = any(variant.lower() in snippet_lower for variant in variants) or source.get("targetRole") == "case-object"
+                verdict, usable, reason = v18_42_independent_ml_classify_snippet(source, galaxy, snippet, case_specific, values)
+                rows.append(
+                    {
+                        "galaxy": galaxy,
+                        "sourceId": source["sourceId"],
+                        "sourceFamily": source["sourceFamily"],
+                        "sourceRole": source["sourceRole"],
+                        "sourcePath": source["cachePath"],
+                        "sourceUrl": source["url"],
+                        "parser": parser_name,
+                        "scopeHint": scope_hint,
+                        "caseSpecific": case_specific,
+                        "numericMlValues": "; ".join(fmt_num(value) for value in values),
+                        "valueCount": len(values),
+                        "verdict": verdict,
+                        "usableForMtsRescore": usable,
+                        "reason": reason,
+                        "snippet": snippet[:1200],
+                    }
+                )
+                kept += 1
+                if kept >= 12:
+                    break
+    rows.sort(key=lambda row: (row["galaxy"], str(not parse_bool(row["usableForMtsRescore"])), row["sourceId"], row["scopeHint"]))
+    return rows
+
+
+def v18_42_independent_ml_case_verdicts(evidence_rows: list[dict], v41_targets: list[dict]) -> list[dict]:
+    by_name: dict[str, list[dict]] = {}
+    for row in evidence_rows:
+        by_name.setdefault(row["galaxy"], []).append(row)
+    v41_by_name = {row["galaxy"]: row for row in v41_targets}
+    rows: list[dict] = []
+    for name in V18_42_INDEPENDENT_ML_TARGETS:
+        evidence = by_name.get(name, [])
+        usable = [row for row in evidence if parse_bool(row.get("usableForMtsRescore"))]
+        source_wide = [row for row in evidence if row.get("verdict") == "source-wide M/L method/context"]
+        rejected = [row for row in evidence if row.get("verdict") == "rejected fitted/dynamical M/L"]
+        numeric_context = [row for row in evidence if "numeric M/L" in row.get("verdict", "")]
+        if usable:
+            verdict = "independent per-galaxy M/L candidate found"
+            next_action = "Manual confirm source context, then run independent-M/L rescore for this case."
+        elif source_wide:
+            verdict = "source-wide independent M/L method only"
+            next_action = "Can constrain a population prior but cannot supply a per-galaxy rescore value."
+        elif numeric_context:
+            verdict = "numeric M/L context found but not independently usable"
+            next_action = "Manual source reading needed; do not use as formula input."
+        elif rejected:
+            verdict = "only fitted/dynamical M/L found"
+            next_action = "Keep as provenance sensitivity evidence, not transport input."
+        else:
+            verdict = "independent M/L source missing"
+            next_action = "Needs new data provider/manual literature search before M/L rescore."
+        v41 = v41_by_name.get(name, {})
+        rows.append(
+            {
+                "galaxy": name,
+                "targetClass": v41.get("targetClass", v18_40_remaining_gap_class_target_label(name)),
+                "v18_38Rmse": v41.get("v18_38Rmse", ""),
+                "bestLi2020Variant": v41.get("bestVariantId", ""),
+                "bestLi2020GainKmS": v41.get("bestGainVsV18_38KmS", ""),
+                "usableIndependentCandidateCount": len(usable),
+                "sourceWideMethodCount": len(source_wide),
+                "rejectedFittedMlCount": len(rejected),
+                "numericContextCount": len(numeric_context),
+                "verdict": verdict,
+                "nextAction": next_action,
+            }
+        )
+    return rows
+
+
+def write_v18_independent_ml_source_hunt_artifacts(out_dir: Path, source_cache: Path, offline: bool) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source_cache.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_42_independent_ml_source_hunt"
+    v41_dir = DEFAULT_OBSERVED_STATE_V18_REMAINING_ML_GAP_TEST_OUT
+    v41_path = v41_dir / "mts_v18_41_remaining_ml_gap_target_best_oracle.csv"
+    if not v41_path.exists():
+        write_v18_remaining_ml_gap_test_artifacts(v41_dir, DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE, True)
+    v41_targets = read_csv_rows(v41_path)
+    source_targets = v18_42_independent_ml_source_targets(source_cache)
+    fetch_rows = v18_42_independent_ml_fetch_inventory(source_targets, offline)
+    evidence_rows = v18_42_independent_ml_evidence_rows(fetch_rows)
+    case_rows = v18_42_independent_ml_case_verdicts(evidence_rows, v41_targets)
+    usable_cases = [row for row in case_rows if row["verdict"] == "independent per-galaxy M/L candidate found"]
+    source_wide_cases = [row for row in case_rows if row["verdict"] == "source-wide independent M/L method only"]
+    if len(usable_cases) >= 3:
+        verdict = "independent M/L rescore ready"
+    elif usable_cases:
+        verdict = "partial independent M/L candidates found"
+    elif source_wide_cases:
+        verdict = "source-wide M/L context only"
+    else:
+        verdict = "independent per-galaxy M/L still missing"
+    missing_rows = [
+        {
+            "galaxy": row["galaxy"],
+            "missingInput": "accepted independent per-galaxy stellar M/L",
+            "currentStatus": row["verdict"],
+            "blocksIndependentMlRescore": row["verdict"] != "independent per-galaxy M/L candidate found",
+        }
+        for row in case_rows
+    ]
+    summary = {
+        "analysisName": "mts-v18-42-independent-ml-source-hunt-v1",
+        "verdict": verdict,
+        "targetCount": len(V18_42_INDEPENDENT_ML_TARGETS),
+        "sourceTargetCount": len(source_targets),
+        "cachedSourceCount": sum(1 for row in fetch_rows if row["cacheStatus"] == "available"),
+        "downloadedSourceCount": sum(1 for row in fetch_rows if parse_bool(row["downloaded"])),
+        "evidenceRows": len(evidence_rows),
+        "usableIndependentMlCases": len(usable_cases),
+        "sourceWideMethodOnlyCases": len(source_wide_cases),
+        "sourceCacheOnDDrive": str(source_cache).lower().startswith("d:"),
+        "lawChanged": False,
+        "browserChanged": False,
+    }
+    write_csv(out_dir / f"{prefix}_source_targets.csv", source_targets)
+    write_csv(out_dir / f"{prefix}_fetch_inventory.csv", fetch_rows)
+    write_csv(out_dir / f"{prefix}_evidence_table.csv", evidence_rows)
+    write_csv(out_dir / f"{prefix}_case_verdicts.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_missing_inputs.csv", missing_rows)
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean({"verdict": verdict, "summary": summary}), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.42 Independent M/L Source Hunt",
+        "",
+        "This mode hunts for independent photometric/population/decomposition M/L evidence for the current remaining NFW-gap galaxies. It does not change MTS, v18.38, q, Gamma0, branches, or browser code.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Targets: `{summary['targetCount']}`.",
+        f"- Cached source files: `{summary['cachedSourceCount']}`.",
+        f"- Newly downloaded files: `{summary['downloadedSourceCount']}`.",
+        f"- Evidence rows: `{summary['evidenceRows']}`.",
+        f"- Usable independent per-galaxy M/L cases: `{summary['usableIndependentMlCases']}`.",
+        f"- Source-wide method-only cases: `{summary['sourceWideMethodOnlyCases']}`.",
+        "",
+        "## Case Verdicts",
+        "",
+        "| Galaxy | v18.41 Li+ gain | usable independent candidates | source-wide methods | verdict | next action |",
+        "| --- | ---: | ---: | ---: | --- | --- |",
+    ]
+    for row in case_rows:
+        report.append(
+            f"| {row['galaxy']} | {fmt(parse_float(row.get('bestLi2020GainKmS'), math.nan))} | {row['usableIndependentCandidateCount']} | {row['sourceWideMethodCount']} | {row['verdict']} | {row['nextAction']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Guard",
+            "",
+            "Halo-fit, MOND-fit, and dynamical fitted M/L values are rejected as MTS formula inputs. Source-wide stellar-population M/L methods are useful priors but cannot by themselves rescore a specific galaxy.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    return {"verdict": verdict, "summary": summary}
+
+
+def cmd_v18independentmlsourcehunt(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_INDEPENDENT_ML_SOURCE_HUNT_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_OBSERVED_STATE_V18_INDEPENDENT_ML_SOURCE_HUNT_CACHE
+    capsule = write_v18_independent_ml_source_hunt_artifacts(out_dir, source_cache, args.offline)
+    summary = capsule["summary"]
+    print("MTS v18.42 independent M/L source hunt")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"targets={summary['targetCount']}",
+                f"cached={summary['cachedSourceCount']}",
+                f"downloaded={summary['downloadedSourceCount']}",
+                f"usable_cases={summary['usableIndependentMlCases']}",
+                f"source_wide={summary['sourceWideMethodOnlyCases']}",
+                f"cache_on_d={summary['sourceCacheOnDDrive']}",
+            ]
+        )
+    )
+    print(f"Wrote v18.42 independent M/L source hunt to {out_dir.resolve()}")
+
+
 V18_LEGACY_VBAR_SHAPE_SEEDS = [20260523, 20260524, 271828, 314159, 42, 12345, 8675309, 19, 31]
 V18_LEGACY_VBAR_SHAPE_ADD_BETAS = [0.25, 0.35, 0.45, 0.60, 0.75]
 V18_LEGACY_VBAR_SHAPE_RELIEF_BETAS = [0.15, 0.25, 0.35, 0.45, 0.60]
@@ -98650,6 +99045,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18externalmlgaptest",
             "v18remainingmlgaptest",
             "observedstatev18remainingmlgaptest",
+            "v18independentmlsourcehunt",
+            "observedstatev18independentmlsourcehunt",
             "v18legacyvbarshape",
             "observedstatev18legacyvbarshape",
             "v18legacyvbarpolarity",
@@ -99037,6 +99434,8 @@ def main() -> None:
         cmd_v18externalmlgaptest(args)
     elif args.mode in {"v18remainingmlgaptest", "observedstatev18remainingmlgaptest"}:
         cmd_v18remainingmlgaptest(args)
+    elif args.mode in {"v18independentmlsourcehunt", "observedstatev18independentmlsourcehunt"}:
+        cmd_v18independentmlsourcehunt(args)
     elif args.mode in {"v18legacyvbarshape", "observedstatev18legacyvbarshape"}:
         cmd_v18legacyvbarshape(args)
     elif args.mode in {"v18legacyvbarpolarity", "observedstatev18legacyvbarpolarity"}:
