@@ -283,6 +283,7 @@ DEFAULT_V19_CASE_TWO_D_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-case-2d-prov
 DEFAULT_V19_CASE_TWO_D_PROVENANCE_CACHE = DEFAULT_V19_COUNTER_EVIDENCE_CACHE
 DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-ugc05253-radial-provenance-v1"
 DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ugc05253-radial-provenance-v1")
+DEFAULT_V19_SOURCE_ADMISSIBILITY_BLOCKER_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-admissibility-blocker-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -112396,6 +112397,380 @@ def cmd_v19ugc05253radialprovenance(args: argparse.Namespace) -> None:
     print(f"Wrote UGC05253 radial/source provenance to {out_dir.resolve()}")
 
 
+V19_SOURCE_ADMISSIBILITY_ANCHORS = {
+    "UGC05253": "hold/source-blocker",
+    "UGC07089": "cap/protect",
+    "UGC03205": "admit/source-load",
+}
+
+
+def v19_source_admissibility_blocker_paths() -> dict[str, Path]:
+    return {
+        "counterCaseMap": DEFAULT_V19_COUNTER_EVIDENCE_OUT / "mts_v19_counter_evidence_case_map.csv",
+        "counterDecisions": DEFAULT_V19_COUNTER_EVIDENCE_OUT / "mts_v19_counter_evidence_admissibility_decisions.csv",
+        "case2dFacts": DEFAULT_V19_CASE_TWO_D_PROVENANCE_OUT / "mts_v19_case_2d_provenance_case_facts.csv",
+        "case2dDecisions": DEFAULT_V19_CASE_TWO_D_PROVENANCE_OUT / "mts_v19_case_2d_provenance_admissibility_decisions.csv",
+        "ugc05253Decision": DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_OUT / "mts_v19_ugc05253_radial_provenance_case_decision.csv",
+        "ugc05253Evidence": DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_OUT / "mts_v19_ugc05253_radial_provenance_extracted_evidence.csv",
+    }
+
+
+def v19_source_admissibility_blocker_ensure_inputs() -> dict[str, Path]:
+    paths = v19_source_admissibility_blocker_paths()
+    if not paths["counterCaseMap"].exists() or not paths["counterDecisions"].exists():
+        write_v19_counter_evidence_artifacts(DEFAULT_V19_COUNTER_EVIDENCE_OUT, DEFAULT_V19_COUNTER_EVIDENCE_CACHE, True)
+    if not paths["case2dFacts"].exists() or not paths["case2dDecisions"].exists():
+        write_v19_case_two_d_provenance_artifacts(DEFAULT_V19_CASE_TWO_D_PROVENANCE_OUT, DEFAULT_V19_CASE_TWO_D_PROVENANCE_CACHE)
+    if not paths["ugc05253Decision"].exists() or not paths["ugc05253Evidence"].exists():
+        write_v19_ugc05253_radial_provenance_artifacts(
+            DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_OUT,
+            DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_CACHE,
+            True,
+        )
+    return paths
+
+
+def v19_source_admissibility_max_asymmetry(row: dict) -> float:
+    values = [
+        parse_float(row.get("whispPaper4AsymmetryA"), math.nan),
+        parse_float(row.get("whispHIAsymmetryA"), math.nan),
+        parse_float(row.get("whispUVAsymmetryMax"), math.nan),
+    ]
+    values = [value for value in values if math.isfinite(value)]
+    return max(values) if values else math.nan
+
+
+def v19_source_admissibility_rule(row: dict) -> tuple[str, str, str]:
+    quality = parse_float(row.get("qualityCode"), math.nan)
+    inclination = parse_float(row.get("inclinationDeg"), math.nan)
+    max_asymmetry = parse_float(row.get("maxTwoDAsymmetry"), math.nan)
+    route = str(row.get("lockedRoute", ""))
+    state_decision = str(row.get("stateDecision", "")).lower()
+    direct_blocker = str(row.get("ugc05253RadialDecision", "")).startswith("source-admissibility blocker")
+    has_case_specific_2d = str(row.get("hasCaseSpecific2DEvidence", "")).lower() == "true"
+    high_inclination_q2_low_load = math.isfinite(quality) and quality > 1.0 and math.isfinite(inclination) and inclination >= 75.0 and route == "low-load"
+    low_inclination_q2_asym = math.isfinite(quality) and quality > 1.0 and math.isfinite(inclination) and inclination <= 45.0 and math.isfinite(max_asymmetry) and max_asymmetry >= 1.2
+    high_quality_source_state = math.isfinite(quality) and quality <= 1.0 and "source-load" in state_decision
+    if direct_blocker:
+        return (
+            "hold/source-blocker",
+            "direct outer-arm plus m=0 residual evidence says this is not a smooth source-load training case",
+            "source-specific radial provenance",
+        )
+    if low_inclination_q2_asym:
+        return (
+            "hold/source-blocker",
+            "Q>1 low-inclination case with high WHISP/UV/HI asymmetry; source loading is not admissible without radial-flow provenance",
+            "quality/inclination/asymmetry blocker",
+        )
+    if high_inclination_q2_low_load:
+        return (
+            "cap/protect",
+            "Q>1 high-inclination low-load lookalike; source loading is capped as an observational safety condition",
+            "quality/inclination/route cap",
+        )
+    if has_case_specific_2d and high_quality_source_state:
+        return (
+            "admit/source-load",
+            "high-quality case-specific positive control with source-load state proximity and no 2D blocker",
+            "case-specific source-load control",
+        )
+    return (
+        "outside current blocker scope",
+        "no case-specific admit/cap/hold decision is made by this narrow blocker",
+        "not classified",
+    )
+
+
+def v19_source_admissibility_blocker_feature_matrix() -> tuple[list[dict], list[dict]]:
+    paths = v19_source_admissibility_blocker_ensure_inputs()
+    counter_map = {row.get("galaxy", ""): row for row in read_csv_rows(paths["counterCaseMap"])}
+    counter_decisions = {row.get("galaxy", ""): row for row in read_csv_rows(paths["counterDecisions"])}
+    case2d_facts = {row.get("galaxy", ""): row for row in read_csv_rows(paths["case2dFacts"])}
+    case2d_decisions = {row.get("galaxy", ""): row for row in read_csv_rows(paths["case2dDecisions"])}
+    ugc05253_decision = {row.get("galaxy", ""): row for row in read_csv_rows(paths["ugc05253Decision"])}
+    ugc05253_evidence = read_csv_rows(paths["ugc05253Evidence"])
+    ugc05253_source_path = ""
+    for row in ugc05253_evidence:
+        if row.get("sourcePath"):
+            ugc05253_source_path = row["sourcePath"]
+            break
+    curves, source_supports, canonical_supports, v18_supports, _context = v19_source_boundary_case_base()
+    feature_rows: list[dict] = []
+    decision_rows: list[dict] = []
+    for name, role in V19_SOURCE_BOUNDARY_TARGET_ROLES.items():
+        counter = counter_map.get(name, {})
+        counter_decision = counter_decisions.get(name, {})
+        case_facts = case2d_facts.get(name, {})
+        case_decision = case2d_decisions.get(name, {})
+        radial_decision = ugc05253_decision.get(name, {})
+        merged = {**counter, **case_facts}
+        max_asymmetry = v19_source_admissibility_max_asymmetry(merged)
+        curve = curves.get(name)
+        canonical_rmse = locked_v18_rmse = full_source_rmse = math.nan
+        if curve and name in source_supports and name in v18_supports:
+            canonical_rmse = v18_competitor_support_score(curve, canonical_supports.get(name, []))["rmse"]
+            locked_v18_rmse = v18_competitor_support_score(curve, v18_supports.get(name, []))["rmse"]
+            full_source_rmse = v18_competitor_support_score(curve, source_supports.get(name, []))["rmse"]
+        base_row = {
+            "galaxy": name,
+            "targetRole": role,
+            "anchorExpectedDecision": V19_SOURCE_ADMISSIBILITY_ANCHORS.get(name, ""),
+            "targetClass": merged.get("targetClass", counter.get("targetClass", "")),
+            "set": merged.get("set", counter.get("set", "")),
+            "lockedRoute": merged.get("lockedRoute", counter.get("lockedRoute", "")),
+            "qualityCode": merged.get("qualityCode", counter.get("qualityCode", "")),
+            "qualityLabel": merged.get("qualityLabel", counter.get("qualityLabel", "")),
+            "inclinationDeg": merged.get("inclinationDeg", counter.get("inclinationDeg", "")),
+            "stateDecision": case_facts.get("stateDecision", ""),
+            "nearestArchetype": case_facts.get("nearestArchetype", ""),
+            "counterEvidenceDecision": counter_decision.get("admissibilityDecision", ""),
+            "case2DDecision": case_facts.get("caseDecision", ""),
+            "ugc05253RadialDecision": radial_decision.get("decision", ""),
+            "ugc05253PhysicalClass": radial_decision.get("physicalClass", ""),
+            "hasCaseSpecific2DEvidence": bool(case_facts),
+            "whispPaper4AsymmetryA": merged.get("whispPaper4AsymmetryA", ""),
+            "whispHIAsymmetryA": merged.get("whispHIAsymmetryA", ""),
+            "whispUVAsymmetryMax": merged.get("whispUVAsymmetryMax", ""),
+            "maxTwoDAsymmetry": max_asymmetry,
+            "rotationCurveRefCodes": merged.get("rotationCurveRefCodes", counter.get("rotationCurveRefCodes", "")),
+            "sourcePaths": ";".join(
+                item
+                for item in [
+                    counter.get("external2DSourcePath", ""),
+                    case_facts.get("external2DSourcePaths", ""),
+                    ugc05253_source_path if name == "UGC05253" else "",
+                ]
+                if item
+            ),
+            "canonicalRmse": canonical_rmse,
+            "lockedV18Rmse": locked_v18_rmse,
+            "unsafeFullSourceRmse": full_source_rmse,
+            "unsafeFullSourceMinusV18KmS": full_source_rmse - locked_v18_rmse if math.isfinite(full_source_rmse) and math.isfinite(locked_v18_rmse) else math.nan,
+        }
+        candidate_decision, rule_basis, rule_family = v19_source_admissibility_rule(base_row)
+        base_row["candidateDecision"] = candidate_decision
+        base_row["candidateRuleBasis"] = rule_basis
+        base_row["candidateRuleFamily"] = rule_family
+        base_row["anchorCorrect"] = (
+            candidate_decision == base_row["anchorExpectedDecision"]
+            if base_row["anchorExpectedDecision"]
+            else ""
+        )
+        feature_rows.append(base_row)
+        decision_rows.append(
+            {
+                "galaxy": name,
+                "targetRole": role,
+                "anchorExpectedDecision": base_row["anchorExpectedDecision"],
+                "candidateDecision": candidate_decision,
+                "anchorCorrect": base_row["anchorCorrect"],
+                "candidateRuleFamily": rule_family,
+                "candidateRuleBasis": rule_basis,
+                "lockedRoute": base_row["lockedRoute"],
+                "qualityCode": base_row["qualityCode"],
+                "inclinationDeg": base_row["inclinationDeg"],
+                "maxTwoDAsymmetry": max_asymmetry,
+                "ugc05253RadialDecision": base_row["ugc05253RadialDecision"],
+                "usableAsTransportLawNow": False,
+                "sourcePaths": base_row["sourcePaths"],
+            }
+        )
+    return feature_rows, decision_rows
+
+
+def v19_source_admissibility_blocker_support_impact(feature_rows: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for row in feature_rows:
+        decision = row["candidateDecision"]
+        if row["anchorExpectedDecision"]:
+            release_status = "admitted-positive-control" if decision == "admit/source-load" else "blocked-from-source-law"
+        else:
+            release_status = "unchanged-outside-scope"
+        rows.append(
+            {
+                "galaxy": row["galaxy"],
+                "candidateDecision": decision,
+                "releaseStatus": release_status,
+                "canonicalRmse": row["canonicalRmse"],
+                "lockedV18Rmse": row["lockedV18Rmse"],
+                "unsafeFullSourceRmse": row["unsafeFullSourceRmse"],
+                "unsafeFullSourceMinusV18KmS": row["unsafeFullSourceMinusV18KmS"],
+                "candidateRmse": row["lockedV18Rmse"],
+                "candidateMinusV18KmS": 0.0,
+                "supportLawChanged": False,
+                "impactInterpretation": "This blocker only decides source admissibility for the next law; it leaves locked v18 support unchanged.",
+            }
+        )
+    return rows
+
+
+def v19_source_admissibility_blocker_nulls(feature_rows: list[dict], draws: int = 2000, seed: int = 20260526) -> tuple[list[dict], dict]:
+    target_names = [row["galaxy"] for row in feature_rows]
+    anchors = {row["galaxy"]: row["anchorExpectedDecision"] for row in feature_rows if row["anchorExpectedDecision"]}
+    expected_decisions = [decision for decision in anchors.values()]
+    candidate_correct = sum(
+        1
+        for row in feature_rows
+        if row["anchorExpectedDecision"] and row["candidateDecision"] == row["anchorExpectedDecision"]
+    )
+    rng = random.Random(seed)
+    rows: list[dict] = []
+    for draw in range(draws):
+        selected = rng.sample(target_names, len(expected_decisions))
+        shuffled_decisions = expected_decisions[:]
+        rng.shuffle(shuffled_decisions)
+        assigned = dict(zip(selected, shuffled_decisions))
+        correct = sum(1 for name, expected in anchors.items() if assigned.get(name) == expected)
+        rows.append(
+            {
+                "nullType": "same-count-random-admissibility-labels",
+                "draw": draw,
+                "activeCount": len(expected_decisions),
+                "assignedCases": ";".join(f"{name}:{assigned[name]}" for name in sorted(assigned)),
+                "anchorCorrectCount": correct,
+                "anchorAccuracyPct": 100.0 * correct / max(1, len(anchors)),
+                "beatsOrTiesCandidate": correct >= candidate_correct,
+            }
+        )
+    correct_values = [parse_float(row["anchorCorrectCount"], math.nan) for row in rows]
+    p_value = safe_mean(1.0 if parse_bool(row["beatsOrTiesCandidate"]) else 0.0 for row in rows)
+    summary = {
+        "anchorCount": len(anchors),
+        "candidateAnchorCorrectCount": candidate_correct,
+        "candidateAnchorAccuracyPct": 100.0 * candidate_correct / max(1, len(anchors)),
+        "nullAnchorCorrectMedian": safe_median(correct_values),
+        "nullAnchorCorrectP95": v19_quantile(correct_values, 0.95),
+        "nullBeatOrTieCandidateFraction": p_value,
+        "nullDraws": draws,
+        "nullSeed": seed,
+    }
+    return rows, summary
+
+
+def write_v19_source_admissibility_blocker_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_source_admissibility_blocker"
+    feature_rows, decision_rows = v19_source_admissibility_blocker_feature_matrix()
+    support_rows = v19_source_admissibility_blocker_support_impact(feature_rows)
+    null_rows, null_summary = v19_source_admissibility_blocker_nulls(feature_rows)
+    anchor_rows = [row for row in decision_rows if row["anchorExpectedDecision"]]
+    anchor_correct = sum(1 for row in anchor_rows if parse_bool(row["anchorCorrect"]))
+    ugc05253 = next((row for row in decision_rows if row["galaxy"] == "UGC05253"), {})
+    ugc07089 = next((row for row in decision_rows if row["galaxy"] == "UGC07089"), {})
+    ugc03205 = next((row for row in decision_rows if row["galaxy"] == "UGC03205"), {})
+    verdict = "source-admissibility blocker survives anchor test" if anchor_correct == len(anchor_rows) and null_summary["nullBeatOrTieCandidateFraction"] < 0.05 else "classifier works but source equation not ready"
+    formula = {
+        "candidateId": "v19-source-admissibility-blocker-v1",
+        "lawStatus": "not a transport law; source-admissibility blocker for next candidate testing",
+        "browserChanged": False,
+        "lockedV18Changed": False,
+        "forbiddenInputs": ["galaxy name", "raw RMSE", "residual lookup", "NFW parameters", "MOND parameters", "weak/systematics training"],
+        "allowedEvidenceVariables": [
+            "official SPARC quality code",
+            "inclination",
+            "locked route",
+            "WHISP/UV/HI asymmetry metrics",
+            "source-specific outer-arm/m=0 residual provenance",
+            "pre-residual state/profile source-load proximity for case-specific positive controls",
+        ],
+        "rule": [
+            "hold/source-blocker if direct outer-arm plus m=0 residual source evidence exists",
+            "hold/source-blocker if Q>1, inclination <= 45 deg, and max 2D asymmetry >= 1.2",
+            "cap/protect if Q>1, inclination >= 75 deg, and locked route is low-load",
+            "admit/source-load for case-specific Q=1 source-load positive controls with no 2D blocker",
+            "otherwise outside current blocker scope",
+        ],
+        "anchorDecisions": {row["galaxy"]: row["candidateDecision"] for row in anchor_rows},
+    }
+    capsule = {
+        "analysisName": "mts-v19-source-admissibility-blocker-v1",
+        "verdict": verdict,
+        "targetCaseCount": len(feature_rows),
+        "anchorCount": len(anchor_rows),
+        "anchorCorrectCount": anchor_correct,
+        "anchorAccuracyPct": 100.0 * anchor_correct / max(1, len(anchor_rows)),
+        **null_summary,
+        "ugc05253Decision": ugc05253.get("candidateDecision", ""),
+        "ugc07089Decision": ugc07089.get("candidateDecision", ""),
+        "ugc03205Decision": ugc03205.get("candidateDecision", ""),
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "supportLawChanged": False,
+        "weakSystematicsTrainingUsed": False,
+    }
+    write_csv(out_dir / f"{prefix}_feature_matrix.csv", feature_rows)
+    write_csv(out_dir / f"{prefix}_decisions.csv", decision_rows)
+    write_csv(out_dir / f"{prefix}_support_impact.csv", support_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 Source-Admissibility Blocker",
+        "",
+        "This is a narrow counterexample attack, not a browser law and not a new support patch. It tests whether the current source/provenance variables can separate the three blocker/control cases before any later v19 source-field candidate is allowed to use them.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## What Changed",
+        "",
+        "- No v18/v19 support formula changed.",
+        "- The blocker classifies only case-specific source admissibility for the next candidate law.",
+        "- Locked v18 support remains the scored support in this mode.",
+        "",
+        "## Anchor Decisions",
+        "",
+        "| Galaxy | expected | candidate | basis |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row in anchor_rows:
+        report.append(f"| {row['galaxy']} | {row['anchorExpectedDecision']} | {row['candidateDecision']} | {row['candidateRuleBasis']} |")
+    report.extend(
+        [
+            "",
+            "## Null Test",
+            "",
+            f"- Candidate anchor accuracy: `{anchor_correct}/{len(anchor_rows)}`.",
+            f"- Same-count random-label null median correct: `{fmt(null_summary['nullAnchorCorrectMedian'])}`.",
+            f"- Same-count random-label null p95 correct: `{fmt(null_summary['nullAnchorCorrectP95'])}`.",
+            f"- Null beat/tie fraction: `{fmt(null_summary['nullBeatOrTieCandidateFraction'])}`.",
+            "",
+            "## Support Impact",
+            "",
+            "The candidate has zero support impact by design. `UGC05253` and `UGC07089` are blocked from training/releasing a smooth source-load law; `UGC03205` remains the positive control. The unsafe full-source replay is retained in the CSV to show why this is an admissibility test rather than a hidden support patch.",
+            "",
+            "## Guardrails",
+            "",
+            "- No browser preset, q, Gamma0, M/L, residual lookup, raw RMSE lookup, NFW/MOND parameter, or weak/systematics case enters the rule.",
+            "- Galaxy names are used only to join source evidence and evaluate the named anchors; they are not a formula input.",
+            "- Cases outside the three direct anchors are marked outside current blocker scope.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19sourceadmissibilityblocker(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SOURCE_ADMISSIBILITY_BLOCKER_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_source_admissibility_blocker_artifacts(out_dir)
+    print("MTS v19 source-admissibility blocker")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"anchors={capsule['anchorCorrectCount']}/{capsule['anchorCount']}",
+                f"null_tie_frac={fmt(capsule['nullBeatOrTieCandidateFraction'])}",
+                f"UGC05253={capsule['ugc05253Decision']}",
+                f"UGC07089={capsule['ugc07089Decision']}",
+                f"UGC03205={capsule['ugc03205Decision']}",
+            ]
+        )
+    )
+    print(f"Wrote v19 source-admissibility blocker to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -112685,6 +113060,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19case2dprovenance",
             "v19ugc05253radialprovenance",
             "observedstatev19ugc05253radialprovenance",
+            "v19sourceadmissibilityblocker",
+            "observedstatev19sourceadmissibilityblocker",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -113150,6 +113527,8 @@ def main() -> None:
         cmd_v19case2dprovenance(args)
     elif args.mode in {"v19ugc05253radialprovenance", "observedstatev19ugc05253radialprovenance"}:
         cmd_v19ugc05253radialprovenance(args)
+    elif args.mode in {"v19sourceadmissibilityblocker", "observedstatev19sourceadmissibilityblocker"}:
+        cmd_v19sourceadmissibilityblocker(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
