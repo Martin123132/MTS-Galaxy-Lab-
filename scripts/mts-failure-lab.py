@@ -261,6 +261,8 @@ DEFAULT_V19_EXTERNAL_TWO_D_ACQUIRE_OUT = OUTPUT_PACK_ROOT / "mts-v19-external-2d
 DEFAULT_V19_EXTERNAL_TWO_D_ACQUIRE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-external-2d-acquisition-v1")
 DEFAULT_V19_EXTERNAL_TWO_D_PARSER_OUT = OUTPUT_PACK_ROOT / "mts-v19-external-2d-parser-v1"
 DEFAULT_V19_EXTERNAL_TWO_D_ADMISSIBILITY_OUT = OUTPUT_PACK_ROOT / "mts-v19-external-2d-admissibility-v1"
+DEFAULT_V19_COUNTER_EVIDENCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-counter-evidence-v1"
+DEFAULT_V19_COUNTER_EVIDENCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-counter-evidence-v1")
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -106474,6 +106476,425 @@ def cmd_v19external2dadmissibility(args: argparse.Namespace) -> None:
     print(f"Wrote v19 external 2D admissibility test to {out_dir.resolve()}")
 
 
+V19_COUNTER_EVIDENCE_TARGET_CLASSES = {
+    "IC2574": "missed protected false activation",
+    "NGC3198": "missed protected false activation",
+    "NGC5055": "missed protected false activation",
+    "UGC07089": "missed protected false activation",
+    "NGC2403": "retained high/source-load",
+    "NGC3521": "retained high/source-load",
+    "NGC7331": "retained high/source-load",
+    "UGC03205": "retained high/source-load",
+    "UGC05253": "retained high/source-load",
+    "NGC4157": "remaining NFW/M-L gap anchor",
+    "UGC07399": "remaining NFW/M-L gap anchor",
+    "UGC04325": "remaining NFW/M-L gap anchor",
+    "NGC4100": "remaining NFW/M-L gap anchor",
+    "UGC08699": "remaining NFW/M-L gap anchor",
+}
+
+
+V19_COUNTER_KEYWORDS = {
+    "ml": ["mass-to-light", "mass to light", "m/l", "stellar population", "population synthesis", "disk mass", "bulge mass", "decomposition", "3.6", "spitzer"],
+    "kinematic": ["velocity field", "tilted ring", "non-circular", "non circular", "beam", "warp", "bar", "lopsided", "asymmetry", "asymmetric", "approaching", "receding", "inclination", "dispersion", "quality"],
+    "source": ["surface density", "hi distribution", "extended", "uv", "morphology", "spiral", "ring", "streaming", "residual"],
+}
+
+
+def v19_counter_name_query(name: str) -> str:
+    if name.startswith("UGC0") and len(name) > 4:
+        return "UGC " + str(int(name[3:]))
+    if name.startswith("NGC"):
+        return "NGC " + name[3:].lstrip("0")
+    if name.startswith("IC"):
+        return "IC " + name[2:].lstrip("0")
+    return name.replace("_", " ")
+
+
+def v19_counter_evidence_target_rows() -> list[dict]:
+    context = observed_state_candidate_context()
+    table1_by_name = v18_mass_scale_table1()[0]
+    curves_by_name = {curve["name"]: curve for curve in context["curves"]}
+    external_case_path = DEFAULT_V19_EXTERNAL_TWO_D_ADMISSIBILITY_OUT / "mts_v19_external_2d_admissibility_case_ledger.csv"
+    if not external_case_path.exists():
+        write_v19_external_2d_admissibility_artifacts(DEFAULT_V19_EXTERNAL_TWO_D_ADMISSIBILITY_OUT, DEFAULT_V19_EXTERNAL_TWO_D_PARSER_OUT)
+    external_by_name = {row["galaxy"]: row for row in read_csv_rows(external_case_path)}
+    ml_target_path = DEFAULT_OBSERVED_STATE_V18_REMAINING_ML_GAP_TEST_OUT / "mts_v18_41_remaining_ml_gap_target_best_oracle.csv"
+    if not ml_target_path.exists():
+        write_v18_remaining_ml_gap_test_artifacts(DEFAULT_OBSERVED_STATE_V18_REMAINING_ML_GAP_TEST_OUT, DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE, True)
+    ml_best_by_name = {row["galaxy"]: row for row in read_csv_rows(ml_target_path)}
+    non_ml_path = DEFAULT_OBSERVED_STATE_V18_NON_ML_PROVENANCE_OUT / "mts_v18_50_non_ml_provenance_case_ledger.csv"
+    if not non_ml_path.exists():
+        write_v18_non_ml_provenance_artifacts(DEFAULT_OBSERVED_STATE_V18_NON_ML_PROVENANCE_OUT)
+    non_ml_by_name = {row["galaxy"]: row for row in read_csv_rows(non_ml_path)}
+    source_prov_path = DEFAULT_OBSERVED_STATE_V18_SOURCE_PROVENANCE_OUT / "mts_v18_51_source_provenance_case_verdicts.csv"
+    if not source_prov_path.exists():
+        write_v18_source_provenance_artifacts(DEFAULT_OBSERVED_STATE_V18_SOURCE_PROVENANCE_OUT, DEFAULT_OBSERVED_STATE_V18_SOURCE_PROVENANCE_CACHE, True)
+    source_prov_by_name = {row["galaxy"]: row for row in read_csv_rows(source_prov_path)}
+    rows: list[dict] = []
+    for name, target_class in V19_COUNTER_EVIDENCE_TARGET_CLASSES.items():
+        curve = curves_by_name.get(name)
+        table = table1_by_name.get(name, {})
+        external = external_by_name.get(name, {})
+        ml_best = ml_best_by_name.get(name, {})
+        non_ml = non_ml_by_name.get(name, {})
+        source_prov = source_prov_by_name.get(name, {})
+        rows.append(
+            {
+                "galaxy": name,
+                "targetClass": target_class,
+                "set": v18_competitor_set_label(name, set(context["weakNames"]), set(context["highNames"])) if curve else "",
+                "lockedRoute": curve.get("lockedModelRoute", "") if curve else "",
+                "sourceClass": external.get("sourceClass", ""),
+                "external2DDecision": external.get("admissibilityDecision", ""),
+                "external2DSourceClass": external.get("sourceClass", ""),
+                "external2DBestRuleHit": external.get("bestRuleHit", ""),
+                "external2DSourceFamily": external.get("sourceFamily", ""),
+                "external2DSourcePath": external.get("sourcePath", ""),
+                "mlBestVariantId": ml_best.get("bestVariantId", ""),
+                "mlBestGainPct": ml_best.get("bestGainVsV18_38Pct", ""),
+                "mlBestYdisk": ml_best.get("bestYdisk", ""),
+                "mlBestYbul": ml_best.get("bestYbul", ""),
+                "mlBestSource": ml_best.get("sourceClassification", ""),
+                "v18NonMlVerdict": non_ml.get("provenanceVerdict", ""),
+                "v18NonMlFlags": non_ml.get("provenanceFlags", ""),
+                "v18SourceVerdict": source_prov.get("sourceVerdict", ""),
+                "v18SourceEvidenceRows": parse_float(source_prov.get("directEvidenceRows"), 0.0) + parse_float(source_prov.get("sourceWideEvidenceRows"), 0.0),
+                "qualityCode": table.get("qualityCode", ""),
+                "qualityLabel": table.get("qualityLabel", ""),
+                "inclinationDeg": table.get("inclinationDeg", ""),
+                "inclinationUncertaintyDeg": table.get("inclinationUncertaintyDeg", ""),
+                "distanceMpc": table.get("distanceMpc", ""),
+                "distanceUncertaintyMpc": table.get("distanceUncertaintyMpc", ""),
+                "rotationCurveRefCodes": table.get("rotationCurveRefCodes", ""),
+                "rotationCurveReferences": table.get("rotationCurveReferences", ""),
+            }
+        )
+    return rows
+
+
+def v19_counter_source_targets(target_rows: list[dict], source_cache: Path) -> list[dict]:
+    targets: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in target_rows:
+        name = row["galaxy"]
+        query_name = v19_counter_name_query(name)
+        for role, url, suffix, max_bytes in [
+            ("ned-object-html", "https://ned.ipac.caltech.edu/byname?objname=" + urllib.parse.quote(query_name), "html", 750_000),
+            ("simbad-object-text", "https://simbad.u-strasbg.fr/simbad/sim-id?Ident=" + urllib.parse.quote(query_name) + "&output.format=ASCII", "txt", 500_000),
+        ]:
+            key = (name, role, url)
+            if key not in seen:
+                seen.add(key)
+                targets.append({"galaxy": name, "referenceCode": "", "referenceText": "", "sourceRole": role, "url": url, "cachePath": str(source_cache / role / f"{safe_file_stem(name)}.{suffix}"), "maxBytes": max_bytes})
+        refs = parse_reference_texts({"spArcReferences": row.get("rotationCurveReferences", ""), "spArcReferenceCodes": row.get("rotationCurveRefCodes", "")})
+        for code, reference in refs.items():
+            reference = reference or code
+            for role, url, suffix, max_bytes in [
+                ("crossref-json", reference_crossref_query_url(reference), "json", 500_000),
+                ("ads-search-html", reference_ads_search_url(reference), "html", 750_000),
+                ("arxiv-search-html", reference_arxiv_search_url(reference), "html", 750_000),
+            ]:
+                key = (name, role, url)
+                if key in seen:
+                    continue
+                seen.add(key)
+                targets.append({"galaxy": name, "referenceCode": code, "referenceText": reference, "sourceRole": role, "url": url, "cachePath": str(source_cache / role / f"{safe_file_stem(name + '-' + code)}.{suffix}"), "maxBytes": max_bytes})
+    return targets
+
+
+def v19_counter_fetch_inventory(targets: list[dict], offline: bool) -> list[dict]:
+    rows: list[dict] = []
+    for target in targets:
+        path = Path(target["cachePath"])
+        status = v19_external_2d_fetch(target["url"], path, offline, int(parse_float(target.get("maxBytes"), 750_000) or 750_000))
+        rows.append({**target, **status, "largeDownloadAllowed": False})
+    return rows
+
+
+def v19_counter_text_from_path(path: Path) -> str:
+    if not path.exists():
+        return ""
+    try:
+        raw = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        raw = path.read_bytes().decode("latin-1", errors="ignore")
+    return html.unescape(re.sub(r"<[^>]+>", " ", raw))
+
+
+def v19_counter_keyword_hits(text: str, keywords: list[str]) -> tuple[str, str]:
+    lowered = text.lower()
+    hits = [keyword for keyword in keywords if keyword in lowered]
+    snippets: list[str] = []
+    for keyword in hits[:8]:
+        idx = lowered.find(keyword)
+        if idx >= 0:
+            snippets.append(re.sub(r"\s+", " ", text[max(0, idx - 220): idx + 420]).strip()[:650])
+    return "; ".join(hits), " || ".join(snippets)
+
+
+def v19_counter_case_specific(text: str, galaxy: str) -> bool:
+    compact = v19_external_2d_norm_name(text)
+    return any(re.search(rf"(?<![A-Z0-9]){re.escape(variant)}(?![A-Z0-9])", compact) for variant in v19_external_2d_name_variants(galaxy))
+
+
+def v19_counter_source_evidence_rows(fetch_rows: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for fetch in fetch_rows:
+        if fetch.get("cacheStatus") != "available":
+            continue
+        text = v19_counter_text_from_path(Path(fetch["cachePath"]))
+        if not text:
+            continue
+        ml_hits, ml_snippets = v19_counter_keyword_hits(text, V19_COUNTER_KEYWORDS["ml"])
+        kin_hits, kin_snippets = v19_counter_keyword_hits(text, V19_COUNTER_KEYWORDS["kinematic"])
+        source_hits, source_snippets = v19_counter_keyword_hits(text, V19_COUNTER_KEYWORDS["source"])
+        rows.append(
+            {
+                "galaxy": fetch["galaxy"],
+                "sourceRole": fetch["sourceRole"],
+                "referenceCode": fetch.get("referenceCode", ""),
+                "url": fetch["url"],
+                "cachePath": fetch["cachePath"],
+                "sha256": fetch.get("sha256", ""),
+                "caseSpecificMention": v19_counter_case_specific(text, fetch["galaxy"]),
+                "mlKeywordHits": ml_hits,
+                "mlSnippet": ml_snippets,
+                "kinematicKeywordHits": kin_hits,
+                "kinematicSnippet": kin_snippets,
+                "sourceKeywordHits": source_hits,
+                "sourceSnippet": source_snippets,
+            }
+        )
+    return rows
+
+
+def v19_counter_ml_prior_rows(target_rows: list[dict], evidence_rows: list[dict]) -> list[dict]:
+    source_values_path = DEFAULT_OBSERVED_STATE_V18_REMAINING_ML_GAP_TEST_OUT / "mts_v18_41_remaining_ml_gap_source_values.csv"
+    if not source_values_path.exists():
+        write_v18_remaining_ml_gap_test_artifacts(DEFAULT_OBSERVED_STATE_V18_REMAINING_ML_GAP_TEST_OUT, DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE, True)
+    values_by_name: dict[str, list[dict]] = {}
+    for row in read_csv_rows(source_values_path):
+        values_by_name.setdefault(row["galaxy"], []).append(row)
+    evidence_by_name: dict[str, list[dict]] = {}
+    for row in evidence_rows:
+        if row["mlKeywordHits"]:
+            evidence_by_name.setdefault(row["galaxy"], []).append(row)
+    out: list[dict] = []
+    for target in target_rows:
+        rows = values_by_name.get(target["galaxy"], [])
+        best_gain = parse_float(target.get("mlBestGainPct"), math.nan)
+        if rows:
+            for value in rows:
+                out.append({"galaxy": target["galaxy"], "targetClass": target["targetClass"], "evidenceType": "numeric M/L catalogue value", "variantId": value.get("variantId", ""), "sourceModel": value.get("sourceModel", ""), "Ydisk": value.get("Ydisk", ""), "Ybul": value.get("Ybul", ""), "e_Ydisk": value.get("e_Ydisk", ""), "source": value.get("source", ""), "classification": value.get("classification", ""), "usableAsMtsFormulaInput": value.get("usableAsMtsFormulaInput", ""), "bestGainVsV18_38Pct": target.get("mlBestGainPct", ""), "decision": "numeric M/L materially changes this case" if math.isfinite(best_gain) and best_gain >= 15.0 else "numeric M/L context only", "sourcePath": str(source_values_path)})
+        for evidence in evidence_by_name.get(target["galaxy"], []):
+            out.append({"galaxy": target["galaxy"], "targetClass": target["targetClass"], "evidenceType": "source text M/L keyword evidence", "variantId": "", "sourceModel": evidence["sourceRole"], "Ydisk": "", "Ybul": "", "e_Ydisk": "", "source": evidence["url"], "classification": evidence["mlKeywordHits"], "usableAsMtsFormulaInput": False, "bestGainVsV18_38Pct": target.get("mlBestGainPct", ""), "decision": "paper/source mentions M/L/decomposition but no accepted numeric prior imported", "sourcePath": evidence["cachePath"]})
+        if not rows and not evidence_by_name.get(target["galaxy"], []):
+            out.append({"galaxy": target["galaxy"], "targetClass": target["targetClass"], "evidenceType": "MISSING", "variantId": "", "sourceModel": "", "Ydisk": "", "Ybul": "", "e_Ydisk": "", "source": "", "classification": "", "usableAsMtsFormulaInput": False, "bestGainVsV18_38Pct": target.get("mlBestGainPct", ""), "decision": "MISSING numeric M/L/decomposition evidence", "sourcePath": "MISSING"})
+    return out
+
+
+def v19_counter_kinematic_rows(target_rows: list[dict], evidence_rows: list[dict]) -> list[dict]:
+    by_name: dict[str, list[dict]] = {}
+    for row in evidence_rows:
+        if row["kinematicKeywordHits"] or row["sourceKeywordHits"]:
+            by_name.setdefault(row["galaxy"], []).append(row)
+    rows: list[dict] = []
+    table1_path = v18_mass_scale_table1()[2]
+    external2d_path = DEFAULT_V19_EXTERNAL_TWO_D_ADMISSIBILITY_OUT / "mts_v19_external_2d_admissibility_case_ledger.csv"
+    non_ml_path = DEFAULT_OBSERVED_STATE_V18_NON_ML_PROVENANCE_OUT / "mts_v18_50_non_ml_provenance_case_ledger.csv"
+    source_prov_path = DEFAULT_OBSERVED_STATE_V18_SOURCE_PROVENANCE_OUT / "mts_v18_51_source_provenance_case_verdicts.csv"
+    for target in target_rows:
+        official_flags = []
+        if parse_float(target.get("qualityCode"), 1.0) > 1:
+            official_flags.append("SPARC quality not high")
+        inc = parse_float(target.get("inclinationDeg"), math.nan)
+        inc_unc = parse_float(target.get("inclinationUncertaintyDeg"), math.nan)
+        if math.isfinite(inc) and inc < 35:
+            official_flags.append("low inclination")
+        if math.isfinite(inc_unc) and inc_unc >= 5:
+            official_flags.append("large inclination uncertainty")
+        distance = parse_float(target.get("distanceMpc"), math.nan)
+        dist_unc = parse_float(target.get("distanceUncertaintyMpc"), math.nan)
+        if math.isfinite(distance) and distance > 0 and math.isfinite(dist_unc) and dist_unc / distance >= 0.25:
+            official_flags.append("large fractional distance uncertainty")
+        rows.append({"galaxy": target["galaxy"], "targetClass": target["targetClass"], "evidenceType": "official SPARC Table1", "qualityCode": target.get("qualityCode", ""), "inclinationDeg": target.get("inclinationDeg", ""), "inclinationUncertaintyDeg": target.get("inclinationUncertaintyDeg", ""), "distanceUncertaintyFraction": dist_unc / distance if math.isfinite(distance) and distance > 0 and math.isfinite(dist_unc) else "", "keywordHits": "; ".join(official_flags), "snippet": target.get("v18NonMlFlags", ""), "decision": "official provenance flag present" if official_flags or target.get("v18NonMlFlags") else "official provenance does not explain case", "sourcePath": str(table1_path)})
+        if target.get("v18NonMlVerdict"):
+            rows.append({"galaxy": target["galaxy"], "targetClass": target["targetClass"], "evidenceType": "v18.50 non-M/L provenance", "qualityCode": target.get("qualityCode", ""), "inclinationDeg": target.get("inclinationDeg", ""), "inclinationUncertaintyDeg": target.get("inclinationUncertaintyDeg", ""), "distanceUncertaintyFraction": "", "keywordHits": target.get("v18NonMlFlags", ""), "snippet": target.get("v18NonMlVerdict", ""), "decision": target.get("v18NonMlVerdict", ""), "sourcePath": str(non_ml_path)})
+        if target.get("v18SourceVerdict"):
+            rows.append({"galaxy": target["galaxy"], "targetClass": target["targetClass"], "evidenceType": "v18.51 source-paper provenance", "qualityCode": target.get("qualityCode", ""), "inclinationDeg": target.get("inclinationDeg", ""), "inclinationUncertaintyDeg": target.get("inclinationUncertaintyDeg", ""), "distanceUncertaintyFraction": "", "keywordHits": target.get("v18SourceVerdict", ""), "snippet": "", "decision": target.get("v18SourceVerdict", ""), "sourcePath": str(source_prov_path)})
+        if target.get("external2DDecision"):
+            rows.append({"galaxy": target["galaxy"], "targetClass": target["targetClass"], "evidenceType": "external 2D admissibility", "qualityCode": target.get("qualityCode", ""), "inclinationDeg": target.get("inclinationDeg", ""), "inclinationUncertaintyDeg": target.get("inclinationUncertaintyDeg", ""), "distanceUncertaintyFraction": "", "keywordHits": target.get("external2DSourceFamily", ""), "snippet": target.get("external2DDecision", ""), "decision": target.get("external2DDecision", ""), "sourcePath": str(external2d_path)})
+        for evidence in by_name.get(target["galaxy"], []):
+            rows.append({"galaxy": target["galaxy"], "targetClass": target["targetClass"], "evidenceType": evidence["sourceRole"], "qualityCode": target.get("qualityCode", ""), "inclinationDeg": target.get("inclinationDeg", ""), "inclinationUncertaintyDeg": target.get("inclinationUncertaintyDeg", ""), "distanceUncertaintyFraction": "", "keywordHits": "; ".join(item for item in [evidence["kinematicKeywordHits"], evidence["sourceKeywordHits"]] if item), "snippet": evidence["kinematicSnippet"] or evidence["sourceSnippet"], "decision": "source text has kinematic/source-field keywords", "sourcePath": evidence["cachePath"]})
+    return rows
+
+
+def v19_counter_is_strong_kinematic_evidence(row: dict) -> bool:
+    evidence_type = str(row.get("evidenceType", ""))
+    decision = str(row.get("decision", "")).lower()
+    hits = str(row.get("keywordHits", "")).lower()
+    if evidence_type == "official SPARC Table1":
+        return bool(hits)
+    if evidence_type == "v18.50 non-M/L provenance":
+        return bool(hits) and "official table1 does not flag" not in hits
+    if evidence_type == "v18.51 source-paper provenance":
+        return "direct source-paper" in hits or "source-wide provenance" in hits
+    if evidence_type == "external 2D admissibility":
+        return "correctly cap/reject" in decision or "correctly admit" in decision
+    strong_terms = [
+        "velocity field",
+        "tilted ring",
+        "non-circular",
+        "non circular",
+        "beam",
+        "warp",
+        "bar",
+        "lopsided",
+        "asymmetry",
+        "asymmetric",
+        "approaching",
+        "receding",
+        "inclination",
+        "dispersion",
+        "quality",
+    ]
+    return any(term in hits for term in strong_terms)
+
+
+def v19_counter_case_decisions(target_rows: list[dict], ml_rows: list[dict], kin_rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    ml_by_name: dict[str, list[dict]] = {}
+    for row in ml_rows:
+        ml_by_name.setdefault(row["galaxy"], []).append(row)
+    kin_by_name: dict[str, list[dict]] = {}
+    for row in kin_rows:
+        kin_by_name.setdefault(row["galaxy"], []).append(row)
+    decisions: list[dict] = []
+    missing: list[dict] = []
+    next_inputs: list[dict] = []
+    for target in target_rows:
+        name = target["galaxy"]
+        ml_gain = parse_float(target.get("mlBestGainPct"), math.nan)
+        ml_material = math.isfinite(ml_gain) and ml_gain >= 15.0
+        kin_support = [row for row in kin_by_name.get(name, []) if v19_counter_is_strong_kinematic_evidence(row)]
+        external_decision = target.get("external2DDecision", "")
+        if target["targetClass"] == "missed protected false activation":
+            if kin_support:
+                decision = "cap/reject source loading; provenance or kinematic evidence exists"
+                next_variable = "2D kinematic/provenance admissibility"
+            elif ml_material:
+                decision = "cap/reject source loading; numeric M/L sensitivity exists"
+                next_variable = "M/L/decomposition quality gate"
+            else:
+                decision = "counterexample unresolved; missing physical variable likely"
+                next_variable = "missing physical source-admissibility variable"
+        elif target["targetClass"] == "retained high/source-load":
+            if "admit" in external_decision.lower():
+                decision = "admit source loading; external 2D pass keeps this high case"
+                next_variable = "admissible high/source-load control"
+            elif kin_support and not ml_material:
+                decision = "high/source-load case has provenance context; do not use as clean source-law proof alone"
+                next_variable = "separate physical source loading from provenance"
+            else:
+                decision = "admit source loading provisionally; no cap evidence found"
+                next_variable = "source-loading positive control"
+        else:
+            if ml_material:
+                decision = "remaining NFW/M-L gap has material numeric M/L sensitivity"
+                next_variable = "M/L provenance-aware validation gate"
+            elif kin_support:
+                decision = "remaining gap has kinematic/provenance context but not numeric M/L closure"
+                next_variable = "source quality/provenance boundary"
+            else:
+                decision = "remaining gap not explained by imported evidence"
+                next_variable = "missing physical variable or fitted-halo flexibility"
+        source_paths = sorted({row.get("sourcePath", "") for row in ml_by_name.get(name, []) + kin_by_name.get(name, []) if row.get("sourcePath") and row.get("sourcePath") != "MISSING"})
+        if not source_paths:
+            source_paths = ["MISSING"]
+        decisions.append({"galaxy": name, "targetClass": target["targetClass"], "lockedRoute": target.get("lockedRoute", ""), "external2DDecision": external_decision, "mlBestGainPct": target.get("mlBestGainPct", ""), "kinematicEvidenceRows": len(kin_support), "mlEvidenceRows": len([row for row in ml_by_name.get(name, []) if row.get("evidenceType") != "MISSING"]), "admissibilityDecision": decision, "nextPhysicalVariable": next_variable, "sourcePaths": ";".join(source_paths)})
+        required = {"numeric M/L/decomposition evidence": any(row.get("evidenceType") != "MISSING" for row in ml_by_name.get(name, [])), "kinematic/provenance evidence": bool(kin_support), "external 2D admissibility row": bool(external_decision)}
+        for field, present in required.items():
+            if not present:
+                missing.append({"galaxy": name, "targetClass": target["targetClass"], "missingField": field, "whyItMatters": "blocks deciding whether source loading should be admitted, capped, or rejected", "sourcePath": "MISSING"})
+        next_inputs.append({"galaxy": name, "targetClass": target["targetClass"], "recommendedInput": next_variable, "decisionUse": decision, "usableAsFormulaInputNow": False, "reason": "evidence pass only; candidate law must be tested in a later holdout/null mode", "sourcePaths": ";".join(source_paths)})
+    return decisions, missing + next_inputs
+
+
+def write_v19_counter_evidence_artifacts(out_dir: Path, source_cache: Path, offline: bool) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source_cache.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_counter_evidence"
+    target_rows = v19_counter_evidence_target_rows()
+    source_targets = v19_counter_source_targets(target_rows, source_cache)
+    fetch_rows = v19_counter_fetch_inventory(source_targets, offline)
+    evidence_rows = v19_counter_source_evidence_rows(fetch_rows)
+    ml_rows = v19_counter_ml_prior_rows(target_rows, evidence_rows)
+    kin_rows = v19_counter_kinematic_rows(target_rows, evidence_rows)
+    decisions, missing_and_next = v19_counter_case_decisions(target_rows, ml_rows, kin_rows)
+    missing_rows = [row for row in missing_and_next if "missingField" in row]
+    next_rows = [row for row in missing_and_next if "recommendedInput" in row]
+    source_inventory_rows = [
+        {
+            "sourceKind": "network-cache",
+            "galaxy": row["galaxy"],
+            "sourceRole": row["sourceRole"],
+            "referenceCode": row.get("referenceCode", ""),
+            "url": row["url"],
+            "cachePath": row["cachePath"],
+            "cacheStatus": "available" if row["cacheStatus"] == "available" else "unavailable",
+            "bytes": row.get("bytes", "") if row["cacheStatus"] == "available" else 0,
+            "sha256": row.get("sha256", "") if row["cacheStatus"] == "available" else "",
+            "largeDownloadAllowed": False,
+            "error": "" if row["cacheStatus"] == "available" else "not cached or fetch failed",
+        }
+        for row in fetch_rows
+    ]
+    for path, role in [(v18_mass_scale_table1()[2], "official SPARC Table1"), (DEFAULT_OBSERVED_STATE_V18_REMAINING_ML_GAP_TEST_OUT / "mts_v18_41_remaining_ml_gap_source_values.csv", "v18.41 M/L source values"), (DEFAULT_OBSERVED_STATE_V18_NON_ML_PROVENANCE_OUT / "mts_v18_50_non_ml_provenance_case_ledger.csv", "v18.50 non-M/L provenance"), (DEFAULT_OBSERVED_STATE_V18_SOURCE_PROVENANCE_OUT / "mts_v18_51_source_provenance_case_verdicts.csv", "v18.51 source-paper provenance"), (DEFAULT_V19_EXTERNAL_TWO_D_ADMISSIBILITY_OUT / "mts_v19_external_2d_admissibility_case_ledger.csv", "v19 external 2D admissibility")]:
+        source_inventory_rows.append({"sourceKind": "local-output", "galaxy": "", "sourceRole": role, "referenceCode": "", "url": "", "cachePath": str(path), "cacheStatus": "available" if path.exists() else "MISSING", "bytes": path.stat().st_size if path.exists() else "", "sha256": file_sha256(path) if path.exists() else "", "largeDownloadAllowed": False, "error": ""})
+    ml_material_count = sum(1 for row in decisions if parse_float(row.get("mlBestGainPct"), 0.0) >= 15.0)
+    protected = [row for row in decisions if row["targetClass"] == "missed protected false activation"]
+    high = [row for row in decisions if row["targetClass"] == "retained high/source-load"]
+    protected_evidence = sum(1 for row in protected if parse_float(row.get("kinematicEvidenceRows"), 0.0) > 0)
+    high_admitted = sum(1 for row in high if "admit source loading" in row["admissibilityDecision"])
+    unresolved = sum(1 for row in decisions if "unresolved" in row["admissibilityDecision"] or "not explained" in row["admissibilityDecision"])
+    if ml_material_count >= 5:
+        verdict = "numeric M/L provenance explains remaining gap"
+    elif protected and protected_evidence == len(protected) and high_admitted >= max(1, math.ceil(0.75 * len(high))):
+        verdict = "2D kinematic provenance explains source admissibility"
+    elif ml_material_count > 0 or protected_evidence > 0 or high_admitted > 0:
+        verdict = "mixed provenance/source-field boundary"
+    elif len(missing_rows) >= len(decisions):
+        verdict = "insufficient external evidence"
+    else:
+        verdict = "missing physical variable remains"
+    write_csv(out_dir / f"{prefix}_source_inventory.csv", source_inventory_rows)
+    write_csv(out_dir / f"{prefix}_case_map.csv", target_rows)
+    write_csv(out_dir / f"{prefix}_ml_priors.csv", ml_rows)
+    write_csv(out_dir / f"{prefix}_kinematic_provenance.csv", kin_rows)
+    write_csv(out_dir / f"{prefix}_admissibility_decisions.csv", decisions)
+    write_csv(out_dir / f"{prefix}_missing_fields.csv", missing_rows)
+    write_csv(out_dir / f"{prefix}_next_candidate_inputs.csv", next_rows)
+    capsule = {"analysisName": "mts-v19-counter-evidence-v1", "verdict": verdict, "targetCount": len(target_rows), "fetchTargetCount": len(source_targets), "availableSourceCount": sum(1 for row in fetch_rows if row["cacheStatus"] == "available"), "mlMaterialCaseCount": ml_material_count, "protectedCounterexampleCount": len(protected), "protectedWithKinematicEvidenceCount": protected_evidence, "retainedHighCount": len(high), "retainedHighAdmittedCount": high_admitted, "unresolvedDecisionCount": unresolved, "largeDownloadsAllowed": False, "canonicalMtsChanged": False, "browserChanged": False, "cacheRoot": str(source_cache)}
+    report = ["# MTS v19.4 Counterexample Source-Evidence Attack", "", "This mode attacks only the named source-admissibility counterexamples. It fetches bounded source pages/tables, joins existing v18/v19 evidence, and does not change any MTS law or browser preset.", "", f"Verdict: `{verdict}`.", f"Targets: `{len(target_rows)}`.", f"Cached source products available: `{capsule['availableSourceCount']}` / `{len(fetch_rows)}`.", f"Material numeric M/L cases: `{ml_material_count}`.", f"Protected counterexamples with kinematic/provenance evidence: `{protected_evidence}` / `{len(protected)}`.", f"Retained-high cases admitted: `{high_admitted}` / `{len(high)}`.", "", "| Galaxy | target | decision | next variable | sources |", "| --- | --- | --- | --- | --- |"]
+    for row in decisions:
+        source_count = len([item for item in row["sourcePaths"].split(";") if item and item != "MISSING"])
+        report.append(f"| {row['galaxy']} | {row['targetClass']} | {row['admissibilityDecision']} | {row['nextPhysicalVariable']} | {source_count if source_count else 'MISSING'} |")
+    report.extend(["", "## Guardrails", "", "- No v18/v19/browser formula changed.", "- No galaxy name, residual, raw RMSE, NFW parameter, or MOND parameter is used as a formula input.", "- Names are used only to fetch and map source evidence.", "- Missing source fields are written explicitly rather than inferred.", "", verdict])
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19counterevidence(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_COUNTER_EVIDENCE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_V19_COUNTER_EVIDENCE_CACHE
+    capsule = write_v19_counter_evidence_artifacts(out_dir, source_cache, args.offline)
+    print("MTS v19.4 counterexample source-evidence attack")
+    print(f"verdict={capsule['verdict']}")
+    print("\t".join([f"targets={capsule['targetCount']}", f"available_sources={capsule['availableSourceCount']}", f"ml_material={capsule['mlMaterialCaseCount']}", f"protected_kin={capsule['protectedWithKinematicEvidenceCount']}", f"high_admit={capsule['retainedHighAdmittedCount']}"]))
+    print(f"Wrote v19.4 counterexample evidence to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -106731,6 +107152,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19external2dparser",
             "v19external2dadmissibility",
             "observedstatev19external2dadmissibility",
+            "v19counterevidence",
+            "observedstatev19counterevidence",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -107164,6 +107587,8 @@ def main() -> None:
         cmd_v19external2dparser(args)
     elif args.mode in {"v19external2dadmissibility", "observedstatev19external2dadmissibility"}:
         cmd_v19external2dadmissibility(args)
+    elif args.mode in {"v19counterevidence", "observedstatev19counterevidence"}:
+        cmd_v19counterevidence(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
