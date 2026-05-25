@@ -238,6 +238,8 @@ DEFAULT_OBSERVED_STATE_V18_REMAINING_ML_GAP_TEST_OUT = OUTPUT_PACK_ROOT / "mts-v
 DEFAULT_OBSERVED_STATE_V18_INDEPENDENT_ML_SOURCE_HUNT_OUT = OUTPUT_PACK_ROOT / "mts-v18-42-independent-ml-source-hunt-v1"
 DEFAULT_OBSERVED_STATE_V18_INDEPENDENT_ML_SOURCE_HUNT_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-independent-ml-source-hunt-v1")
 DEFAULT_OBSERVED_STATE_V18_SOURCE_WIDE_ML_PRIOR_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-43-source-wide-ml-prior-stress-v1"
+DEFAULT_OBSERVED_STATE_V18_UGC08699_SHELF_MECHANISM_OUT = OUTPUT_PACK_ROOT / "mts-v18-44-ugc08699-shelf-mechanism-v1"
+DEFAULT_OBSERVED_STATE_V18_COMPACT_BULGE_COUPLING_OUT = OUTPUT_PACK_ROOT / "mts-v18-45-compact-bulge-coupling-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -82364,6 +82366,756 @@ def cmd_v18sourcewidemlpriorstress(args: argparse.Namespace) -> None:
     print(f"Wrote v18.43 source-wide M/L prior stress to {out_dir.resolve()}")
 
 
+V18_44_UGC08699_PRIMARY_TARGET = "UGC08699"
+V18_44_ML_SENSITIVE_EVAL_TARGETS = {
+    "UGC08699",
+    "NGC5005",
+    "UGC03580",
+    "NGC7814",
+    "NGC5033",
+    "NGC4157",
+    "NGC2403",
+}
+V18_44_SHELF_BETAS = [0.0, 0.04, 0.08, 0.12, 0.16, 0.20, 0.24, 0.28, 0.32]
+V18_44_SHELF_GATE_VARIANTS = [
+    {
+        "gateId": "strict-compact-buffered-low-gas-memory-shelf",
+        "memoryLow": 6.0,
+        "memoryHigh": 8.9,
+        "uMaxLow": 1.40,
+        "uMaxHigh": 1.70,
+        "uOutLow": 0.27,
+        "uOutHigh": 0.36,
+        "hLow": 0.085,
+        "hHigh": 0.135,
+        "fGasHigh": 0.24,
+        "outerGasHigh": 0.28,
+        "mBarLow": 20.0,
+        "mBarHigh": 48.0,
+        "pointLow": 1.05,
+        "pointHigh": 2.25,
+        "barAbsHigh": 18.0,
+    },
+    {
+        "gateId": "balanced-compact-buffered-low-gas-memory-shelf",
+        "memoryLow": 5.4,
+        "memoryHigh": 9.6,
+        "uMaxLow": 1.32,
+        "uMaxHigh": 1.78,
+        "uOutLow": 0.24,
+        "uOutHigh": 0.39,
+        "hLow": 0.070,
+        "hHigh": 0.155,
+        "fGasHigh": 0.30,
+        "outerGasHigh": 0.34,
+        "mBarLow": 15.0,
+        "mBarHigh": 60.0,
+        "pointLow": 0.85,
+        "pointHigh": 2.60,
+        "barAbsHigh": 28.0,
+    },
+    {
+        "gateId": "broad-compact-buffered-low-gas-memory-shelf",
+        "memoryLow": 4.8,
+        "memoryHigh": 10.5,
+        "uMaxLow": 1.22,
+        "uMaxHigh": 1.90,
+        "uOutLow": 0.22,
+        "uOutHigh": 0.42,
+        "hLow": 0.055,
+        "hHigh": 0.180,
+        "fGasHigh": 0.36,
+        "outerGasHigh": 0.40,
+        "mBarLow": 8.0,
+        "mBarHigh": 80.0,
+        "pointLow": 0.65,
+        "pointHigh": 3.20,
+        "barAbsHigh": 45.0,
+    },
+]
+V18_44_SHELF_NULL_SEEDS = [20260681, 20260682, 20260683, 20260684, 20260685, 20260686, 20260687, 20260688, 20260689]
+
+
+def v18_44_ugc08699_shelf_activation_from_values(curve: dict, values: dict, mass: dict, gate: dict) -> float:
+    if curve.get("lockedModelRoute", "") != "buffered single-crossing":
+        return 0.0
+    memory = parse_float(curve.get("memoryLoad"), 0.0)
+    u_out = parse_float(curve.get("lockedModelUOut"), 0.0)
+    u_max = parse_float(curve.get("lockedModelUMax"), 0.0)
+    h_over_rout = parse_float(values.get("hOverRout"), 0.0)
+    f_gas = parse_float(mass.get("tableGasFraction"), 0.0)
+    mbar = parse_float(mass.get("mBar_1e9Msun"), 0.0)
+    outer_gas = parse_float(values.get("outerGasShare"), 0.0)
+    point_density = parse_float(values.get("pointDensity"), 0.0)
+    bar_curv = abs(parse_float(values.get("barCurv"), 0.0))
+    activation = min(
+        v18_nfw_gap_candidate_smooth(memory, gate["memoryLow"], gate["memoryLow"] + 1.2),
+        v18_nfw_gap_candidate_smooth(gate["memoryHigh"] - memory, 0.0, 1.8),
+        v18_nfw_gap_candidate_smooth(u_max, gate["uMaxLow"], gate["uMaxLow"] + 0.18),
+        v18_nfw_gap_candidate_smooth(gate["uMaxHigh"] - u_max, 0.0, 0.20),
+        v18_nfw_gap_candidate_smooth(u_out, gate["uOutLow"], gate["uOutLow"] + 0.06),
+        v18_nfw_gap_candidate_smooth(gate["uOutHigh"] - u_out, 0.0, 0.06),
+        v18_nfw_gap_candidate_smooth(h_over_rout, gate["hLow"], gate["hLow"] + 0.035),
+        v18_nfw_gap_candidate_smooth(gate["hHigh"] - h_over_rout, 0.0, 0.045),
+        v18_nfw_gap_candidate_smooth(gate["fGasHigh"] - f_gas, 0.0, 0.12),
+        v18_nfw_gap_candidate_smooth(gate["outerGasHigh"] - outer_gas, 0.0, 0.14),
+        v18_nfw_gap_candidate_smooth(mbar, gate["mBarLow"], gate["mBarLow"] + 12.0),
+        v18_nfw_gap_candidate_smooth(gate["mBarHigh"] - mbar, 0.0, 18.0),
+        v18_nfw_gap_candidate_smooth(point_density, gate["pointLow"], gate["pointLow"] + 0.55),
+        v18_nfw_gap_candidate_smooth(gate["pointHigh"] - point_density, 0.0, 0.75),
+        v18_nfw_gap_candidate_smooth(gate["barAbsHigh"] - bar_curv, 0.0, max(8.0, gate["barAbsHigh"] * 0.55)),
+    )
+    return clamp(activation, 0.0, 1.0)
+
+
+def v18_44_ugc08699_shelf_activation(curve: dict, gate: dict, table1_by_name: dict[str, dict]) -> tuple[float, dict, dict]:
+    values = observed_state_values(curve)
+    mass = v18_official_mass_scale_features(curve, table1_by_name)
+    return v18_44_ugc08699_shelf_activation_from_values(curve, values, mass, gate), values, mass
+
+
+def v18_44_ugc08699_shelf_apply_supports(curve: dict, base_supports: list[float], beta: float, activation: float) -> list[float]:
+    output: list[float] = []
+    for point, support in zip(curve["points"], base_supports):
+        x_value = point.get("x", point["r"] / max(curve["rOut"], 1.0e-9))
+        shelf_shape = 0.05 + 0.95 * v18_nfw_gap_candidate_smooth(x_value, 0.24, 0.88)
+        factor = 1.0 - beta * activation * shelf_shape
+        output.append(max(0.0, support * clamp(factor, 0.55, 1.05)))
+    return output
+
+
+def v18_44_ugc08699_shelf_base_entries() -> list[dict]:
+    context = observed_state_candidate_context()
+    table1_by_name = v18_mass_scale_table1()[0]
+    base_supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    holdout_names = v18_36_nfw_gap_split_names()[1]
+    entries: list[dict] = []
+    for curve in context["curves"]:
+        name = curve["name"]
+        base_supports = base_supports_by_name.get(name, [])
+        if not base_supports:
+            continue
+        base_score = v18_competitor_support_score(curve, base_supports)
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        values = observed_state_values(curve)
+        mass = v18_official_mass_scale_features(curve, table1_by_name)
+        entries.append(
+            {
+                "curve": curve,
+                "baseSupports": base_supports,
+                "baseScore": base_score,
+                "canonicalScore": canonical,
+                "values": values,
+                "mass": mass,
+                "setLabel": v18_competitor_set_label(name, context["weakNames"], context["highNames"]),
+                "split": "weak-excluded" if name in context["weakNames"] else "holdout" if name in holdout_names else "train",
+                "isWeak": name in context["weakNames"],
+            }
+        )
+    return entries
+
+
+def v18_44_ugc08699_shelf_score_rows(
+    gate: dict,
+    beta: float,
+    forced_activations: dict[str, float] | None = None,
+    base_entries: list[dict] | None = None,
+) -> list[dict]:
+    entries = base_entries if base_entries is not None else v18_44_ugc08699_shelf_base_entries()
+    rows: list[dict] = []
+    for entry in entries:
+        curve = entry["curve"]
+        name = curve["name"]
+        base_supports = entry["baseSupports"]
+        base_score = entry["baseScore"]
+        canonical = entry["canonicalScore"]
+        values = entry["values"]
+        mass = entry["mass"]
+        if forced_activations is not None:
+            activation = clamp(parse_float(forced_activations.get(name), 0.0), 0.0, 1.0)
+        else:
+            activation = v18_44_ugc08699_shelf_activation_from_values(curve, values, mass, gate)
+        if entry["isWeak"]:
+            activation = 0.0
+        candidate_supports = v18_44_ugc08699_shelf_apply_supports(curve, base_supports, beta, activation)
+        candidate = v18_competitor_support_score(curve, candidate_supports)
+        set_label = entry["setLabel"]
+        regression = max(0.0, candidate["rmse"] - base_score["rmse"])
+        rows.append(
+            {
+                "galaxy": name,
+                "set": set_label,
+                "split": entry["split"],
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "gateId": gate["gateId"],
+                "beta": beta,
+                "primaryTarget": name == V18_44_UGC08699_PRIMARY_TARGET,
+                "mlSensitiveEvalTarget": name in V18_44_ML_SENSITIVE_EVAL_TARGETS,
+                "remainingGapClassTarget": name in V18_40_REMAINING_GAP_CLASS_TARGETS,
+                "remainingGapTargetClass": v18_40_remaining_gap_class_target_label(name),
+                "canonicalRmse": canonical["rmse"],
+                "v18_38Rmse": base_score["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "candidateGainVsV18_38KmS": base_score["rmse"] - candidate["rmse"],
+                "candidateGainVsV18_38Pct": pct_improvement(base_score["rmse"], candidate["rmse"]),
+                "candidateRegressionVsV18_38KmS": regression,
+                "candidateRoute": candidate.get("candidateRoute", ""),
+                "routeChangedVsV18_38": candidate.get("candidateRoute", "") != base_score.get("candidateRoute", ""),
+                "activation": activation,
+                "branchHit": activation >= 0.05 and beta > 0.0,
+                "memoryLoad": curve.get("memoryLoad", ""),
+                "u075": curve.get("lockedModelU075", ""),
+                "uOut": curve.get("lockedModelUOut", ""),
+                "uMax": curve.get("lockedModelUMax", ""),
+                "hOverRout": values.get("hOverRout", ""),
+                "outerGasShare": values.get("outerGasShare", ""),
+                "outerDiskShare": values.get("outerDiskShare", ""),
+                "innerGasShare": values.get("innerGasShare", ""),
+                "midGasShare": values.get("midGasShare", ""),
+                "barCurv": values.get("barCurv", ""),
+                "pointDensity": values.get("pointDensity", ""),
+                "mBar_1e9Msun": mass.get("mBar_1e9Msun", ""),
+                "tableGasFraction": mass.get("tableGasFraction", ""),
+                "protectedRegressionVsV18_38KmS": regression if set_label == "clean-protected" else "",
+                "highRegressionVsV18_38KmS": regression if set_label == "clean-high-rmse" else "",
+                "above20Candidate": candidate["rmse"] >= 20.0 if set_label == "clean-high-rmse" else "",
+            }
+        )
+    rows.sort(key=lambda row: row["galaxy"])
+    return rows
+
+
+def v18_44_ugc08699_shelf_metric(rows: list[dict]) -> dict:
+    clean = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+    high = [row for row in clean if row["set"] == "clean-high-rmse"]
+    protected = [row for row in clean if row["set"] == "clean-protected"]
+    primary = [row for row in clean if parse_bool(row.get("primaryTarget"))]
+    ml_targets = [row for row in clean if parse_bool(row.get("mlSensitiveEvalTarget"))]
+    remaining_targets = [row for row in clean if parse_bool(row.get("remainingGapClassTarget"))]
+    active = [row for row in clean if parse_bool(row.get("branchHit"))]
+    protected_regs = [parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) for row in protected]
+    high_regs = [parse_float(row.get("highRegressionVsV18_38KmS"), 0.0) for row in high]
+    return {
+        "gateId": rows[0]["gateId"] if rows else "",
+        "beta": rows[0]["beta"] if rows else 0.0,
+        "cleanCount": len(clean),
+        "activeCleanCount": len(active),
+        "activeHighCount": sum(1 for row in active if row["set"] == "clean-high-rmse"),
+        "activeProtectedCount": sum(1 for row in active if row["set"] == "clean-protected"),
+        "primaryGainKmS": safe_mean(parse_float(row["candidateGainVsV18_38KmS"]) for row in primary),
+        "primaryGainPct": safe_mean(parse_float(row["candidateGainVsV18_38Pct"]) for row in primary),
+        "mlSensitiveTargetGainKmS": safe_mean(parse_float(row["candidateGainVsV18_38KmS"]) for row in ml_targets),
+        "mlSensitiveTargetGainPct": pct_improvement(
+            safe_mean(parse_float(row["v18_38Rmse"]) for row in ml_targets),
+            safe_mean(parse_float(row["candidateRmse"]) for row in ml_targets),
+        ),
+        "remainingGapTargetGainKmS": safe_mean(parse_float(row["candidateGainVsV18_38KmS"]) for row in remaining_targets),
+        "remainingGapTargetGainPct": pct_improvement(
+            safe_mean(parse_float(row["v18_38Rmse"]) for row in remaining_targets),
+            safe_mean(parse_float(row["candidateRmse"]) for row in remaining_targets),
+        ),
+        "highGainPct": pct_improvement(
+            safe_mean(parse_float(row["v18_38Rmse"]) for row in high),
+            safe_mean(parse_float(row["candidateRmse"]) for row in high),
+        ),
+        "cleanGainPct": pct_improvement(
+            safe_mean(parse_float(row["v18_38Rmse"]) for row in clean),
+            safe_mean(parse_float(row["candidateRmse"]) for row in clean),
+        ),
+        "protectedMaxRegressionKmS": max(protected_regs or [0.0]),
+        "protectedWorseOver1Count": sum(1 for value in protected_regs if value > 1.0),
+        "highMaxRegressionKmS": max(high_regs or [0.0]),
+        "highAbove20Count": sum(1 for row in high if parse_bool(row.get("above20Candidate"))),
+        "routeChangedCount": sum(1 for row in clean if parse_bool(row.get("routeChangedVsV18_38"))),
+    }
+
+
+def v18_44_ugc08699_shelf_null_rows(selected_rows: list[dict], gate: dict, beta: float, base_entries: list[dict]) -> list[dict]:
+    active_values = sorted([parse_float(row.get("activation"), 0.0) for row in selected_rows if parse_bool(row.get("branchHit"))], reverse=True)
+    eligible = [
+        row for row in selected_rows
+        if row["set"] != "weak-systematics-excluded" and row["lockedRoute"] == "buffered single-crossing"
+    ]
+    rows: list[dict] = []
+    for seed in V18_44_SHELF_NULL_SEEDS:
+        rng = random.Random(seed)
+        names = [row["galaxy"] for row in eligible]
+        chosen = rng.sample(names, min(len(names), len(active_values))) if active_values else []
+        forced = {name: active_values[index % len(active_values)] for index, name in enumerate(sorted(chosen))} if active_values else {}
+        trial_rows = v18_44_ugc08699_shelf_score_rows(gate, beta, forced, base_entries)
+        metric = v18_44_ugc08699_shelf_metric(trial_rows)
+        rows.append(
+            {
+                "nullType": "same-active-random-buffered-shelf",
+                "seed": seed,
+                "activeCount": len(active_values),
+                **metric,
+            }
+        )
+    rows.sort(key=lambda row: (row["nullType"], row["seed"]))
+    return rows
+
+
+def write_v18_ugc08699_shelf_mechanism_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_44_ugc08699_shelf_mechanism"
+    base_entries = v18_44_ugc08699_shelf_base_entries()
+    grid_rows: list[dict] = []
+    trial_cache: dict[tuple[str, float], list[dict]] = {}
+    for gate in V18_44_SHELF_GATE_VARIANTS:
+        for beta in V18_44_SHELF_BETAS:
+            rows = v18_44_ugc08699_shelf_score_rows(gate, beta, base_entries=base_entries)
+            trial_cache[(gate["gateId"], beta)] = rows
+            metric = v18_44_ugc08699_shelf_metric(rows)
+            grid_rows.append(metric)
+    viable = [
+        row for row in grid_rows
+        if parse_float(row["primaryGainKmS"], -999.0) > 0.0
+        and parse_float(row["protectedMaxRegressionKmS"], 999.0) <= 1.0
+        and parse_float(row["highMaxRegressionKmS"], 999.0) <= 1.0
+        and parse_float(row["highAbove20Count"], 999.0) == 0
+        and parse_float(row["routeChangedCount"], 999.0) == 0
+        and parse_float(row["activeProtectedCount"], 999.0) == 0
+    ]
+    selected = max(
+        viable or grid_rows,
+        key=lambda row: (
+            parse_float(row["primaryGainKmS"], -999.0),
+            parse_float(row["mlSensitiveTargetGainPct"], -999.0),
+            -parse_float(row["protectedMaxRegressionKmS"], 999.0),
+            -parse_float(row["highMaxRegressionKmS"], 999.0),
+        ),
+    )
+    selected_gate = next(gate for gate in V18_44_SHELF_GATE_VARIANTS if gate["gateId"] == selected["gateId"])
+    selected_rows = trial_cache[(selected["gateId"], parse_float(selected["beta"]))]
+    null_rows = v18_44_ugc08699_shelf_null_rows(selected_rows, selected_gate, parse_float(selected["beta"]), base_entries)
+    safe_nulls = [row for row in null_rows if parse_float(row["protectedMaxRegressionKmS"], 0.0) <= 1.0 and parse_float(row["highMaxRegressionKmS"], 0.0) <= 1.0]
+    best_null_primary = max((parse_float(row["primaryGainKmS"], -999.0) for row in safe_nulls), default=math.nan)
+    null_margin = parse_float(selected["primaryGainKmS"], -999.0) - best_null_primary if math.isfinite(best_null_primary) else math.nan
+    passes = {
+        "primaryTargetImprovesAtLeast1KmS": parse_float(selected["primaryGainKmS"], 0.0) >= 1.0,
+        "mlSensitiveTargetMeanImproves": parse_float(selected["mlSensitiveTargetGainKmS"], 0.0) > 0.0,
+        "protectedMaxRegressionAtMost1KmS": parse_float(selected["protectedMaxRegressionKmS"], 999.0) <= 1.0,
+        "activeProtectedZero": parse_float(selected["activeProtectedCount"], 999.0) == 0,
+        "highMaxRegressionAtMost1KmS": parse_float(selected["highMaxRegressionKmS"], 999.0) <= 1.0,
+        "highAbove20Zero": parse_float(selected["highAbove20Count"], 999.0) == 0,
+        "routeChangesZero": parse_float(selected["routeChangedCount"], 999.0) == 0,
+        "beatsSafeNullPrimaryBy1KmS": math.isfinite(null_margin) and null_margin >= 1.0,
+        "weakLeakageZero": True,
+    }
+    if all(passes.values()):
+        verdict = "UGC08699 shelf mechanism candidate for review"
+    elif parse_float(selected["primaryGainKmS"], 0.0) > 0.0 and parse_float(selected["protectedMaxRegressionKmS"], 999.0) <= 1.0:
+        verdict = "UGC08699 shelf mechanism local but not null-hardened"
+    elif parse_float(selected["primaryGainKmS"], 0.0) > 0.0:
+        verdict = "UGC08699 shelf mechanism unsafe"
+    else:
+        verdict = "UGC08699 shelf mechanism not supported"
+    active_rows = [row for row in selected_rows if parse_bool(row.get("branchHit"))]
+    target_rows = [row for row in selected_rows if parse_bool(row.get("primaryTarget")) or parse_bool(row.get("mlSensitiveEvalTarget"))]
+    protected_rows = [row for row in selected_rows if row["set"] == "clean-protected" and parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) > 0.0]
+    formula = {
+        "candidateId": "observed-state-response-v18.44-ugc08699-shelf-mechanism",
+        "baseLaw": "locked v18.38 support field",
+        "status": verdict,
+        "lawChanged": False,
+        "mechanism": "state-gated mid/outer support suppression for compact buffered low-gas high-memory shelf systems",
+        "selectedGate": selected_gate,
+        "selectedBeta": selected["beta"],
+        "supportShape": "S_candidate(r)=S_v18.38(r)*(1-beta*activation*(0.05+0.95*smooth(x,0.24,0.88)))",
+        "allowedInputs": ["locked route", "memoryLoad", "uOut", "uMax", "h/rOut", "gas fraction", "outer gas share", "baryonic mass scale", "point density", "bar curvature"],
+        "forbiddenInputs": ["galaxy name", "raw residual", "raw RMSE", "NFW parameters", "per-galaxy M/L", "weak/systematics cases"],
+    }
+    score_row = {
+        "candidateId": formula["candidateId"],
+        "verdict": verdict,
+        "bestSafeNullPrimaryGainKmS": best_null_primary,
+        "safeNullPrimaryMarginKmS": null_margin,
+        **selected,
+        **{f"pass_{key}": value for key, value in passes.items()},
+        "weakSystematicsLeakage": 0,
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_row])
+    write_csv(out_dir / f"{prefix}_grid_scores.csv", grid_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", selected_rows)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", target_rows)
+    write_csv(out_dir / f"{prefix}_active_ledger.csv", active_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.44 UGC08699 Shelf Mechanism Test",
+        "",
+        "This is a direct mechanism test prompted by the source-wide M/L stress. It does not change stellar M/L; it tests whether the same movement can be represented as a narrow pre-residual state/profile support-shelf response.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Selected gate: `{selected['gateId']}`.",
+        f"- Selected beta: `{fmt(selected['beta'])}`.",
+        f"- UGC08699 gain: `{fmt(selected['primaryGainKmS'])}` km/s / `{fmt(selected['primaryGainPct'])}%`.",
+        f"- M/L-sensitive target mean gain: `{fmt(selected['mlSensitiveTargetGainKmS'])}` km/s / `{fmt(selected['mlSensitiveTargetGainPct'])}%`.",
+        f"- Remaining-gap target mean gain: `{fmt(selected['remainingGapTargetGainKmS'])}` km/s / `{fmt(selected['remainingGapTargetGainPct'])}%`.",
+        f"- Clean high-RMSE gain: `{fmt(selected['highGainPct'])}%`.",
+        f"- Protected max regression: `{fmt(selected['protectedMaxRegressionKmS'])}` km/s.",
+        f"- High max regression: `{fmt(selected['highMaxRegressionKmS'])}` km/s.",
+        f"- Active protected cases: `{selected['activeProtectedCount']}`.",
+        f"- Safe-null UGC08699 margin: `{fmt(null_margin)}` km/s.",
+        "",
+        "## Changed / Target Cases",
+        "",
+        "| Galaxy | Set | Route | activation | v18.38 | candidate | gain |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in sorted(target_rows, key=lambda item: -parse_float(item["candidateGainVsV18_38KmS"])):
+        report.append(
+            f"| {row['galaxy']} | {row['set']} | {row['lockedRoute']} | {fmt(row['activation'])} | {fmt(row['v18_38Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['candidateGainVsV18_38KmS'])} |"
+        )
+    report.extend(["", "## Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.append("")
+    report.append(verdict)
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-44-ugc08699-shelf-mechanism-v1",
+        "candidateId": formula["candidateId"],
+        "verdict": verdict,
+        "summary": score_row,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_grid_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_active_ledger.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18ugc08699shelfmechanism(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_UGC08699_SHELF_MECHANISM_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_ugc08699_shelf_mechanism_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.44 UGC08699 shelf mechanism test")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"gate={summary['gateId']}",
+                f"beta={fmt(summary['beta'])}",
+                f"ugc08699_gain={fmt(summary['primaryGainKmS'])}",
+                f"ml_target_gain={fmt(summary['mlSensitiveTargetGainKmS'])}",
+                f"protected={fmt(summary['protectedMaxRegressionKmS'])}",
+                f"null_margin={fmt(summary['safeNullPrimaryMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18.44 UGC08699 shelf mechanism test to {out_dir.resolve()}")
+
+
+V18_45_BULGE_COUPLING_BULGE_ETAS = [0.00, 0.05, 0.10, 0.14, 0.18, 0.22, 0.26, 0.30]
+V18_45_BULGE_COUPLING_DISK_ETAS = [0.00, 0.04]
+V18_45_BULGE_COUPLING_NULL_SEEDS = [20260691, 20260692, 20260693, 20260694, 20260695, 20260696, 20260697, 20260698, 20260699]
+
+
+def v18_45_compact_bulge_coupling_curve(curve: dict, activation: float, disk_eta: float, bulge_eta: float) -> dict:
+    disk_factor = math.sqrt(clamp(1.0 - disk_eta * activation, 0.35, 1.05))
+    bulge_factor = math.sqrt(clamp(1.0 - bulge_eta * activation, 0.35, 1.05))
+    points: list[dict] = []
+    for point in curve["points"]:
+        new_point = dict(point)
+        new_point["vDisk"] = parse_float(point.get("vDisk"), 0.0) * disk_factor
+        new_point["vBulge"] = parse_float(point.get("vBulge"), 0.0) * bulge_factor
+        new_point["bar2"] = (
+            parse_float(new_point.get("vGas"), 0.0) ** 2
+            + ML_DISK * parse_float(new_point.get("vDisk"), 0.0) ** 2
+            + ML_BULGE * parse_float(new_point.get("vBulge"), 0.0) ** 2
+        )
+        points.append(new_point)
+    updated = dict(curve)
+    updated["points"] = points
+    return updated
+
+
+def v18_45_compact_bulge_coupling_score_rows(
+    gate: dict,
+    disk_eta: float,
+    bulge_eta: float,
+    forced_activations: dict[str, float] | None = None,
+    base_entries: list[dict] | None = None,
+) -> list[dict]:
+    entries = base_entries if base_entries is not None else v18_44_ugc08699_shelf_base_entries()
+    rows: list[dict] = []
+    for entry in entries:
+        curve = entry["curve"]
+        name = curve["name"]
+        base_score = entry["baseScore"]
+        canonical = entry["canonicalScore"]
+        values = entry["values"]
+        mass = entry["mass"]
+        if forced_activations is not None:
+            activation = clamp(parse_float(forced_activations.get(name), 0.0), 0.0, 1.0)
+        else:
+            activation = v18_44_ugc08699_shelf_activation_from_values(curve, values, mass, gate)
+        if entry["isWeak"]:
+            activation = 0.0
+        candidate_curve = v18_45_compact_bulge_coupling_curve(curve, activation, disk_eta, bulge_eta)
+        candidate = v18_competitor_support_score(candidate_curve, entry["baseSupports"])
+        set_label = entry["setLabel"]
+        regression = max(0.0, candidate["rmse"] - base_score["rmse"])
+        rows.append(
+            {
+                "galaxy": name,
+                "set": set_label,
+                "split": entry["split"],
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "gateId": gate["gateId"],
+                "beta": "",
+                "diskEta": disk_eta,
+                "bulgeEta": bulge_eta,
+                "primaryTarget": name == V18_44_UGC08699_PRIMARY_TARGET,
+                "mlSensitiveEvalTarget": name in V18_44_ML_SENSITIVE_EVAL_TARGETS,
+                "remainingGapClassTarget": name in V18_40_REMAINING_GAP_CLASS_TARGETS,
+                "remainingGapTargetClass": v18_40_remaining_gap_class_target_label(name),
+                "canonicalRmse": canonical["rmse"],
+                "v18_38Rmse": base_score["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "candidateGainVsV18_38KmS": base_score["rmse"] - candidate["rmse"],
+                "candidateGainVsV18_38Pct": pct_improvement(base_score["rmse"], candidate["rmse"]),
+                "candidateRegressionVsV18_38KmS": regression,
+                "candidateRoute": candidate.get("candidateRoute", ""),
+                "routeChangedVsV18_38": candidate.get("candidateRoute", "") != base_score.get("candidateRoute", ""),
+                "activation": activation,
+                "branchHit": activation >= 0.05 and (disk_eta > 0.0 or bulge_eta > 0.0),
+                "memoryLoad": curve.get("memoryLoad", ""),
+                "u075": curve.get("lockedModelU075", ""),
+                "uOut": curve.get("lockedModelUOut", ""),
+                "uMax": curve.get("lockedModelUMax", ""),
+                "hOverRout": values.get("hOverRout", ""),
+                "outerGasShare": values.get("outerGasShare", ""),
+                "outerDiskShare": values.get("outerDiskShare", ""),
+                "innerGasShare": values.get("innerGasShare", ""),
+                "midGasShare": values.get("midGasShare", ""),
+                "barCurv": values.get("barCurv", ""),
+                "pointDensity": values.get("pointDensity", ""),
+                "mBar_1e9Msun": mass.get("mBar_1e9Msun", ""),
+                "tableGasFraction": mass.get("tableGasFraction", ""),
+                "protectedRegressionVsV18_38KmS": regression if set_label == "clean-protected" else "",
+                "highRegressionVsV18_38KmS": regression if set_label == "clean-high-rmse" else "",
+                "above20Candidate": candidate["rmse"] >= 20.0 if set_label == "clean-high-rmse" else "",
+            }
+        )
+    rows.sort(key=lambda row: row["galaxy"])
+    return rows
+
+
+def v18_45_compact_bulge_coupling_metric(rows: list[dict]) -> dict:
+    metric = v18_44_ugc08699_shelf_metric(rows)
+    metric["diskEta"] = rows[0]["diskEta"] if rows else 0.0
+    metric["bulgeEta"] = rows[0]["bulgeEta"] if rows else 0.0
+    return metric
+
+
+def v18_45_compact_bulge_coupling_null_rows(selected_rows: list[dict], gate: dict, disk_eta: float, bulge_eta: float, base_entries: list[dict]) -> list[dict]:
+    active_values = sorted([parse_float(row.get("activation"), 0.0) for row in selected_rows if parse_bool(row.get("branchHit"))], reverse=True)
+    eligible = [
+        row for row in selected_rows
+        if row["set"] != "weak-systematics-excluded" and row["lockedRoute"] == "buffered single-crossing"
+    ]
+    rows: list[dict] = []
+    for seed in V18_45_BULGE_COUPLING_NULL_SEEDS:
+        rng = random.Random(seed)
+        names = [row["galaxy"] for row in eligible]
+        chosen = rng.sample(names, min(len(names), len(active_values))) if active_values else []
+        forced = {name: active_values[index % len(active_values)] for index, name in enumerate(sorted(chosen))} if active_values else {}
+        trial_rows = v18_45_compact_bulge_coupling_score_rows(gate, disk_eta, bulge_eta, forced, base_entries)
+        metric = v18_45_compact_bulge_coupling_metric(trial_rows)
+        rows.append(
+            {
+                "nullType": "same-active-random-buffered-bulge-coupling",
+                "seed": seed,
+                "activeCount": len(active_values),
+                **metric,
+            }
+        )
+    rows.sort(key=lambda row: (row["nullType"], row["seed"]))
+    return rows
+
+
+def write_v18_compact_bulge_coupling_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_45_compact_bulge_coupling"
+    base_entries = v18_44_ugc08699_shelf_base_entries()
+    grid_rows: list[dict] = []
+    trial_cache: dict[tuple[str, float, float], list[dict]] = {}
+    for gate in V18_44_SHELF_GATE_VARIANTS:
+        for disk_eta in V18_45_BULGE_COUPLING_DISK_ETAS:
+            for bulge_eta in V18_45_BULGE_COUPLING_BULGE_ETAS:
+                rows = v18_45_compact_bulge_coupling_score_rows(gate, disk_eta, bulge_eta, base_entries=base_entries)
+                trial_cache[(gate["gateId"], disk_eta, bulge_eta)] = rows
+                grid_rows.append(v18_45_compact_bulge_coupling_metric(rows))
+    viable = [
+        row for row in grid_rows
+        if parse_float(row["primaryGainKmS"], -999.0) >= 1.0
+        and parse_float(row["protectedMaxRegressionKmS"], 999.0) <= 1.0
+        and parse_float(row["highMaxRegressionKmS"], 999.0) <= 1.0
+        and parse_float(row["highAbove20Count"], 999.0) == 0
+        and parse_float(row["routeChangedCount"], 999.0) == 0
+        and parse_float(row["activeProtectedCount"], 999.0) == 0
+    ]
+    selected = max(
+        viable or grid_rows,
+        key=lambda row: (
+            parse_float(row["primaryGainKmS"], -999.0),
+            parse_float(row["mlSensitiveTargetGainPct"], -999.0),
+            -parse_float(row["protectedMaxRegressionKmS"], 999.0),
+            -parse_float(row["highMaxRegressionKmS"], 999.0),
+        ),
+    )
+    selected_gate = next(gate for gate in V18_44_SHELF_GATE_VARIANTS if gate["gateId"] == selected["gateId"])
+    selected_rows = trial_cache[(selected["gateId"], parse_float(selected["diskEta"]), parse_float(selected["bulgeEta"]))]
+    null_rows = v18_45_compact_bulge_coupling_null_rows(
+        selected_rows,
+        selected_gate,
+        parse_float(selected["diskEta"]),
+        parse_float(selected["bulgeEta"]),
+        base_entries,
+    )
+    safe_nulls = [row for row in null_rows if parse_float(row["protectedMaxRegressionKmS"], 0.0) <= 1.0 and parse_float(row["highMaxRegressionKmS"], 0.0) <= 1.0]
+    best_null_primary = max((parse_float(row["primaryGainKmS"], -999.0) for row in safe_nulls), default=math.nan)
+    null_margin = parse_float(selected["primaryGainKmS"], -999.0) - best_null_primary if math.isfinite(best_null_primary) else math.nan
+    passes = {
+        "primaryTargetImprovesAtLeast3KmS": parse_float(selected["primaryGainKmS"], 0.0) >= 3.0,
+        "mlSensitiveTargetMeanImproves": parse_float(selected["mlSensitiveTargetGainKmS"], 0.0) > 0.0,
+        "protectedMaxRegressionAtMost1KmS": parse_float(selected["protectedMaxRegressionKmS"], 999.0) <= 1.0,
+        "activeProtectedZero": parse_float(selected["activeProtectedCount"], 999.0) == 0,
+        "highMaxRegressionAtMost1KmS": parse_float(selected["highMaxRegressionKmS"], 999.0) <= 1.0,
+        "highAbove20Zero": parse_float(selected["highAbove20Count"], 999.0) == 0,
+        "routeChangesZero": parse_float(selected["routeChangedCount"], 999.0) == 0,
+        "beatsSafeNullPrimaryBy3KmS": math.isfinite(null_margin) and null_margin >= 3.0,
+        "weakLeakageZero": True,
+    }
+    if all(passes.values()):
+        verdict = "compact bulge-coupling mechanism candidate for review"
+    elif parse_float(selected["primaryGainKmS"], 0.0) >= 3.0 and parse_float(selected["protectedMaxRegressionKmS"], 999.0) <= 1.0:
+        verdict = "compact bulge-coupling mechanism local but not null-hardened"
+    elif parse_float(selected["primaryGainKmS"], 0.0) > 0.0:
+        verdict = "compact bulge-coupling mechanism unsafe or too narrow"
+    else:
+        verdict = "compact bulge-coupling mechanism not supported"
+    active_rows = [row for row in selected_rows if parse_bool(row.get("branchHit"))]
+    target_rows = [row for row in selected_rows if parse_bool(row.get("primaryTarget")) or parse_bool(row.get("mlSensitiveEvalTarget"))]
+    protected_rows = [row for row in selected_rows if row["set"] == "clean-protected" and parse_float(row.get("protectedRegressionVsV18_38KmS"), 0.0) > 0.0]
+    formula = {
+        "candidateId": "observed-state-response-v18.45-compact-bulge-coupling",
+        "baseLaw": "locked v18.38 support field",
+        "status": verdict,
+        "lawChanged": False,
+        "mechanism": "state-gated stellar bulge/disk coupling relief for compact buffered low-gas high-memory systems",
+        "selectedGate": selected_gate,
+        "selectedDiskEta": selected["diskEta"],
+        "selectedBulgeEta": selected["bulgeEta"],
+        "effectiveComponentRule": "vDisk_eff=vDisk*sqrt(1-diskEta*activation); vBulge_eff=vBulge*sqrt(1-bulgeEta*activation)",
+        "allowedInputs": ["locked route", "memoryLoad", "uOut", "uMax", "h/rOut", "gas fraction", "outer gas share", "baryonic mass scale", "point density", "bar curvature"],
+        "forbiddenInputs": ["galaxy name", "raw residual", "raw RMSE", "NFW parameters", "per-galaxy M/L table", "weak/systematics cases"],
+    }
+    score_row = {
+        "candidateId": formula["candidateId"],
+        "verdict": verdict,
+        "bestSafeNullPrimaryGainKmS": best_null_primary,
+        "safeNullPrimaryMarginKmS": null_margin,
+        **selected,
+        **{f"pass_{key}": value for key, value in passes.items()},
+        "weakSystematicsLeakage": 0,
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_row])
+    write_csv(out_dir / f"{prefix}_grid_scores.csv", grid_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", selected_rows)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", target_rows)
+    write_csv(out_dir / f"{prefix}_active_ledger.csv", active_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.45 Compact Bulge-Coupling Mechanism Test",
+        "",
+        "This follows the v18.43/v18.44 evidence: UGC08699 moves under a bulge-light source-wide prior, but not under pure MTS support suppression. This mode tests a state-gated baryonic coupling response using only pre-residual state/profile variables.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Selected gate: `{selected['gateId']}`.",
+        f"- Selected disk eta: `{fmt(selected['diskEta'])}`; bulge eta: `{fmt(selected['bulgeEta'])}`.",
+        f"- UGC08699 gain: `{fmt(selected['primaryGainKmS'])}` km/s / `{fmt(selected['primaryGainPct'])}%`.",
+        f"- M/L-sensitive target mean gain: `{fmt(selected['mlSensitiveTargetGainKmS'])}` km/s / `{fmt(selected['mlSensitiveTargetGainPct'])}%`.",
+        f"- Remaining-gap target mean gain: `{fmt(selected['remainingGapTargetGainKmS'])}` km/s / `{fmt(selected['remainingGapTargetGainPct'])}%`.",
+        f"- Clean high-RMSE gain: `{fmt(selected['highGainPct'])}%`.",
+        f"- Protected max regression: `{fmt(selected['protectedMaxRegressionKmS'])}` km/s.",
+        f"- High max regression: `{fmt(selected['highMaxRegressionKmS'])}` km/s.",
+        f"- Active protected cases: `{selected['activeProtectedCount']}`.",
+        f"- Safe-null UGC08699 margin: `{fmt(null_margin)}` km/s.",
+        "",
+        "## Target Cases",
+        "",
+        "| Galaxy | Set | Route | activation | v18.38 | candidate | gain |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in sorted(target_rows, key=lambda item: -parse_float(item["candidateGainVsV18_38KmS"])):
+        report.append(
+            f"| {row['galaxy']} | {row['set']} | {row['lockedRoute']} | {fmt(row['activation'])} | {fmt(row['v18_38Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['candidateGainVsV18_38KmS'])} |"
+        )
+    report.extend(["", "## Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.append("")
+    report.append(verdict)
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-45-compact-bulge-coupling-v1",
+        "candidateId": formula["candidateId"],
+        "verdict": verdict,
+        "summary": score_row,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_grid_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_active_ledger.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18compactbulgecoupling(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_COMPACT_BULGE_COUPLING_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_compact_bulge_coupling_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.45 compact bulge-coupling mechanism test")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"gate={summary['gateId']}",
+                f"disk_eta={fmt(summary['diskEta'])}",
+                f"bulge_eta={fmt(summary['bulgeEta'])}",
+                f"ugc08699_gain={fmt(summary['primaryGainKmS'])}",
+                f"protected={fmt(summary['protectedMaxRegressionKmS'])}",
+                f"null_margin={fmt(summary['safeNullPrimaryMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18.45 compact bulge-coupling mechanism test to {out_dir.resolve()}")
+
+
 V18_LEGACY_VBAR_SHAPE_SEEDS = [20260523, 20260524, 271828, 314159, 42, 12345, 8675309, 19, 31]
 V18_LEGACY_VBAR_SHAPE_ADD_BETAS = [0.25, 0.35, 0.45, 0.60, 0.75]
 V18_LEGACY_VBAR_SHAPE_RELIEF_BETAS = [0.15, 0.25, 0.35, 0.45, 0.60]
@@ -99463,6 +100215,10 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18independentmlsourcehunt",
             "v18sourcewidemlpriorstress",
             "observedstatev18sourcewidemlpriorstress",
+            "v18ugc08699shelfmechanism",
+            "observedstatev18ugc08699shelfmechanism",
+            "v18compactbulgecoupling",
+            "observedstatev18compactbulgecoupling",
             "v18legacyvbarshape",
             "observedstatev18legacyvbarshape",
             "v18legacyvbarpolarity",
@@ -99854,6 +100610,10 @@ def main() -> None:
         cmd_v18independentmlsourcehunt(args)
     elif args.mode in {"v18sourcewidemlpriorstress", "observedstatev18sourcewidemlpriorstress"}:
         cmd_v18sourcewidemlpriorstress(args)
+    elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
+        cmd_v18ugc08699shelfmechanism(args)
+    elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
+        cmd_v18compactbulgecoupling(args)
     elif args.mode in {"v18legacyvbarshape", "observedstatev18legacyvbarshape"}:
         cmd_v18legacyvbarshape(args)
     elif args.mode in {"v18legacyvbarpolarity", "observedstatev18legacyvbarpolarity"}:
