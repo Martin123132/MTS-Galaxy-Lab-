@@ -241,6 +241,7 @@ DEFAULT_OBSERVED_STATE_V18_SOURCE_WIDE_ML_PRIOR_STRESS_OUT = OUTPUT_PACK_ROOT / 
 DEFAULT_OBSERVED_STATE_V18_UGC08699_SHELF_MECHANISM_OUT = OUTPUT_PACK_ROOT / "mts-v18-44-ugc08699-shelf-mechanism-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPACT_BULGE_COUPLING_OUT = OUTPUT_PACK_ROOT / "mts-v18-45-compact-bulge-coupling-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPACT_BULGE_COUPLING_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-v18-46-compact-bulge-coupling-harden-v1"
+DEFAULT_OBSERVED_STATE_V18_BULGE_COUPLING_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-v18-47-bulge-coupling-discriminator-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -83353,6 +83354,262 @@ def cmd_v18compactbulgecouplingharden(args: argparse.Namespace) -> None:
     print(f"Wrote v18.46 compact bulge-coupling hardening to {out_dir.resolve()}")
 
 
+def v18_47_bulge_discriminator(values: dict, curve: dict) -> float:
+    return min(
+        v18_nfw_gap_candidate_smooth(parse_float(values.get("innerBulgeShare"), 0.0), 0.52, 0.62),
+        v18_nfw_gap_candidate_smooth(parse_float(values.get("midBulgeShare"), 0.0), 0.24, 0.34),
+        v18_nfw_gap_candidate_smooth(parse_float(values.get("outerBulgeShare"), 0.0), 0.20, 0.30),
+        v18_nfw_gap_candidate_smooth(parse_float(values.get("barMidOuter"), 0.0), 1.22, 1.40),
+        v18_nfw_gap_candidate_smooth(1.64 - parse_float(curve.get("lockedModelUMax"), 0.0), 0.0, 0.18),
+        v18_nfw_gap_candidate_smooth(parse_float(values.get("pointDensity"), 0.0), 1.20, 1.75),
+    )
+
+
+def v18_47_score_rows(base_entries: list[dict] | None = None, forced_activations: dict[str, float] | None = None) -> list[dict]:
+    entries = base_entries if base_entries is not None else v18_44_ugc08699_shelf_base_entries()
+    selected_gate = next(gate for gate in V18_44_SHELF_GATE_VARIANTS if gate["gateId"] == "balanced-compact-buffered-low-gas-memory-shelf")
+    rows: list[dict] = []
+    for entry in entries:
+        curve = entry["curve"]
+        name = curve["name"]
+        values = entry["values"]
+        mass = entry["mass"]
+        base_activation = v18_44_ugc08699_shelf_activation_from_values(curve, values, mass, selected_gate)
+        discriminator = v18_47_bulge_discriminator(values, curve)
+        activation = clamp(base_activation * discriminator, 0.0, 1.0)
+        if forced_activations is not None:
+            activation = clamp(parse_float(forced_activations.get(name), 0.0), 0.0, 1.0)
+        if entry["isWeak"]:
+            activation = 0.0
+        candidate_curve = v18_45_compact_bulge_coupling_curve(curve, activation, 0.0, 0.30)
+        candidate = v18_competitor_support_score(candidate_curve, entry["baseSupports"])
+        base_score = entry["baseScore"]
+        set_label = entry["setLabel"]
+        regression = max(0.0, candidate["rmse"] - base_score["rmse"])
+        rows.append(
+            {
+                "galaxy": name,
+                "set": set_label,
+                "split": entry["split"],
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "gateId": "balanced-compact-buffered-low-gas-memory-shelf-with-bulge-discriminator",
+                "beta": "",
+                "diskEta": 0.0,
+                "bulgeEta": 0.30,
+                "baseActivation": base_activation,
+                "bulgeDiscriminator": discriminator,
+                "activation": activation,
+                "branchHit": activation >= 0.05,
+                "primaryTarget": name == V18_44_UGC08699_PRIMARY_TARGET,
+                "mlSensitiveEvalTarget": name in V18_44_ML_SENSITIVE_EVAL_TARGETS,
+                "canonicalRmse": entry["canonicalScore"]["rmse"],
+                "v18_38Rmse": base_score["rmse"],
+                "candidateRmse": candidate["rmse"],
+                "candidateGainVsV18_38KmS": base_score["rmse"] - candidate["rmse"],
+                "candidateGainVsV18_38Pct": pct_improvement(base_score["rmse"], candidate["rmse"]),
+                "candidateRegressionVsV18_38KmS": regression,
+                "candidateRoute": candidate.get("candidateRoute", ""),
+                "routeChangedVsV18_38": candidate.get("candidateRoute", "") != base_score.get("candidateRoute", ""),
+                "memoryLoad": curve.get("memoryLoad", ""),
+                "u075": curve.get("lockedModelU075", ""),
+                "uOut": curve.get("lockedModelUOut", ""),
+                "uMax": curve.get("lockedModelUMax", ""),
+                "hOverRout": values.get("hOverRout", ""),
+                "innerBulgeShare": values.get("innerBulgeShare", ""),
+                "midBulgeShare": values.get("midBulgeShare", ""),
+                "outerBulgeShare": values.get("outerBulgeShare", ""),
+                "barMidOuter": values.get("barMidOuter", ""),
+                "barInnerOuter": values.get("barInnerOuter", ""),
+                "outerGasShare": values.get("outerGasShare", ""),
+                "tableGasFraction": mass.get("tableGasFraction", ""),
+                "mBar_1e9Msun": mass.get("mBar_1e9Msun", ""),
+                "pointDensity": values.get("pointDensity", ""),
+                "barCurv": values.get("barCurv", ""),
+                "protectedRegressionVsV18_38KmS": regression if set_label == "clean-protected" else "",
+                "highRegressionVsV18_38KmS": regression if set_label == "clean-high-rmse" else "",
+                "above20Candidate": candidate["rmse"] >= 20.0 if set_label == "clean-high-rmse" else "",
+            }
+        )
+    rows.sort(key=lambda row: row["galaxy"])
+    return rows
+
+
+def v18_47_enriched_feature_vector(row: dict) -> list[float]:
+    return v18_46_feature_vector(row) + [
+        parse_float(row.get("innerBulgeShare"), 0.0),
+        parse_float(row.get("midBulgeShare"), 0.0),
+        parse_float(row.get("outerBulgeShare"), 0.0),
+        parse_float(row.get("barMidOuter"), 0.0) / 2.0,
+        parse_float(row.get("barInnerOuter"), 0.0) / 2.0,
+    ]
+
+
+def v18_47_analogue_rows(rows: list[dict]) -> list[dict]:
+    primary = next(row for row in rows if row["galaxy"] == V18_44_UGC08699_PRIMARY_TARGET)
+    primary_vec = v18_47_enriched_feature_vector(primary)
+    output: list[dict] = []
+    for row in rows:
+        if row["set"] == "weak-systematics-excluded" or row["lockedRoute"] != "buffered single-crossing":
+            continue
+        output.append(
+            {
+                "galaxy": row["galaxy"],
+                "set": row["set"],
+                "lockedRoute": row["lockedRoute"],
+                "enrichedDistanceFromUGC08699": v18_46_distance(primary_vec, v18_47_enriched_feature_vector(row)),
+                "baseActivation": row["baseActivation"],
+                "bulgeDiscriminator": row["bulgeDiscriminator"],
+                "activation": row["activation"],
+                "candidateGainVsV18_38KmS": row["candidateGainVsV18_38KmS"],
+                "innerBulgeShare": row["innerBulgeShare"],
+                "midBulgeShare": row["midBulgeShare"],
+                "outerBulgeShare": row["outerBulgeShare"],
+                "barMidOuter": row["barMidOuter"],
+                "pointDensity": row["pointDensity"],
+                "uMax": row["uMax"],
+            }
+        )
+    output.sort(key=lambda row: (parse_float(row["enrichedDistanceFromUGC08699"]), row["galaxy"]))
+    return output
+
+
+def v18_47_null_rows(selected_rows: list[dict], base_entries: list[dict]) -> list[dict]:
+    active_values = sorted([parse_float(row.get("activation"), 0.0) for row in selected_rows if parse_bool(row.get("branchHit"))], reverse=True)
+    eligible = [row for row in selected_rows if row["set"] != "weak-systematics-excluded" and row["lockedRoute"] == "buffered single-crossing"]
+    rows: list[dict] = []
+    for seed in V18_45_BULGE_COUPLING_NULL_SEEDS:
+        rng = random.Random(seed)
+        names = [row["galaxy"] for row in eligible]
+        chosen = rng.sample(names, min(len(names), len(active_values))) if active_values else []
+        forced = {name: active_values[index % len(active_values)] for index, name in enumerate(sorted(chosen))} if active_values else {}
+        trial_rows = v18_47_score_rows(base_entries, forced)
+        metric = v18_45_compact_bulge_coupling_metric(trial_rows)
+        rows.append({"nullType": "same-active-random-buffered-bulge-discriminator", "seed": seed, "activeCount": len(active_values), **metric})
+    return rows
+
+
+def write_v18_bulge_coupling_discriminator_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_47_bulge_coupling_discriminator"
+    base_entries = v18_44_ugc08699_shelf_base_entries()
+    rows = v18_47_score_rows(base_entries)
+    metric = v18_45_compact_bulge_coupling_metric(rows)
+    null_rows = v18_47_null_rows(rows, base_entries)
+    safe_nulls = [row for row in null_rows if parse_float(row["protectedMaxRegressionKmS"], 0.0) <= 1.0 and parse_float(row["highMaxRegressionKmS"], 0.0) <= 1.0]
+    best_null_primary = max((parse_float(row["primaryGainKmS"], -999.0) for row in safe_nulls), default=math.nan)
+    null_margin = parse_float(metric["primaryGainKmS"], -999.0) - best_null_primary if math.isfinite(best_null_primary) else math.nan
+    analogue_rows = v18_47_analogue_rows(rows)
+    nearest_protected = min((parse_float(row["enrichedDistanceFromUGC08699"], math.inf) for row in analogue_rows if row["set"] == "clean-protected"), default=math.nan)
+    active_rows = [row for row in rows if parse_bool(row["branchHit"])]
+    protected_rows = [row for row in rows if row["set"] == "clean-protected" and parse_float(row["protectedRegressionVsV18_38KmS"], 0.0) > 0.0]
+    target_rows = [row for row in rows if parse_bool(row["primaryTarget"]) or parse_bool(row["mlSensitiveEvalTarget"])]
+    passes = {
+        "primaryTargetImprovesAtLeast3KmS": parse_float(metric["primaryGainKmS"], 0.0) >= 3.0,
+        "activeCleanCountAtMost2": parse_float(metric["activeCleanCount"], 99.0) <= 2,
+        "activeProtectedZero": parse_float(metric["activeProtectedCount"], 99.0) == 0,
+        "protectedMaxRegressionZero": parse_float(metric["protectedMaxRegressionKmS"], 99.0) == 0.0,
+        "highAbove20Zero": parse_float(metric["highAbove20Count"], 99.0) == 0,
+        "routeChangesZero": parse_float(metric["routeChangedCount"], 99.0) == 0,
+        "beatsSafeNullPrimaryBy3KmS": math.isfinite(null_margin) and null_margin >= 3.0,
+        "nearestProtectedEnrichedDistanceAtLeast0p25": math.isfinite(nearest_protected) and nearest_protected >= 0.25,
+        "weakLeakageZero": True,
+    }
+    verdict = "bulge-coupling discriminator candidate for release review" if all(passes.values()) else "bulge-coupling discriminator still narrow"
+    score_row = {
+        "candidateId": "observed-state-response-v18.47-bulge-coupling-discriminator",
+        "verdict": verdict,
+        "bestSafeNullPrimaryGainKmS": best_null_primary,
+        "safeNullPrimaryMarginKmS": null_margin,
+        "nearestProtectedEnrichedDistance": nearest_protected,
+        **metric,
+        **{f"pass_{key}": value for key, value in passes.items()},
+        "weakSystematicsLeakage": 0,
+    }
+    formula = {
+        "candidateId": score_row["candidateId"],
+        "baseLaw": "v18.45 compact bulge-coupling branch",
+        "status": verdict,
+        "mechanism": "adds bulge-share/bar-shape discriminator to compact buffered bulge-coupling relief",
+        "componentRule": "vBulge_eff=vBulge*sqrt(1-0.30*activation)",
+        "activation": "balanced compact buffered low-gas memory shelf gate times bulge discriminator",
+        "bulgeDiscriminatorInputs": ["innerBulgeShare", "midBulgeShare", "outerBulgeShare", "barMidOuter", "uMax", "pointDensity"],
+        "forbiddenInputs": ["galaxy name", "raw residual", "raw RMSE", "NFW parameters", "per-galaxy M/L table", "weak/systematics cases"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", [score_row])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", rows)
+    write_csv(out_dir / f"{prefix}_active_ledger.csv", active_rows)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", target_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_analogue_ledger.csv", analogue_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.47 Bulge-Coupling Discriminator",
+        "",
+        "This tests whether the v18.45 UGC08699 branch can be separated from protected lookalikes using pre-residual bulge/profile variables.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- UGC08699 gain: `{fmt(metric['primaryGainKmS'])}` km/s / `{fmt(metric['primaryGainPct'])}%`.",
+        f"- Active clean cases: `{metric['activeCleanCount']}`; active protected cases: `{metric['activeProtectedCount']}`.",
+        f"- Protected max regression: `{fmt(metric['protectedMaxRegressionKmS'])}` km/s.",
+        f"- Safe-null primary margin: `{fmt(null_margin)}` km/s.",
+        f"- Nearest protected enriched distance: `{fmt(nearest_protected)}`.",
+        "",
+        "## Active Cases",
+        "",
+        "| Galaxy | Set | activation | v18.38 | candidate | gain |",
+        "| --- | --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in active_rows:
+        report.append(f"| {row['galaxy']} | {row['set']} | {fmt(row['activation'])} | {fmt(row['v18_38Rmse'])} | {fmt(row['candidateRmse'])} | {fmt(row['candidateGainVsV18_38KmS'])} |")
+    report.extend(["", "## Gates", "", "| Gate | Pass |", "| --- | ---: |"])
+    for key, value in passes.items():
+        report.append(f"| {key} | `{value}` |")
+    report.append("")
+    report.append(verdict)
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v18-47-bulge-coupling-discriminator-v1",
+        "candidateId": score_row["candidateId"],
+        "verdict": verdict,
+        "summary": score_row,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_active_ledger.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_analogue_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v18bulgecouplingdiscriminator(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_BULGE_COUPLING_DISCRIMINATOR_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v18_bulge_coupling_discriminator_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v18.47 bulge-coupling discriminator")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"ugc08699_gain={fmt(summary['primaryGainKmS'])}",
+                f"active_clean={summary['activeCleanCount']}",
+                f"protected={fmt(summary['protectedMaxRegressionKmS'])}",
+                f"null_margin={fmt(summary['safeNullPrimaryMarginKmS'])}",
+                f"nearest_protected={fmt(summary['nearestProtectedEnrichedDistance'])}",
+            ]
+        )
+    )
+    print(f"Wrote v18.47 bulge-coupling discriminator to {out_dir.resolve()}")
+
+
 V18_LEGACY_VBAR_SHAPE_SEEDS = [20260523, 20260524, 271828, 314159, 42, 12345, 8675309, 19, 31]
 V18_LEGACY_VBAR_SHAPE_ADD_BETAS = [0.25, 0.35, 0.45, 0.60, 0.75]
 V18_LEGACY_VBAR_SHAPE_RELIEF_BETAS = [0.15, 0.25, 0.35, 0.45, 0.60]
@@ -100458,6 +100715,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18compactbulgecoupling",
             "v18compactbulgecouplingharden",
             "observedstatev18compactbulgecouplingharden",
+            "v18bulgecouplingdiscriminator",
+            "observedstatev18bulgecouplingdiscriminator",
             "v18legacyvbarshape",
             "observedstatev18legacyvbarshape",
             "v18legacyvbarpolarity",
@@ -100855,6 +101114,8 @@ def main() -> None:
         cmd_v18compactbulgecoupling(args)
     elif args.mode in {"v18compactbulgecouplingharden", "observedstatev18compactbulgecouplingharden"}:
         cmd_v18compactbulgecouplingharden(args)
+    elif args.mode in {"v18bulgecouplingdiscriminator", "observedstatev18bulgecouplingdiscriminator"}:
+        cmd_v18bulgecouplingdiscriminator(args)
     elif args.mode in {"v18legacyvbarshape", "observedstatev18legacyvbarshape"}:
         cmd_v18legacyvbarshape(args)
     elif args.mode in {"v18legacyvbarpolarity", "observedstatev18legacyvbarpolarity"}:
