@@ -257,6 +257,8 @@ DEFAULT_V19_FIELD_COHERENCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-field-coherence-v1
 DEFAULT_V19_DISTRIBUTED_FLOW_OUT = OUTPUT_PACK_ROOT / "mts-v19-distributed-flow-v1"
 DEFAULT_V19_SOURCE_ENVIRONMENT_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-environment-v1"
 DEFAULT_V19_TWO_D_SOURCE_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-two-d-source-field-v1"
+DEFAULT_V19_EXTERNAL_TWO_D_ACQUIRE_OUT = OUTPUT_PACK_ROOT / "mts-v19-external-2d-acquisition-v1"
+DEFAULT_V19_EXTERNAL_TWO_D_ACQUIRE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-external-2d-acquisition-v1")
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -104907,6 +104909,371 @@ def cmd_v19twodsourcefield(args: argparse.Namespace) -> None:
     print(f"Wrote v19 2D source-field audit to {out_dir.resolve()}")
 
 
+V19_EXTERNAL_TWO_D_SOURCES = [
+    {
+        "sourceId": "cds-ghasp-108",
+        "family": "GHASP Halpha velocity fields",
+        "urls": [
+            "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/MNRAS/388/500?format=html&tex=true",
+            "https://cdsarc.cds.unistra.fr/ftp/J/MNRAS/388/500/tablef.dat",
+        ],
+        "dataKind": "2D velocity-field survey plus rotation curves",
+        "independent2DUse": "Halpha velocity fields, residual velocity fields, and rotation curves where target overlap exists",
+    },
+    {
+        "sourceId": "cds-ghasp-153",
+        "family": "GHASP Halpha data cubes catalogue",
+        "urls": [
+            "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/MNRAS/401/2113?format=html&tex=true",
+        ],
+        "dataKind": "2D Halpha data cubes catalogue metadata",
+        "independent2DUse": "catalogue-level overlap scout only; cubes are not downloaded",
+    },
+    {
+        "sourceId": "cds-blais-halpha-hi",
+        "family": "Blais-Ouellette Halpha/HI comparison",
+        "urls": [
+            "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/A%2BA/420/147?format=html&tex=true",
+            "https://cdsarc.cds.unistra.fr/ftp/J/A+A/420/147/tablea1.dat",
+            "https://cdsarc.cds.unistra.fr/ftp/J/A+A/420/147/tablea2.dat",
+            "https://cdsarc.cds.unistra.fr/ftp/J/A+A/420/147/tablea3.dat",
+            "https://cdsarc.cds.unistra.fr/ftp/J/A+A/420/147/tablea4.dat",
+            "https://cdsarc.cds.unistra.fr/ftp/J/A+A/420/147/tablea5.dat",
+            "https://cdsarc.cds.unistra.fr/ftp/J/A+A/420/147/tablea6.dat",
+        ],
+        "dataKind": "approaching/receding Halpha rotation-curve tables",
+        "independent2DUse": "beam-smearing and side-asymmetry evidence for named SPARC overlaps",
+    },
+    {
+        "sourceId": "cds-s4g-lopsidedness",
+        "family": "S4G stellar lopsidedness",
+        "urls": [
+            "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/ApJ/772/135?format=html&tex=true",
+        ],
+        "dataKind": "stellar lopsidedness / morphology catalogue",
+        "independent2DUse": "stellar asymmetry and lopsidedness proxy if target overlap exists",
+    },
+    {
+        "sourceId": "cds-whisp-morphology",
+        "family": "WHISP morphology parameters",
+        "urls": [
+            "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/MNRAS/416/2415?format=html&tex=true",
+        ],
+        "dataKind": "HI morphology/asymmetry catalogue",
+        "independent2DUse": "HI morphology and asymmetry proxy if target overlap exists",
+    },
+    {
+        "sourceId": "cds-amiga-hi-asymmetry",
+        "family": "AMIGA HI profile asymmetry",
+        "urls": [
+            "https://cdsarc.cds.unistra.fr/viz-bin/ReadMe/J/A%2BA/532/A117?format=html&tex=true",
+        ],
+        "dataKind": "HI profile asymmetry catalogue",
+        "independent2DUse": "profile asymmetry/environment proxy; not full velocity-field evidence",
+    },
+    {
+        "sourceId": "arxiv-whisp-lopsidedness",
+        "family": "WHISP kinematic lopsidedness paper",
+        "urls": [
+            "https://arxiv.org/abs/1103.4928",
+        ],
+        "dataKind": "paper/source landing page",
+        "independent2DUse": "identifies kinematic lopsidedness classes; no large products downloaded",
+    },
+    {
+        "sourceId": "arxiv-things-atlas",
+        "family": "THINGS HI atlas",
+        "urls": [
+            "https://arxiv.org/abs/0810.2125",
+        ],
+        "dataKind": "paper/source landing page",
+        "independent2DUse": "velocity-field/dispersion atlas pointer; no cubes downloaded",
+    },
+]
+
+
+def v19_external_2d_slug(source_id: str, url: str) -> str:
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
+    tail = re.sub(r"[^A-Za-z0-9]+", "-", urllib.parse.urlparse(url).path.strip("/")).strip("-")[:46]
+    return f"{source_id}-{tail}-{digest}".strip("-") or f"{source_id}-{digest}"
+
+
+def v19_external_2d_fetch(url: str, path: Path, offline: bool, max_bytes: int = 2_000_000) -> dict:
+    if path.exists():
+        data = path.read_bytes()
+        return {"cacheStatus": "available", "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "error": ""}
+    if offline:
+        return {"cacheStatus": "missing-offline", "bytes": 0, "sha256": "", "error": "offline and not cached"}
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "MTS-Galaxy-Lab/2D-source-scout"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = response.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            return {"cacheStatus": "skipped-too-large", "bytes": len(data), "sha256": "", "error": f"exceeds {max_bytes} byte cap"}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return {"cacheStatus": "available", "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "error": ""}
+    except Exception as exc:  # noqa: BLE001 - provenance fetch must record failures, not crash the audit.
+        return {"cacheStatus": "fetch-error", "bytes": 0, "sha256": "", "error": str(exc)[:240]}
+
+
+def v19_external_2d_norm_name(name: str) -> str:
+    raw = str(name).upper().replace("_", "").replace(" ", "")
+    return re.sub(r"[^A-Z0-9]", "", raw)
+
+
+def v19_external_2d_name_variants(name: str) -> set[str]:
+    compact = v19_external_2d_norm_name(name)
+    variants = {compact}
+    match = re.match(r"^(NGC|UGC|DDO|IC|ESO|F|PGC|KK)(0*)([A-Z0-9]+)$", compact)
+    if match:
+        prefix, _zeros, rest = match.groups()
+        variants.add(prefix + rest)
+        if rest.isdigit():
+            variants.add(prefix + rest.zfill(4))
+            variants.add(prefix + rest.zfill(5))
+    return variants
+
+
+def v19_external_2d_targets() -> list[dict]:
+    source_dir = DEFAULT_V19_TWO_D_SOURCE_FIELD_OUT
+    case_path = source_dir / "mts_v19_two_d_source_field_case_ledger.csv"
+    if not case_path.exists():
+        write_v19_twod_source_field_artifacts(source_dir)
+    rows = read_csv_rows(case_path) if case_path.exists() else []
+    targets = []
+    for row in rows:
+        priority = 1
+        if row.get("sourceClass") == "protected-false-activation":
+            priority = 1
+        elif parse_float(row.get("v18RepairRetentionPct"), 0.0) >= 70.0:
+            priority = 2
+        else:
+            priority = 3
+        targets.append(
+            {
+                "galaxy": row.get("galaxy", ""),
+                "sourceClass": row.get("sourceClass", ""),
+                "lockedRoute": row.get("lockedRoute", ""),
+                "priority": priority,
+                "qualityCode": row.get("qualityCode", ""),
+                "referenceCodes": row.get("referenceCodes", ""),
+                "nameVariants": ";".join(sorted(v19_external_2d_name_variants(row.get("galaxy", "")))),
+            }
+        )
+    targets.sort(key=lambda item: (parse_float(item["priority"]), item["galaxy"]))
+    return targets
+
+
+def v19_external_2d_scan_text(text: str, target: dict) -> tuple[bool, str, str]:
+    compact_text = v19_external_2d_norm_name(text)
+    variants = [variant for variant in target.get("nameVariants", "").split(";") if variant]
+    matched = [variant for variant in variants if variant and variant in compact_text]
+    lowered = text.lower()
+    keywords = [
+        "velocity field",
+        "residual velocity",
+        "non-circular",
+        "non circular",
+        "warp",
+        "bar",
+        "lopsided",
+        "asymmetry",
+        "asymmetric",
+        "approaching",
+        "receding",
+        "beam",
+        "dispersion",
+        "moment",
+        "kinematic",
+    ]
+    hits = [keyword for keyword in keywords if keyword in lowered]
+    return bool(matched), ";".join(matched[:5]), ";".join(hits)
+
+
+def write_v19_external_2d_acquisition_artifacts(out_dir: Path, source_cache: Path, offline: bool) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source_cache.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_external_2d"
+    targets = v19_external_2d_targets()
+    source_rows = []
+    fetch_rows = []
+    hit_rows = []
+    for source in V19_EXTERNAL_TWO_D_SOURCES:
+        source_rows.append(
+            {
+                "sourceId": source["sourceId"],
+                "family": source["family"],
+                "dataKind": source["dataKind"],
+                "independent2DUse": source["independent2DUse"],
+                "urlCount": len(source["urls"]),
+                "largeDownloadsAllowed": False,
+            }
+        )
+        combined_text = ""
+        combined_paths = []
+        for url in source["urls"]:
+            path = source_cache / source["sourceId"] / v19_external_2d_slug(source["sourceId"], url)
+            status = v19_external_2d_fetch(url, path, offline)
+            fetch_rows.append(
+                {
+                    "sourceId": source["sourceId"],
+                    "family": source["family"],
+                    "url": url,
+                    "cachePath": str(path),
+                    **status,
+                }
+            )
+            if path.exists() and status["cacheStatus"] not in {"skipped-too-large"}:
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    text = path.read_bytes().decode("latin-1", errors="ignore")
+                combined_text += "\n" + html.unescape(re.sub(r"<[^>]+>", " ", text))
+                combined_paths.append(str(path))
+        for target in targets:
+            matched, variants, keyword_hits = v19_external_2d_scan_text(combined_text, target)
+            if matched or keyword_hits:
+                source_has_2d_terms = any(
+                    term in keyword_hits
+                    for term in ["velocity field", "residual velocity", "non-circular", "non circular", "warp", "lopsided", "asymmetry", "approaching", "receding", "dispersion"]
+                )
+                direct_candidate = matched and source_has_2d_terms
+                hit_rows.append(
+                    {
+                        "galaxy": target["galaxy"],
+                        "sourceClass": target["sourceClass"],
+                        "priority": target["priority"],
+                        "sourceId": source["sourceId"],
+                        "family": source["family"],
+                        "matchedName": matched,
+                        "matchedVariants": variants,
+                        "keywordHits": keyword_hits,
+                        "directExternal2DCandidate": direct_candidate,
+                        "dataKind": source["dataKind"],
+                        "cachePaths": ";".join(combined_paths),
+                        "nextAction": "parse/import source-specific 2D table" if direct_candidate else "source family context only",
+                    }
+                )
+    direct_hits = [row for row in hit_rows if parse_bool(row.get("directExternal2DCandidate"))]
+    target_direct = sorted({row["galaxy"] for row in direct_hits})
+    false_direct = sorted({row["galaxy"] for row in direct_hits if row["sourceClass"] == "protected-false-activation"})
+    high_direct = sorted({row["galaxy"] for row in direct_hits if row["sourceClass"] == "retained-high-source-load"})
+    summary_rows = [
+        {"metric": "targetCount", "value": len(targets)},
+        {"metric": "sourceFamilyCount", "value": len(V19_EXTERNAL_TWO_D_SOURCES)},
+        {"metric": "fetchRows", "value": len(fetch_rows)},
+        {"metric": "availableCacheRows", "value": sum(1 for row in fetch_rows if row["cacheStatus"] == "available")},
+        {"metric": "directExternal2DTargetCount", "value": len(target_direct)},
+        {"metric": "directExternal2DFalseActivationCount", "value": len(false_direct)},
+        {"metric": "directExternal2DRetainedHighCount", "value": len(high_direct)},
+        {"metric": "largeDownloadsAllowed", "value": False},
+    ]
+    if len(target_direct) >= 5 and false_direct and high_direct:
+        verdict = "external 2D parser target found"
+    elif len(target_direct) > 0:
+        verdict = "partial external 2D overlap found"
+    else:
+        verdict = "no small external 2D overlap found yet"
+    write_csv(out_dir / f"{prefix}_targets.csv", targets)
+    write_csv(out_dir / f"{prefix}_source_inventory.csv", source_rows)
+    write_csv(out_dir / f"{prefix}_fetch_inventory.csv", fetch_rows)
+    write_csv(out_dir / f"{prefix}_hit_ledger.csv", hit_rows)
+    write_csv(out_dir / f"{prefix}_summary.csv", summary_rows)
+    next_actions = []
+    if direct_hits:
+        for source_id in sorted({row["sourceId"] for row in direct_hits}):
+            source_direct = [row for row in direct_hits if row["sourceId"] == source_id]
+            next_actions.append(
+                {
+                    "sourceId": source_id,
+                    "directTargetCount": len({row["galaxy"] for row in source_direct}),
+                    "targets": ";".join(sorted({row["galaxy"] for row in source_direct})),
+                    "recommendedNextMode": "v19external2dparser",
+                    "action": "parse source-specific tables into 2D admissibility variables",
+                }
+            )
+    else:
+        next_actions.append(
+            {
+                "sourceId": "none",
+                "directTargetCount": 0,
+                "targets": "",
+                "recommendedNextMode": "external 2D data-provider/manual source expansion",
+                "action": "add source manifest URLs for papers/catalogues with actual velocity-field asymmetry, warp, bar, or residual maps",
+            }
+        )
+    write_csv(out_dir / f"{prefix}_next_actions.csv", next_actions)
+    report = [
+        "# MTS v19 External 2D Source Acquisition",
+        "",
+        "This pass tries to acquire independent external 2D/source-field evidence before building our own descriptors. It caches only bounded catalogue pages and small ASCII tables on D:, and it does not score or change MTS.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Targets searched: `{len(targets)}`.",
+        f"Source families: `{len(V19_EXTERNAL_TWO_D_SOURCES)}`.",
+        f"Available cached source products: `{sum(1 for row in fetch_rows if row['cacheStatus'] == 'available')}` / `{len(fetch_rows)}`.",
+        f"Direct external 2D target overlaps: `{len(target_direct)}`.",
+        f"False-activation overlaps: `{len(false_direct)}`.",
+        f"Retained-high overlaps: `{len(high_direct)}`.",
+        "",
+        "## Direct Overlap Targets",
+        "",
+        "; ".join(target_direct) if target_direct else "None found in this bounded scout.",
+        "",
+        "## Next Action",
+        "",
+        next_actions[0]["action"],
+        "",
+        verdict,
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-external-2d-acquisition-v1",
+        "verdict": verdict,
+        "targetCount": len(targets),
+        "sourceFamilyCount": len(V19_EXTERNAL_TWO_D_SOURCES),
+        "directExternal2DTargetCount": len(target_direct),
+        "directExternal2DFalseActivationCount": len(false_direct),
+        "directExternal2DRetainedHighCount": len(high_direct),
+        "largeDownloadsAllowed": False,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "cacheRoot": str(source_cache),
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_targets.csv",
+            f"{prefix}_source_inventory.csv",
+            f"{prefix}_fetch_inventory.csv",
+            f"{prefix}_hit_ledger.csv",
+            f"{prefix}_summary.csv",
+            f"{prefix}_next_actions.csv",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19external2dacquire(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_EXTERNAL_TWO_D_ACQUIRE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_V19_EXTERNAL_TWO_D_ACQUIRE_CACHE
+    capsule = write_v19_external_2d_acquisition_artifacts(out_dir, source_cache, args.offline)
+    print("MTS v19 external 2D source acquisition")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"targets={capsule['targetCount']}",
+                f"sources={capsule['sourceFamilyCount']}",
+                f"direct_targets={capsule['directExternal2DTargetCount']}",
+                f"cache={capsule['cacheRoot']}",
+            ]
+        )
+    )
+    print(f"Wrote v19 external 2D acquisition to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -105158,6 +105525,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19sourceenvironment",
             "v19twodsourcefield",
             "observedstatev19twodsourcefield",
+            "v19external2dacquire",
+            "observedstatev19external2dacquire",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -105585,6 +105954,8 @@ def main() -> None:
         cmd_v19sourceenvironment(args)
     elif args.mode in {"v19twodsourcefield", "observedstatev19twodsourcefield"}:
         cmd_v19twodsourcefield(args)
+    elif args.mode in {"v19external2dacquire", "observedstatev19external2dacquire"}:
+        cmd_v19external2dacquire(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
