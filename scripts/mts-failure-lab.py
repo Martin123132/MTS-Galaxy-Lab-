@@ -242,6 +242,7 @@ DEFAULT_OBSERVED_STATE_V18_UGC08699_SHELF_MECHANISM_OUT = OUTPUT_PACK_ROOT / "mt
 DEFAULT_OBSERVED_STATE_V18_COMPACT_BULGE_COUPLING_OUT = OUTPUT_PACK_ROOT / "mts-v18-45-compact-bulge-coupling-v1"
 DEFAULT_OBSERVED_STATE_V18_COMPACT_BULGE_COUPLING_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-v18-46-compact-bulge-coupling-harden-v1"
 DEFAULT_OBSERVED_STATE_V18_BULGE_COUPLING_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-v18-47-bulge-coupling-discriminator-v1"
+DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_CLOSURE_OUT = OUTPUT_PACK_ROOT / "mts-v18-48-ml-provenance-closure-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -82368,6 +82369,266 @@ def cmd_v18sourcewidemlpriorstress(args: argparse.Namespace) -> None:
     print(f"Wrote v18.43 source-wide M/L prior stress to {out_dir.resolve()}")
 
 
+def v18_48_ml_provenance_closure_rows(
+    li_best_rows: list[dict],
+    independent_case_rows: list[dict],
+    sourcewide_best_rows: list[dict],
+    v47_target_rows: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    li_by_name = {row["galaxy"]: row for row in li_best_rows}
+    independent_by_name = {row["galaxy"]: row for row in independent_case_rows}
+    sourcewide_by_name = {row["galaxy"]: row for row in sourcewide_best_rows}
+    v47_by_name = {row["galaxy"]: row for row in v47_target_rows}
+    case_rows: list[dict] = []
+    next_rows: list[dict] = []
+    for name in V18_42_INDEPENDENT_ML_TARGETS:
+        li = li_by_name.get(name, {})
+        independent = independent_by_name.get(name, {})
+        sourcewide = sourcewide_by_name.get(name, {})
+        v47 = v47_by_name.get(name, {})
+        li_gain = parse_float(li.get("bestGainVsV18_38KmS"), 0.0)
+        sourcewide_gain = parse_float(sourcewide.get("bestGainVsV18_38KmS"), 0.0)
+        usable_independent = int(parse_float(independent.get("usableIndependentCandidateCount"), 0.0))
+        sourcewide_method = int(parse_float(independent.get("sourceWideMethodCount"), 0.0))
+        fitted_count = int(parse_float(independent.get("rejectedFittedMlCount"), 0.0))
+        v47_gain = parse_float(v47.get("candidateGainVsV18_38KmS"), 0.0)
+        best_available_gain = max(li_gain, sourcewide_gain, v47_gain)
+        if usable_independent > 0:
+            verdict = "independent numeric M/L rescore candidate"
+            driver = "independent per-galaxy M/L table"
+            next_action = "manual-confirm source context, then run fixed-value M/L rescore outside the transport formula"
+            framework_class = "mass-model convention test ready"
+        elif li_gain >= 1.0 and sourcewide_gain < 1.0:
+            verdict = "halo-fit M/L explains gap only"
+            driver = "Li+ halo-fit Ydisk/Ybul"
+            next_action = "do not put fitted M/L into MTS; classify as competitor/provenance gap"
+            framework_class = "mass-model/provenance driven"
+        elif v47_gain >= 1.0 and v47_gain >= sourcewide_gain + 0.5 and v47_gain >= li_gain + 0.5:
+            verdict = "state/anatomy branch stronger than M/L"
+            driver = "v18.47 compact bulge anatomy"
+            next_action = "keep branch as named NFW-gap anatomy; seek provenance for protected analogues"
+            framework_class = "framework-anatomy facing"
+        elif sourcewide_gain >= 1.0:
+            verdict = "source-wide M/L prior moves gap"
+            driver = "source-wide stellar population prior"
+            next_action = "test only as global observational prior, not per-galaxy repair"
+            framework_class = "source-wide mass-model sensitivity"
+        elif best_available_gain >= 0.5:
+            verdict = "weak M/L/provenance sensitivity"
+            driver = "mixed weak evidence"
+            next_action = "do not tune formula; carry as low-priority provenance note"
+            framework_class = "weak provenance sensitivity"
+        else:
+            verdict = "not explained by current M/L evidence"
+            driver = "none"
+            next_action = "treat remaining gap as fitted-halo flexibility or missing state/provenance"
+            framework_class = "not M/L driven"
+        case_rows.append(
+            {
+                "galaxy": name,
+                "targetClass": li.get("targetClass", sourcewide.get("targetClass", v18_40_remaining_gap_class_target_label(name))),
+                "lockedRoute": sourcewide.get("lockedRoute", ""),
+                "v18_38Rmse": li.get("v18_38Rmse", sourcewide.get("v18_38Rmse", "")),
+                "li2020BestVariant": li.get("bestVariantId", ""),
+                "li2020BestYdisk": parse_float(li.get("bestYdisk"), math.nan),
+                "li2020BestYbul": parse_float(li.get("bestYbul"), math.nan),
+                "li2020BestGainKmS": li_gain,
+                "sourceWideBestVariant": sourcewide.get("bestVariantId", ""),
+                "sourceWideBestMlDisk": parse_float(sourcewide.get("bestMlDisk"), math.nan),
+                "sourceWideBestMlBulge": parse_float(sourcewide.get("bestMlBulge"), math.nan),
+                "sourceWideBestGainKmS": sourcewide_gain,
+                "independentUsableMlCount": usable_independent,
+                "independentSourceWideMethodCount": sourcewide_method,
+                "independentRejectedFittedMlCount": fitted_count,
+                "independentVerdict": independent.get("verdict", ""),
+                "v18_47GainKmS": v47_gain,
+                "bestAvailableGainKmS": best_available_gain,
+                "primaryDriver": driver,
+                "closureVerdict": verdict,
+                "frameworkClass": framework_class,
+                "nextAction": next_action,
+            }
+        )
+        next_rows.append(
+            {
+                "galaxy": name,
+                "priority": "high" if verdict in {"independent numeric M/L rescore candidate", "source-wide M/L prior moves gap", "state/anatomy branch stronger than M/L"} else "medium" if best_available_gain >= 0.5 else "low",
+                "testType": framework_class,
+                "specificNextStep": next_action,
+                "doNotDo": "do not use fitted halo M/L, NFW parameters, raw residuals, or galaxy-name branches as MTS formula inputs",
+            }
+        )
+    return case_rows, next_rows
+
+
+def write_v18_ml_provenance_closure_artifacts(out_dir: Path, source_cache: Path, offline: bool) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source_cache.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v18_48_ml_provenance_closure"
+
+    v41_dir = DEFAULT_OBSERVED_STATE_V18_REMAINING_ML_GAP_TEST_OUT
+    v42_dir = DEFAULT_OBSERVED_STATE_V18_INDEPENDENT_ML_SOURCE_HUNT_OUT
+    v43_dir = DEFAULT_OBSERVED_STATE_V18_SOURCE_WIDE_ML_PRIOR_STRESS_OUT
+    v47_dir = DEFAULT_OBSERVED_STATE_V18_BULGE_COUPLING_DISCRIMINATOR_OUT
+    if not (v41_dir / "mts_v18_41_remaining_ml_gap_target_best_oracle.csv").exists():
+        write_v18_remaining_ml_gap_test_artifacts(v41_dir, DEFAULT_OBSERVED_STATE_V18_ML_CATALOG_BENCHMARK_CACHE, offline)
+    if not (v42_dir / "mts_v18_42_independent_ml_source_hunt_case_verdicts.csv").exists():
+        write_v18_independent_ml_source_hunt_artifacts(v42_dir, source_cache, offline)
+    if not (v43_dir / "mts_v18_43_source_wide_ml_prior_stress_target_best.csv").exists():
+        write_v18_source_wide_ml_prior_stress_artifacts(v43_dir)
+    if not (v47_dir / "mts_v18_47_bulge_coupling_discriminator_target_ledger.csv").exists():
+        write_v18_bulge_coupling_discriminator_artifacts(v47_dir)
+
+    li_best_rows = read_csv_rows(v41_dir / "mts_v18_41_remaining_ml_gap_target_best_oracle.csv")
+    li_source_value_rows = read_csv_rows(v41_dir / "mts_v18_41_remaining_ml_gap_source_values.csv")
+    independent_case_rows = read_csv_rows(v42_dir / "mts_v18_42_independent_ml_source_hunt_case_verdicts.csv")
+    independent_evidence_rows = read_csv_rows(v42_dir / "mts_v18_42_independent_ml_source_hunt_evidence_table.csv")
+    sourcewide_best_rows = read_csv_rows(v43_dir / "mts_v18_43_source_wide_ml_prior_stress_target_best.csv")
+    sourcewide_scores = read_csv_rows(v43_dir / "mts_v18_43_source_wide_ml_prior_stress_scores.csv")
+    v47_target_rows = read_csv_rows(v47_dir / "mts_v18_47_bulge_coupling_discriminator_target_ledger.csv")
+
+    case_rows, next_rows = v18_48_ml_provenance_closure_rows(li_best_rows, independent_case_rows, sourcewide_best_rows, v47_target_rows)
+    source_values = [row for row in li_source_value_rows if row.get("galaxy") in set(V18_42_INDEPENDENT_ML_TARGETS)]
+    evidence_rows = [row for row in independent_evidence_rows if row.get("galaxy") in set(V18_42_INDEPENDENT_ML_TARGETS)]
+    sourcewide_best_score = max(
+        [row for row in sourcewide_scores if row.get("split") == "all" and row.get("variantId") != "fixed-sparc-ml"],
+        key=lambda row: parse_float(row.get("targetGainVsV18_38Pct"), -999.0),
+        default={},
+    )
+    verdict_counts: dict[str, int] = {}
+    for row in case_rows:
+        verdict_counts[row["closureVerdict"]] = verdict_counts.get(row["closureVerdict"], 0) + 1
+    if verdict_counts.get("independent numeric M/L rescore candidate", 0) > 0:
+        verdict = "external M/L rescore ready for subset"
+    elif verdict_counts.get("source-wide M/L prior moves gap", 0) >= 3:
+        verdict = "remaining gap partly source-wide M/L sensitive"
+    elif verdict_counts.get("halo-fit M/L explains gap only", 0) >= 3:
+        verdict = "remaining gap mostly halo-fit provenance sensitivity"
+    else:
+        verdict = "remaining gap not closed by numeric M/L evidence"
+    scores = [
+        {"metric": "targetCount", "value": len(case_rows)},
+        {"metric": "independentUsableCaseCount", "value": sum(1 for row in case_rows if int(row["independentUsableMlCount"]) > 0)},
+        {"metric": "haloFitMlOnlyCaseCount", "value": verdict_counts.get("halo-fit M/L explains gap only", 0)},
+        {"metric": "sourceWideMlSensitiveCaseCount", "value": verdict_counts.get("source-wide M/L prior moves gap", 0)},
+        {"metric": "stateAnatomyStrongerThanMlCount", "value": verdict_counts.get("state/anatomy branch stronger than M/L", 0)},
+        {"metric": "notMlDrivenCaseCount", "value": verdict_counts.get("not explained by current M/L evidence", 0)},
+        {"metric": "bestSourceWideVariant", "value": sourcewide_best_score.get("variantId", "")},
+        {"metric": "bestSourceWideTargetGainPct", "value": sourcewide_best_score.get("targetGainVsV18_38Pct", "")},
+        {"metric": "weakSystematicsLeakage", "value": 0},
+        {"metric": "lawChanged", "value": False},
+    ]
+    source_files = [
+        {
+            "stage": "v18.41 remaining M/L provenance gap test",
+            "path": str((v41_dir / "mts_v18_41_remaining_ml_gap_target_best_oracle.csv").resolve()),
+            "sha256": file_sha256(v41_dir / "mts_v18_41_remaining_ml_gap_target_best_oracle.csv"),
+        },
+        {
+            "stage": "v18.41 numeric Li+ source values",
+            "path": str((v41_dir / "mts_v18_41_remaining_ml_gap_source_values.csv").resolve()),
+            "sha256": file_sha256(v41_dir / "mts_v18_41_remaining_ml_gap_source_values.csv"),
+        },
+        {
+            "stage": "v18.42 independent M/L source hunt",
+            "path": str((v42_dir / "mts_v18_42_independent_ml_source_hunt_case_verdicts.csv").resolve()),
+            "sha256": file_sha256(v42_dir / "mts_v18_42_independent_ml_source_hunt_case_verdicts.csv"),
+        },
+        {
+            "stage": "v18.43 source-wide M/L prior stress",
+            "path": str((v43_dir / "mts_v18_43_source_wide_ml_prior_stress_target_best.csv").resolve()),
+            "sha256": file_sha256(v43_dir / "mts_v18_43_source_wide_ml_prior_stress_target_best.csv"),
+        },
+        {
+            "stage": "v18.47 named NFW-gap anatomy branch",
+            "path": str((v47_dir / "mts_v18_47_bulge_coupling_discriminator_target_ledger.csv").resolve()),
+            "sha256": file_sha256(v47_dir / "mts_v18_47_bulge_coupling_discriminator_target_ledger.csv"),
+        },
+    ]
+
+    write_csv(out_dir / f"{prefix}_scores.csv", scores)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_source_value_ledger.csv", source_values)
+    write_csv(out_dir / f"{prefix}_source_evidence_ledger.csv", evidence_rows)
+    write_csv(out_dir / f"{prefix}_next_tests.csv", next_rows)
+    write_csv(out_dir / f"{prefix}_source_files.csv", source_files)
+    capsule = {
+        "analysisName": "mts-v18-48-ml-provenance-closure-v1",
+        "verdict": verdict,
+        "targetCount": len(case_rows),
+        "verdictCounts": verdict_counts,
+        "lawChanged": False,
+        "browserChanged": False,
+        "weakSystematicsLeakage": 0,
+        "outputFiles": [
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_source_value_ledger.csv",
+            f"{prefix}_source_evidence_ledger.csv",
+            f"{prefix}_next_tests.csv",
+            f"{prefix}_source_files.csv",
+            f"{prefix}_report.md",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v18.48 M/L Provenance Closure",
+        "",
+        "This pass closes the numeric M/L question for the current remaining NFW-gap cases. It does not change MTS, v18.38, v18.47, q, Gamma0, browser code, or any transport formula.",
+        "",
+        f"- Verdict: `{verdict}`.",
+        f"- Targets: `{len(case_rows)}`.",
+        f"- Independent usable per-galaxy M/L cases: `{sum(1 for row in case_rows if int(row['independentUsableMlCount']) > 0)}`.",
+        f"- Halo-fit M/L only cases: `{verdict_counts.get('halo-fit M/L explains gap only', 0)}`.",
+        f"- Source-wide M/L sensitive cases: `{verdict_counts.get('source-wide M/L prior moves gap', 0)}`.",
+        f"- State/anatomy stronger than M/L cases: `{verdict_counts.get('state/anatomy branch stronger than M/L', 0)}`.",
+        f"- Not M/L driven cases: `{verdict_counts.get('not explained by current M/L evidence', 0)}`.",
+        "",
+        "## Case Decisions",
+        "",
+        "| Galaxy | class | Li+ gain | Li+ Ydisk/Ybul | source-wide gain | v18.47 gain | closure verdict | next action |",
+        "| --- | --- | ---: | --- | ---: | ---: | --- | --- |",
+    ]
+    for row in case_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['targetClass']} | {fmt(row['li2020BestGainKmS'])} | {fmt(row['li2020BestYdisk'])}/{fmt(row['li2020BestYbul'])} | {fmt(row['sourceWideBestGainKmS'])} | {fmt(row['v18_47GainKmS'])} | {row['closureVerdict']} | {row['nextAction']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Rule",
+            "",
+            "Numeric Li+ Ydisk/Ybul values are real per-galaxy values, but they come from halo-model fitting and remain provenance/competitor evidence, not MTS formula inputs. Independent case-specific photometric/population M/L values would be eligible for a fixed-value rescore, but the current source hunt found none for these targets.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    return capsule
+
+
+def cmd_v18mlprovenanceclosure(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_OBSERVED_STATE_V18_ML_PROVENANCE_CLOSURE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_OBSERVED_STATE_V18_INDEPENDENT_ML_SOURCE_HUNT_CACHE
+    capsule = write_v18_ml_provenance_closure_artifacts(out_dir, source_cache, args.offline)
+    print("MTS v18.48 M/L provenance closure")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"targets={capsule['targetCount']}",
+                f"independent={capsule['verdictCounts'].get('independent numeric M/L rescore candidate', 0)}",
+                f"halo_fit_only={capsule['verdictCounts'].get('halo-fit M/L explains gap only', 0)}",
+                f"source_wide={capsule['verdictCounts'].get('source-wide M/L prior moves gap', 0)}",
+                f"anatomy={capsule['verdictCounts'].get('state/anatomy branch stronger than M/L', 0)}",
+                f"not_ml={capsule['verdictCounts'].get('not explained by current M/L evidence', 0)}",
+            ]
+        )
+    )
+    print(f"Wrote v18.48 M/L provenance closure to {out_dir.resolve()}")
+
+
 V18_44_UGC08699_PRIMARY_TARGET = "UGC08699"
 V18_44_ML_SENSITIVE_EVAL_TARGETS = {
     "UGC08699",
@@ -100709,6 +100970,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18independentmlsourcehunt",
             "v18sourcewidemlpriorstress",
             "observedstatev18sourcewidemlpriorstress",
+            "v18mlprovenanceclosure",
+            "observedstatev18mlprovenanceclosure",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -101108,6 +101371,8 @@ def main() -> None:
         cmd_v18independentmlsourcehunt(args)
     elif args.mode in {"v18sourcewidemlpriorstress", "observedstatev18sourcewidemlpriorstress"}:
         cmd_v18sourcewidemlpriorstress(args)
+    elif args.mode in {"v18mlprovenanceclosure", "observedstatev18mlprovenanceclosure"}:
+        cmd_v18mlprovenanceclosure(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
