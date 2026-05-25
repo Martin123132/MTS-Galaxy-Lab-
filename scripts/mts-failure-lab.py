@@ -274,6 +274,7 @@ DEFAULT_V19_BOUNDARY_NUMERIC_LAW_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-nume
 DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_OUT = OUTPUT_PACK_ROOT / "mts-v19-ngc3198-numeric-boundary-v1"
 DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ngc3198-numeric-boundary-v1")
 DEFAULT_V19_SOURCE_BOUNDARY_NUMERIC_GATE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-numeric-gate-v1"
+DEFAULT_V19_SOURCE_BOUNDARY_CONTROL_COVERAGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-control-coverage-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -110224,6 +110225,461 @@ def cmd_v19sourceboundarynumericgate(args: argparse.Namespace) -> None:
     print(f"Wrote v19 source-boundary numeric gate to {out_dir.resolve()}")
 
 
+def v19_source_boundary_control_trachte_path() -> Path:
+    path = DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE / "arxiv-0810.2116-source-extract" / "trachternach.tex"
+    if path.exists():
+        return path
+    write_v19_ngc3198_numeric_boundary_artifacts(
+        DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_OUT,
+        DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE,
+        True,
+    )
+    return path
+
+
+def v19_source_boundary_latex_float(value: str, default: float = math.nan) -> float:
+    text = str(value or "").strip()
+    if not text or "\\nodata" in text:
+        return default
+    text = text.split("\\footnote", 1)[0]
+    text = text.replace("$-$", "-").replace("$+$", "+").replace("$", "")
+    text = text.replace("{\\bf", "").replace("}", "").replace("{", "")
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+    if not match:
+        return default
+    return parse_float(match.group(0), default)
+
+
+def v19_source_boundary_parse_trachte_sample(path: Path) -> dict[str, dict]:
+    if not path.exists():
+        return {}
+    rows: dict[str, dict] = {}
+    in_table = False
+    in_data = False
+    for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+        stripped = line.strip()
+        if "\\tablecaption" in stripped and "table:sample-properties" in stripped:
+            in_table = True
+        if in_table and "\\startdata" in stripped:
+            in_data = True
+            continue
+        if in_table and in_data and "\\enddata" in stripped:
+            break
+        if not in_data:
+            continue
+        match = re.match(r"^(NGC\s+\d+|IC\s+\d+|UGC\s+\d+|DDO\s+\d+)\s*&", stripped)
+        if not match:
+            continue
+        parts = [part.strip() for part in stripped.split("&")]
+        if len(parts) < 10:
+            continue
+        name = match.group(1).replace(" ", "")
+        rows[name] = {
+            "galaxy": name,
+            "thingsDistanceMpc": v19_source_boundary_latex_float(parts[1]),
+            "thingsR25Kpc": v19_source_boundary_latex_float(parts[2]),
+            "thingsMBmag": v19_source_boundary_latex_float(parts[3]),
+            "thingsInclinationDeg": v19_source_boundary_latex_float(parts[4]),
+            "thingsPaDeg": v19_source_boundary_latex_float(parts[5]),
+            "thingsVtotKmS": v19_source_boundary_latex_float(parts[6]),
+            "thingsRingSpacingArcsec": v19_source_boundary_latex_float(parts[7]),
+            "thingsMhi1e8Msun": v19_source_boundary_latex_float(parts[8]),
+            "thingsMorphType": v19_source_boundary_latex_float(parts[9]),
+            "sampleSourcePath": str(path),
+            "sampleLine": line_number,
+            "sampleSnippet": stripped,
+        }
+    return rows
+
+
+def v19_source_boundary_parse_trachte_harmonic(path: Path) -> dict[str, dict]:
+    if not path.exists():
+        return {}
+    rows: dict[str, dict] = {}
+    in_table = False
+    in_data = False
+    pending = ""
+    pending_line = 0
+    for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+        stripped = line.strip()
+        if "\\tablecaption" in stripped and "table:harm-decomp" in stripped:
+            in_table = True
+        if in_table and "\\startdata" in stripped:
+            in_data = True
+            continue
+        if in_table and in_data and "\\enddata" in stripped:
+            break
+        if not in_data:
+            continue
+        if not pending:
+            pending = stripped
+            pending_line = line_number
+        else:
+            pending = f"{pending} {stripped}"
+        if "\\\\" not in pending:
+            continue
+        stripped = pending
+        line_number = pending_line
+        pending = ""
+        match = re.match(r"^(NGC\s+\d+|IC\s+\d+|UGC\s+\d+|DDO\s+\d+)\s*&", stripped)
+        if not match:
+            continue
+        parts = [part.strip() for part in stripped.split("&")]
+        if len(parts) < 7:
+            continue
+        name = match.group(1).replace(" ", "")
+        rows[name] = {
+            "galaxy": name,
+            "harmonicMedianAkmS": v19_source_boundary_latex_float(parts[1]),
+            "harmonicInner1kpcAkmS": v19_source_boundary_latex_float(parts[2]),
+            "harmonicPctOfVtot": v19_source_boundary_latex_float(parts[3]),
+            "epsilonPotWeighted": v19_source_boundary_latex_float(parts[4]),
+            "epsilonPotErr": v19_source_boundary_latex_float(parts[4].split("\\pm", 1)[1] if "\\pm" in parts[4] else ""),
+            "medianResidualKmS": v19_source_boundary_latex_float(parts[5]),
+            "harmonicRadiusArcsec": v19_source_boundary_latex_float(parts[6]),
+            "harmonicSourcePath": str(path),
+            "harmonicLine": line_number,
+            "harmonicSnippet": stripped,
+        }
+    return rows
+
+
+def v19_source_boundary_text_metric(path: Path, galaxy: str, specs: list[tuple[str, str, float | str, str, str]]) -> list[dict]:
+    rows = []
+    for needle, metric, value, unit, interpretation in specs:
+        line, snippet = v19_text_line_snippet(path, needle, before=1, after=1)
+        rows.append(
+            {
+                "galaxy": galaxy,
+                "metric": metric,
+                "value": value,
+                "unit": unit,
+                "sourcePath": str(path),
+                "line": line,
+                "snippet": snippet,
+                "interpretation": interpretation,
+                "found": snippet != "MISSING",
+            }
+        )
+    return rows
+
+
+def v19_source_boundary_control_text_metrics() -> list[dict]:
+    radial_path = DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE / "arxiv-1601.01689-source-extract" / "Radialinflows.tex"
+    trachte_path = v19_source_boundary_control_trachte_path()
+    rows: list[dict] = []
+    rows.extend(
+        v19_source_boundary_text_metric(
+            radial_path,
+            "NGC3521",
+            [
+                ("c_0$ component which drops to a value of $-30", "radialLopsidedC0Amplitude", -30, "km/s", "strong lopsided radial/systemic component"),
+                ("fit residuals of up to $+60", "localizedResidualMax", 60, "km/s", "localized high residual HI lobe"),
+                ("recent merger history", "recentMergerHistory", "true", "boolean", "source paper flags disturbed/merger history"),
+            ],
+        )
+    )
+    rows.extend(
+        v19_source_boundary_text_metric(
+            radial_path,
+            "NGC5055",
+            [
+                ("rises to $20\\;\\mathrm{km\\:s}^{-1}$", "outerRadialVelocityPeak", 20, "km/s", "outer radial velocity rises outward in ring"),
+                ("outward peak mass flow of 6", "outerMassFlowPeak", 6, "Msun/yr", "outer outflow peak mass flow"),
+                ("steep rise by $30", "outerPaChange", 30, "deg", "outer position-angle change"),
+                ("recent merger event", "recentMergerEvent", "true", "boolean", "source paper flags recent merger event"),
+            ],
+        )
+    )
+    rows.extend(
+        v19_source_boundary_text_metric(
+            radial_path,
+            "NGC7331",
+            [
+                ("outside of 300'' we find $10", "outerInflowVelocity", -10, "km/s", "outer inflow velocity scale"),
+                ("inflow of H\\,{\\sc i} at the level of 1", "outerMassFlowLevel", 1, "Msun/yr", "outer HI inflow mass flow level"),
+                ("asymmetry terms are of similar magnitude", "asymmetryComparableToRadial", "true", "boolean", "asymmetry terms comparable to radial flow"),
+                ("high inclination of NGC~7331", "highInclinationLimitsStructure", "true", "boolean", "high inclination limits detailed structure inference"),
+            ],
+        )
+    )
+    rows.extend(
+        v19_source_boundary_text_metric(
+            trachte_path,
+            "IC2574",
+            [
+                ("clear evidence of random non-circular motions", "randomNonCircularMotions", "true", "boolean", "random non-circular features in velocity field"),
+                ("supergiant shell in the north-east", "supergiantShell", "true", "boolean", "supergiant shell likely drives major non-circular motions"),
+                ("r\\sim 250\\arcsec", "shellFeatureRadius", 250, "arcsec", "radius of shell-linked harmonic jump"),
+            ],
+        )
+    )
+    rows.extend(
+        v19_source_boundary_text_metric(
+            trachte_path,
+            "NGC5055",
+            [
+                ("r<450\\arcsec", "harmonicReliableRadius", 450, "arcsec", "harmonic analysis restricts to inner defined HI disk"),
+                ("amplitudes averaged over the inner 1 kpc", "innerM2High", 8, "km/s", "inner m=2 component high but scatter/partial ring caveat"),
+            ],
+        )
+    )
+    rows.extend(
+        v19_source_boundary_text_metric(
+            trachte_path,
+            "NGC7331",
+            [
+                ("warping of the disk", "warpFlag", "true", "boolean", "PA and inclination rise outward"),
+                ("kinematically lopsided", "kinematicLopsidedness", "true", "boolean", "source text flags kinematic lopsidedness"),
+            ],
+        )
+    )
+    return rows
+
+
+def v19_source_boundary_control_coverage_rows() -> list[dict]:
+    if not (DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_OUT / "mts_v19_ngc3198_numeric_boundary_radial_flow_table.csv").exists():
+        write_v19_ngc3198_numeric_boundary_artifacts(
+            DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_OUT,
+            DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE,
+            True,
+        )
+    matrix_rows = {row["galaxy"]: row for row in v19_source_boundary_numeric_matrix()}
+    radial_rows = {
+        row["galaxy"]: row
+        for row in read_csv_rows(DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_OUT / "mts_v19_ngc3198_numeric_boundary_radial_flow_table.csv")
+    }
+    trachte_path = v19_source_boundary_control_trachte_path()
+    sample_rows = v19_source_boundary_parse_trachte_sample(trachte_path)
+    harmonic_rows = v19_source_boundary_parse_trachte_harmonic(trachte_path)
+    text_rows = v19_source_boundary_control_text_metrics()
+    text_by_name: dict[str, list[dict]] = {}
+    for row in text_rows:
+        text_by_name.setdefault(row["galaxy"], []).append(row)
+    rows = []
+    for name, role in V19_SOURCE_BOUNDARY_TARGET_ROLES.items():
+        matrix = matrix_rows.get(name, {})
+        radial = radial_rows.get(name, {})
+        sample = sample_rows.get(name, {})
+        harmonic = harmonic_rows.get(name, {})
+        text_metrics = [row for row in text_by_name.get(name, []) if row.get("found")]
+        ratio = parse_float(matrix.get("absFlowToSfrRatio"), math.nan)
+        harmonic_a = parse_float(harmonic.get("harmonicMedianAkmS"), math.nan)
+        harmonic_pct = parse_float(harmonic.get("harmonicPctOfVtot"), math.nan)
+        median_residual = parse_float(harmonic.get("medianResidualKmS"), math.nan)
+        numeric_coverage = sum(
+            1
+            for value in [
+                radial.get("gammaHiOutsideR25MsunYr"),
+                radial.get("sfrMsunYr"),
+                sample.get("thingsVtotKmS"),
+                harmonic.get("harmonicMedianAkmS"),
+                harmonic.get("harmonicPctOfVtot"),
+                harmonic.get("medianResidualKmS"),
+                matrix.get("outerPerturbationGrowthKmS"),
+            ]
+            if str(value) not in {"", "nan", "None"} and math.isfinite(parse_float(value, math.nan))
+        )
+        disturbance_flags = []
+        for metric in text_metrics:
+            if metric["metric"] in {
+                "radialLopsidedC0Amplitude",
+                "localizedResidualMax",
+                "recentMergerHistory",
+                "recentMergerEvent",
+                "randomNonCircularMotions",
+                "supergiantShell",
+                "warpFlag",
+                "kinematicLopsidedness",
+                "highInclinationLimitsStructure",
+            }:
+                disturbance_flags.append(metric["metric"])
+        source_boundary_class = "missing numeric coverage"
+        if matrix.get("numericSoftBoundaryGate") is True:
+            source_boundary_class = "soft-boundary numeric candidate"
+        elif matrix.get("flowSign") == "outflow" or "recentMergerEvent" in disturbance_flags:
+            source_boundary_class = "cap/reject source loading"
+        elif math.isfinite(ratio) and ratio > 1.5:
+            source_boundary_class = "admit/inflow stronger than SFR"
+        elif math.isfinite(ratio) and ratio < 0.75 and matrix.get("flowSign") == "inflow":
+            source_boundary_class = "admit/weak inflow relative to SFR"
+        elif "randomNonCircularMotions" in disturbance_flags or "supergiantShell" in disturbance_flags:
+            source_boundary_class = "cap/reject chaotic local feature"
+        elif harmonic_a and math.isfinite(harmonic_a):
+            source_boundary_class = "harmonic-control covered"
+        coverage_class = "full gate coverage" if matrix.get("coverageClass") == "radial+outer-perturbation" else (
+            "radial+harmonic coverage" if radial and harmonic else (
+                "harmonic-only coverage" if harmonic else (
+                    "radial-only coverage" if radial else "missing numeric coverage"
+                )
+            )
+        )
+        rows.append(
+            {
+                "galaxy": name,
+                "targetRole": role,
+                "coverageClass": coverage_class,
+                "sourceBoundaryClass": source_boundary_class,
+                "numericCoverageScore": numeric_coverage,
+                "radialFlowGammaMsunYr": radial.get("gammaHiOutsideR25MsunYr", ""),
+                "sfrMsunYr": radial.get("sfrMsunYr", ""),
+                "absFlowToSfrRatio": matrix.get("absFlowToSfrRatio", ""),
+                "flowSign": matrix.get("flowSign", "MISSING"),
+                "thingsVtotKmS": sample.get("thingsVtotKmS", ""),
+                "harmonicMedianAkmS": harmonic.get("harmonicMedianAkmS", ""),
+                "harmonicPctOfVtot": harmonic.get("harmonicPctOfVtot", ""),
+                "medianResidualKmS": harmonic.get("medianResidualKmS", ""),
+                "outerPerturbationGrowthKmS": matrix.get("outerPerturbationGrowthKmS", ""),
+                "outerBisymmetricSpanFraction": matrix.get("outerBisymmetricSpanFraction", ""),
+                "numericSoftBoundaryGate": matrix.get("numericSoftBoundaryGate", False),
+                "disturbanceFlags": ";".join(sorted(set(disturbance_flags))),
+                "textMetricCount": len(text_metrics),
+                "primarySourcePaths": ";".join(
+                    sorted(
+                        {
+                            str(path)
+                            for path in [
+                                radial.get("sourcePath", ""),
+                                sample.get("sampleSourcePath", ""),
+                                harmonic.get("harmonicSourcePath", ""),
+                                matrix.get("outerPerturbationSourcePath", ""),
+                            ]
+                            if path and path != "MISSING"
+                        }
+                    )
+                )
+                or "MISSING",
+            }
+        )
+    return rows
+
+
+def write_v19_source_boundary_control_coverage_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_source_boundary_control_coverage"
+    trachte_path = v19_source_boundary_control_trachte_path()
+    sample_rows = list(v19_source_boundary_parse_trachte_sample(trachte_path).values())
+    harmonic_rows = list(v19_source_boundary_parse_trachte_harmonic(trachte_path).values())
+    text_rows = v19_source_boundary_control_text_metrics()
+    coverage_rows = v19_source_boundary_control_coverage_rows()
+    missing_rows = []
+    for row in coverage_rows:
+        if row["coverageClass"] != "full gate coverage":
+            missing = "outer perturbation growth/span"
+            if row["coverageClass"] == "missing numeric coverage":
+                missing = "radial-flow and harmonic numeric coverage"
+            elif row["coverageClass"] == "harmonic-only coverage":
+                missing = "radial-flow and outer perturbation growth/span"
+            elif row["coverageClass"] == "radial-only coverage":
+                missing = "harmonic table and outer perturbation growth/span"
+            missing_rows.append(
+                {
+                    "galaxy": row["galaxy"],
+                    "targetRole": row["targetRole"],
+                    "coverageClass": row["coverageClass"],
+                    "missingField": missing,
+                    "whyItMatters": "needed before the source-boundary softening can be promoted beyond a single-case numeric input",
+                    "sourcePath": "MISSING",
+                }
+            )
+    full_gate = sum(1 for row in coverage_rows if row["coverageClass"] == "full gate coverage")
+    radial_harmonic = sum(1 for row in coverage_rows if row["coverageClass"] in {"full gate coverage", "radial+harmonic coverage"})
+    cap_reject = sum(1 for row in coverage_rows if row["sourceBoundaryClass"].startswith("cap/reject"))
+    admits = sum(1 for row in coverage_rows if row["sourceBoundaryClass"].startswith("admit"))
+    if full_gate >= 5:
+        verdict = "matched numeric controls ready for law test"
+    elif radial_harmonic >= 5:
+        verdict = "control coverage improved; outer perturbation still missing"
+    elif cap_reject or admits:
+        verdict = "partial numeric control coverage acquired"
+    else:
+        verdict = "control coverage still insufficient"
+    write_csv(out_dir / f"{prefix}_sample_table.csv", sample_rows)
+    write_csv(out_dir / f"{prefix}_harmonic_table.csv", harmonic_rows)
+    write_csv(out_dir / f"{prefix}_text_metrics.csv", text_rows)
+    write_csv(out_dir / f"{prefix}_coverage_matrix.csv", coverage_rows)
+    write_csv(out_dir / f"{prefix}_missing_fields.csv", missing_rows)
+    next_rows = [
+        {
+            "nextStep": "outer-perturbation source acquisition",
+            "targetGalaxies": ";".join(row["galaxy"] for row in coverage_rows if row["coverageClass"] != "full gate coverage"),
+            "reason": "radial-flow plus harmonic amplitudes are now available for several controls, but matched outer perturbation growth/span is still sparse",
+            "modeSuggestion": "v19boundaryouterperturbationfetch",
+        },
+        {
+            "nextStep": "numeric source-boundary gate rerun",
+            "targetGalaxies": "NGC3198;NGC2403;NGC3521;NGC5055;NGC7331;IC2574",
+            "reason": "once outer perturbation proxies are filled, rerun the source-boundary gate with enough controls for a fair null",
+            "modeSuggestion": "v19sourceboundarynumericgatev2",
+        },
+    ]
+    write_csv(out_dir / f"{prefix}_next_actions.csv", next_rows)
+    capsule = {
+        "analysisName": "mts-v19-source-boundary-control-coverage-v1",
+        "verdict": verdict,
+        "coverageRows": len(coverage_rows),
+        "fullGateCoverageCount": full_gate,
+        "radialHarmonicCoverageCount": radial_harmonic,
+        "capRejectClassCount": cap_reject,
+        "admitClassCount": admits,
+        "missingFieldRows": len(missing_rows),
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    report = [
+        "# MTS v19 Source-Boundary Control Coverage",
+        "",
+        "This mode expands the numeric source-boundary evidence beyond NGC3198. It parses cached THINGS/Radialflows source material and does not change any law.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Full gate coverage: `{full_gate}`.",
+        f"Radial + harmonic coverage: `{radial_harmonic}`.",
+        f"Cap/reject numeric classes: `{cap_reject}`.",
+        f"Admit numeric classes: `{admits}`.",
+        "",
+        "| Galaxy | role | coverage | class | flow/SFR | A median | residual | flags |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in coverage_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['targetRole']} | {row['coverageClass']} | {row['sourceBoundaryClass']} | {fmt(row['absFlowToSfrRatio'])} | {fmt(row['harmonicMedianAkmS'])} | {fmt(row['medianResidualKmS'])} | {row['disturbanceFlags']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## What This Means",
+            "",
+            "The numeric controls are no longer empty: IC2574, NGC3521, NGC5055, and NGC7331 have table-grade harmonic/non-circular amplitudes, and NGC3521/NGC5055/NGC7331 also have radial-flow entries. The remaining hole is matched outer-perturbation growth/span, which is currently strong for NGC3198 and available as a comparison for NGC2403 only.",
+            "",
+            "No formula is promoted here. The next useful job is to acquire or derive matched outer-perturbation proxies for the covered controls.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19sourceboundarycontrolcoverage(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SOURCE_BOUNDARY_CONTROL_COVERAGE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_source_boundary_control_coverage_artifacts(out_dir)
+    print("MTS v19 source-boundary control coverage")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"rows={capsule['coverageRows']}",
+                f"full_gate={capsule['fullGateCoverageCount']}",
+                f"radial_harmonic={capsule['radialHarmonicCoverageCount']}",
+                f"cap_reject={capsule['capRejectClassCount']}",
+                f"admit={capsule['admitClassCount']}",
+            ]
+        )
+    )
+    print(f"Wrote v19 source-boundary control coverage to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -110499,6 +110955,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19ngc3198numericboundary",
             "v19sourceboundarynumericgate",
             "observedstatev19sourceboundarynumericgate",
+            "v19sourceboundarycontrolcoverage",
+            "observedstatev19sourceboundarycontrolcoverage",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -110950,6 +111408,8 @@ def main() -> None:
         cmd_v19ngc3198numericboundary(args)
     elif args.mode in {"v19sourceboundarynumericgate", "observedstatev19sourceboundarynumericgate"}:
         cmd_v19sourceboundarynumericgate(args)
+    elif args.mode in {"v19sourceboundarycontrolcoverage", "observedstatev19sourceboundarycontrolcoverage"}:
+        cmd_v19sourceboundarycontrolcoverage(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
