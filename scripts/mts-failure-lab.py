@@ -271,6 +271,8 @@ DEFAULT_V19_NGC3198_KINEMATIC_FACTS_OUT = OUTPUT_PACK_ROOT / "mts-v19-ngc3198-ki
 DEFAULT_V19_NGC3198_KINEMATIC_FACTS_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ngc3198-kinematic-facts-v1")
 DEFAULT_V19_SOURCE_BOUNDARY_TEST_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-test-v1"
 DEFAULT_V19_BOUNDARY_NUMERIC_LAW_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-numeric-law-v1"
+DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_OUT = OUTPUT_PACK_ROOT / "mts-v19-ngc3198-numeric-boundary-v1"
+DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ngc3198-numeric-boundary-v1")
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -109307,6 +109309,587 @@ def cmd_v19boundarynumericlaw(args: argparse.Namespace) -> None:
     print(f"Wrote v19 boundary numeric law test to {out_dir.resolve()}")
 
 
+V19_NGC3198_NUMERIC_BOUNDARY_SOURCES = [
+    {
+        "sourceId": "arxiv-1601.01689",
+        "title": "Radial gas flows in nearby galaxies",
+        "url": "https://arxiv.org/e-print/1601.01689",
+        "cacheFile": "arxiv-1601.01689-source",
+        "primaryTex": "Radialinflows.tex",
+        "maxBytes": 10_000_000,
+        "reason": "direct THINGS Fourier/radial-flow source; contains NGC3198 inflow table and section",
+    },
+    {
+        "sourceId": "arxiv-0912.5493",
+        "title": "Velocity-field/bisymmetric modelling source",
+        "url": "https://arxiv.org/e-print/0912.5493",
+        "cacheFile": "arxiv-0912.5493-source",
+        "primaryTex": "velfit.tex",
+        "maxBytes": 10_000_000,
+        "reason": "direct NGC3198 residual and bisymmetric amplitude source",
+    },
+    {
+        "sourceId": "arxiv-1304.4232",
+        "title": "HALOGAS NGC3198 deep HI model",
+        "url": "https://arxiv.org/e-print/1304.4232",
+        "cacheFile": "arxiv-1304.4232-source",
+        "primaryTex": "n3198_arxiv.tex",
+        "maxBytes": 10_000_000,
+        "reason": "direct NGC3198 extraplanar gas/lagging disk source",
+    },
+    {
+        "sourceId": "arxiv-0810.2116",
+        "title": "THINGS non-circular motion context",
+        "url": "https://arxiv.org/e-print/0810.2116",
+        "cacheFile": "arxiv-0810.2116-source",
+        "primaryTex": "",
+        "maxBytes": 10_000_000,
+        "reason": "supporting source bundle for THINGS harmonic decomposition context",
+    },
+]
+
+
+def v19_ngc3198_numeric_boundary_safe_extract(archive_path: Path, extract_dir: Path) -> dict:
+    if extract_dir.exists() and any(extract_dir.iterdir()):
+        return {"extractStatus": "available", "extractDir": str(extract_dir), "memberCount": len(list(extract_dir.rglob("*"))), "error": ""}
+    if not archive_path.exists():
+        return {"extractStatus": "missing-archive", "extractDir": str(extract_dir), "memberCount": 0, "error": "archive not cached"}
+    try:
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        extracted = 0
+        with tarfile.open(archive_path, "r:*") as archive:
+            for member in archive.getmembers():
+                member_path = Path(member.name)
+                if member_path.is_absolute() or ".." in member_path.parts:
+                    continue
+                archive.extract(member, extract_dir)
+                extracted += 1
+        return {"extractStatus": "available", "extractDir": str(extract_dir), "memberCount": extracted, "error": ""}
+    except Exception as exc:  # noqa: BLE001 - extraction failures are evidence rows, not fatal audit failures.
+        return {"extractStatus": "extract-error", "extractDir": str(extract_dir), "memberCount": 0, "error": str(exc)[:240]}
+
+
+def v19_ngc3198_numeric_boundary_fetch_sources(source_cache: Path, offline: bool) -> tuple[list[dict], dict[str, Path]]:
+    source_cache.mkdir(parents=True, exist_ok=True)
+    rows: list[dict] = []
+    tex_paths: dict[str, Path] = {}
+    for source in V19_NGC3198_NUMERIC_BOUNDARY_SOURCES:
+        archive_path = source_cache / source["cacheFile"]
+        fetch = v19_external_2d_fetch(source["url"], archive_path, offline, int(source["maxBytes"]))
+        extract_dir = source_cache / f"{source['cacheFile']}-extract"
+        extract = v19_ngc3198_numeric_boundary_safe_extract(archive_path, extract_dir) if fetch["cacheStatus"] == "available" else {"extractStatus": "unavailable", "extractDir": str(extract_dir), "memberCount": 0, "error": fetch.get("error", "")}
+        tex_path = extract_dir / source["primaryTex"] if source["primaryTex"] else Path("")
+        if source["primaryTex"] and tex_path.exists():
+            tex_paths[source["sourceId"]] = tex_path
+        rows.append(
+            {
+                "sourceId": source["sourceId"],
+                "title": source["title"],
+                "url": source["url"],
+                "cachePath": str(archive_path),
+                "cacheStatus": fetch["cacheStatus"],
+                "bytes": fetch.get("bytes", ""),
+                "sha256": fetch.get("sha256", ""),
+                "extractStatus": extract["extractStatus"],
+                "extractDir": extract["extractDir"],
+                "memberCount": extract["memberCount"],
+                "primaryTex": str(tex_path) if source["primaryTex"] else "",
+                "primaryTexFound": bool(source["primaryTex"] and tex_path.exists()),
+                "reason": source["reason"],
+                "largeDownloadAllowed": False,
+                "error": fetch.get("error", "") or extract.get("error", ""),
+            }
+        )
+    return rows, tex_paths
+
+
+def v19_text_line_snippet(path: Path, needle: str, before: int = 1, after: int = 1) -> tuple[int | str, str]:
+    if not path.exists():
+        return "", "MISSING"
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    lowered = needle.lower()
+    for index, line in enumerate(lines):
+        if lowered in line.lower():
+            start = max(0, index - before)
+            end = min(len(lines), index + after + 1)
+            snippet = " ".join(part.strip() for part in lines[start:end] if part.strip())
+            return index + 1, re.sub(r"\s+", " ", snippet)[:1600]
+    return "", "MISSING"
+
+
+def v19_add_extracted_value(
+    rows: list[dict],
+    *,
+    galaxy: str,
+    evidence_bucket: str,
+    quantity: str,
+    value: float | str,
+    unit: str,
+    source_id: str,
+    source_path: Path,
+    line: int | str,
+    snippet: str,
+    interpretation: str,
+    usable_as_formula_input: bool = True,
+) -> None:
+    rows.append(
+        {
+            "galaxy": galaxy,
+            "evidenceBucket": evidence_bucket,
+            "quantity": quantity,
+            "value": value,
+            "unit": unit,
+            "sourceId": source_id,
+            "sourcePath": str(source_path) if source_path else "MISSING",
+            "line": line,
+            "snippet": snippet,
+            "interpretation": interpretation,
+            "usableAsFutureFormulaInput": usable_as_formula_input,
+        }
+    )
+
+
+def v19_ngc3198_parse_radial_flow_table(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    rows: list[dict] = []
+    pattern = re.compile(
+        r"^(NGC\s+\d+)\s*&\s*([^&]+)&\s*([0-9.]+)\s*&\s*([-0-9.]+)\s*&\s*([0-9.]+)\s*&\s*([0-9.]+)\s*&\s*([0-9.]+)\s*&\s*([0-9.]+)\s*&\s*([0-9.]+)\s*&\s*([-0-9.]+)\s*&\s*([0-9.]+)\s*\\\\",
+        re.MULTILINE,
+    )
+    for match in pattern.finditer(text):
+        name = match.group(1).replace(" ", "")
+        line, snippet = v19_text_line_snippet(path, match.group(1), before=0, after=0)
+        rows.append(
+            {
+                "galaxy": name,
+                "type": match.group(2).strip(),
+                "raDeg": parse_float(match.group(3), math.nan),
+                "decDeg": parse_float(match.group(4), math.nan),
+                "distanceMpc": parse_float(match.group(5), math.nan),
+                "r25Arcmin": parse_float(match.group(6), math.nan),
+                "r25Kpc": parse_float(match.group(7), math.nan),
+                "mHi1e8Msun": parse_float(match.group(8), math.nan),
+                "sfrMsunYr": parse_float(match.group(9), math.nan),
+                "gammaHiOutsideR25MsunYr": parse_float(match.group(10), math.nan),
+                "gammaHiErrorMsunYr": parse_float(match.group(11), math.nan),
+                "sourceId": "arxiv-1601.01689",
+                "sourcePath": str(path),
+                "line": line,
+                "snippet": snippet,
+            }
+        )
+    return rows
+
+
+def v19_ngc3198_numeric_boundary_extracted_values(tex_paths: dict[str, Path]) -> tuple[list[dict], list[dict]]:
+    rows: list[dict] = []
+    radial_rows = v19_ngc3198_parse_radial_flow_table(tex_paths.get("arxiv-1601.01689", Path("")))
+    radial_by_name = {row["galaxy"]: row for row in radial_rows}
+    for radial in radial_rows:
+        if radial["galaxy"] in {"NGC3198", "NGC2403", "NGC3521", "NGC5055", "NGC7331", "NGC6946", "NGC2903", "NGC2841"}:
+            v19_add_extracted_value(
+                rows,
+                galaxy=radial["galaxy"],
+                evidence_bucket="radial-flow-table",
+                quantity="gammaHiOutsideR25",
+                value=radial["gammaHiOutsideR25MsunYr"],
+                unit="Msun/yr",
+                source_id=radial["sourceId"],
+                source_path=Path(radial["sourcePath"]),
+                line=radial["line"],
+                snippet=radial["snippet"],
+                interpretation="negative values denote inflow; source table gives average radial HI mass flow outside r25",
+            )
+            v19_add_extracted_value(
+                rows,
+                galaxy=radial["galaxy"],
+                evidence_bucket="radial-flow-table",
+                quantity="sfr",
+                value=radial["sfrMsunYr"],
+                unit="Msun/yr",
+                source_id=radial["sourceId"],
+                source_path=Path(radial["sourcePath"]),
+                line=radial["line"],
+                snippet=radial["snippet"],
+                interpretation="star formation rate used as radial-flow comparison",
+            )
+    radial_path = tex_paths.get("arxiv-1601.01689", Path(""))
+    for needle, quantity, value, unit, interpretation in [
+        ("The radial velocity we measure is always negative outside of 200", "radialVelocityNegativeBeyondArcsec", 200, "arcsec", "NGC3198 radial velocity is negative beyond this radius"),
+        ("significant inflow between 0.7 and 2", "inflowRangeLow", 0.7, "Msun/yr", "NGC3198 lower bound of significant inflow range"),
+        ("significant inflow between 0.7 and 2", "inflowRangeHigh", 2.0, "Msun/yr", "NGC3198 upper bound of significant inflow range"),
+        ("average inflow outside $r_{25}$ is 1.1", "averageInflowOutsideR25Text", 1.1, "Msun/yr", "text statement for NGC3198 average inflow outside r25"),
+        ("outside of this radius we have a roughly constant inflow", "outerInflowComparableToSfr", "true", "boolean", "outer NGC3198 inflow is roughly constant with amplitude similar to SFR"),
+        ("the $s_1$ term is relatively small", "s1ComparableToAsymmetryTerms", "true", "boolean", "net inflow is mixed with comparable asymmetry terms"),
+        ("extended north-east arm", "extendedNortheastArm", "true", "boolean", "source-text asymmetry clue in HI intensity map"),
+        ("Substantial inwards mass flux through the outer disk is also detected in NGC~3198", "maxOuterInwardMassFlux", 2.0, "Msun/yr", "conclusion statement for NGC3198 inward mass flux"),
+    ]:
+        line, snippet = v19_text_line_snippet(radial_path, needle)
+        v19_add_extracted_value(
+            rows,
+            galaxy="NGC3198",
+            evidence_bucket="radial-flow-text",
+            quantity=quantity,
+            value=value,
+            unit=unit,
+            source_id="arxiv-1601.01689",
+            source_path=radial_path,
+            line=line,
+            snippet=snippet,
+            interpretation=interpretation,
+        )
+    velfit_path = tex_paths.get("arxiv-0912.5493", Path(""))
+    for needle, quantity, value, unit, interpretation in [
+        ("flat, axisymmetric model is subtracted", "axisymmetricResidualMapRadius", 456, "arcsec", "radius of residual map after axisymmetric subtraction"),
+        ("residual velocities are generally small", "residualVelocityPeakAbs", 20, "km/s", "residual velocities generally small but peak at this absolute value"),
+        ("R_{25} \\simeq", "r25Bband", 255, "arcsec", "B-band R25 quoted in NGC3198 residual discussion"),
+        ("240\\arcsec \\leq R \\leq 460", "bisymmetricFitRangeInner", 240, "arcsec", "published plotted bisymmetric-fit range inner bound"),
+        ("240\\arcsec \\leq R \\leq 460", "bisymmetricFitRangeOuter", 460, "arcsec", "published plotted bisymmetric-fit range outer bound"),
+        ("which includes a bisymmetric flow for $R \\ga 220", "bisymmetricModelOnset", 220, "arcsec", "best-fit model includes bisymmetric flow beyond this radius"),
+        ("no larger than $\\sim 6$\\%", "nonaxisymmetricVelocityFraction", 0.06, "fraction of circular speed", "best-fit non-axisymmetric velocities are no larger than this fraction"),
+        ("1.25\\;$km~s$^{-1}$ at 296", "aTotMin", 1.25, "km/s", "minimum total perturbation amplitude"),
+        ("1.25\\;$km~s$^{-1}$ at 296", "aTotMinRadius", 296, "arcsec", "radius of minimum total perturbation amplitude"),
+        ("11.10\\;$km~s$^{-1}$ at 444", "aTotMax", 11.10, "km/s", "maximum total perturbation amplitude"),
+        ("11.10\\;$km~s$^{-1}$ at 444", "aTotMaxRadius", 444, "arcsec", "radius of maximum total perturbation amplitude"),
+        ("A_s \\simeq", "spiralAmplitudeAs", 6.3, "km/s", "estimated spiral contribution amplitude"),
+        ("A_h \\simeq", "haloAmplitudeAh", 5.0, "km/s", "estimated halo/oval contribution amplitude upper-bound component"),
+        ("\\vmean =\n140", "vMean", 140, "km/s", "mean circular speed used in halo-shape estimate"),
+        ("q_\\Phi \\ga", "qPhiLowerLimit", 0.98, "axis ratio", "potential axis-ratio lower limit from source paper"),
+        ("q_\\rho \\ga", "qRhoLowerLimit", 0.94, "axis ratio", "density axis-ratio lower limit from source paper"),
+    ]:
+        line, snippet = v19_text_line_snippet(velfit_path, needle)
+        if snippet == "MISSING" and quantity == "vMean":
+            line, snippet = v19_text_line_snippet(velfit_path, "\\vmean =")
+        v19_add_extracted_value(
+            rows,
+            galaxy="NGC3198",
+            evidence_bucket="bisymmetric-velocity-field",
+            quantity=quantity,
+            value=value,
+            unit=unit,
+            source_id="arxiv-0912.5493",
+            source_path=velfit_path,
+            line=line,
+            snippet=snippet,
+            interpretation=interpretation,
+        )
+    halo_path = tex_paths.get("arxiv-1304.4232", Path(""))
+    for needle, quantity, value, unit, interpretation in [
+        ("Synthesised beam FWHM", "beamFwhmMajor", 35.2, "arcsec", "modelled cube beam major-axis FWHM"),
+        ("Synthesised beam FWHM", "beamFwhmMinor", 33.5, "arcsec", "modelled cube beam minor-axis FWHM"),
+        ("Velocity resolution", "velocityResolution", 4.12, "km/s", "HALOGAS velocity resolution"),
+        ("total H{\\sc i} flux", "totalHiFlux", 239.9, "Jy km/s", "primary-beam-corrected total HI flux"),
+        ("total H{\\sc i} mass of 1.08", "totalHiMass", 1.08e10, "Msun", "total HI mass at 13.8 Mpc"),
+        ("about 5 $\\times$ 10$^6$", "faintHiStructureMass", 5e6, "Msun", "faint HI complex mass beyond disk"),
+        ("systemic velocity was found", "systemicVelocity", 657, "km/s", "best-fit systemic velocity from tilted-ring modelling"),
+        ("best-fit velocity dispersion found by TiRiFiC is\n11.7", "velocityDispersion", 11.7, "km/s", "global best-fit velocity dispersion"),
+        ("Changes of at most 5", "manualRotationAdjustmentMax", 5, "km/s", "manual rotation-curve adjustments made to match observations"),
+        ("amplitude $V_{\\rm 2,rot}$ must\nbe $\\sim$15", "bisymmetricDistortionAmplitude", 15, "km/s", "outer bisymmetric distortion amplitude required by 3D model"),
+        ("beyond a radius of approximately 510", "bisymmetricDistortionOnset", 510, "arcsec", "radius beyond which bisymmetric distortion is required"),
+        ("scale-height of 3 kpc", "thickDiskScaleHeight", 3, "kpc", "lagging thick-disk component scale height"),
+        ("The lag in the model was derived", "lagApproaching", 15, "km/s/kpc", "final model vertical lag approaching side"),
+        ("The lag in the model was derived", "lagReceding", 7, "km/s/kpc", "final model vertical lag receding side"),
+        ("contains about 15\\% of the total H", "thickDiskHiMassFraction", 0.15, "fraction", "thick disk contains about this fraction of total HI mass"),
+        ("minimum error of 4.12/sin", "minimumRotationCurveError", "4.12/sin(i)", "km/s", "rotation-curve uncertainty floor"),
+        ("15$\\pm 10$ km", "bisymmetricDistortionUncertainty", 10, "km/s", "uncertainty on 15 km/s bisymmetric distortion amplitude"),
+        ("10\\%-20\\%", "extraplanarMassFractionRange", "0.10-0.20", "fraction", "allowed extraplanar gas mass range"),
+        ("uncertainty of approximately 5", "lagUncertainty", 5, "km/s/kpc", "approximate lag uncertainty"),
+        ("confirm the velocity decrease", "rotationDip200To250", "10-15", "km/s", "confirmed rotation velocity decrease between 200 and 250 arcsec"),
+        ("meaningful rotation curve out to", "lastReliableRadius", 720, "arcsec", "meaningful rotation curve outer radius"),
+        ("720 arcsec correspond to 48 kpc", "lastReliableRadiusKpc", 48, "kpc", "physical scale of 720 arcsec at 13.8 Mpc"),
+        ("best-fit 3.6$\\mu$m mass-to-light ratio of 0.48", "bestFit36umMassToLight", 0.48, "M/L", "MOND mass-model comparison M/L value from source paper"),
+        ("best-fit distance of 12.3 Mpc", "bestFitMondDistance", 12.3, "Mpc", "MOND comparison best-fit distance"),
+    ]:
+        line, snippet = v19_text_line_snippet(halo_path, needle)
+        if snippet == "MISSING" and quantity == "velocityDispersion":
+            line, snippet = v19_text_line_snippet(halo_path, "11.7 km s")
+        if snippet == "MISSING" and quantity == "bisymmetricDistortionAmplitude":
+            line, snippet = v19_text_line_snippet(halo_path, "amplitude $V_{\\rm 2,rot}$")
+        v19_add_extracted_value(
+            rows,
+            galaxy="NGC3198",
+            evidence_bucket="halogas-3d-provenance",
+            quantity=quantity,
+            value=value,
+            unit=unit,
+            source_id="arxiv-1304.4232",
+            source_path=halo_path,
+            line=line,
+            snippet=snippet,
+            interpretation=interpretation,
+        )
+    return rows, radial_rows
+
+
+def v19_ngc3198_numeric_boundary_derived_features(value_rows: list[dict], radial_rows: list[dict]) -> list[dict]:
+    by_quantity = {row["quantity"]: row for row in value_rows if row["galaxy"] == "NGC3198"}
+    radial = next((row for row in radial_rows if row["galaxy"] == "NGC3198"), {})
+    def val(quantity: str, default: float = math.nan) -> float:
+        return parse_float(by_quantity.get(quantity, {}).get("value", default), default)
+
+    gamma = parse_float(radial.get("gammaHiOutsideR25MsunYr"), math.nan)
+    sfr = parse_float(radial.get("sfrMsunYr"), math.nan)
+    a_min = val("aTotMin")
+    a_max = val("aTotMax")
+    r_min = val("aTotMinRadius")
+    r_max = val("aTotMaxRadius")
+    v_mean = val("vMean")
+    onset = val("bisymmetricModelOnset")
+    extent = val("axisymmetricResidualMapRadius")
+    rotation_dip_text = by_quantity.get("rotationDip200To250", {}).get("value", "")
+    features = [
+        {
+            "feature": "absAverageInflowOutsideR25",
+            "value": abs(gamma) if math.isfinite(gamma) else "",
+            "unit": "Msun/yr",
+            "sourceQuantities": "gammaHiOutsideR25",
+            "interpretation": "NGC3198 has direct outer-disk inward radial HI mass flow.",
+        },
+        {
+            "feature": "inflowToSfrRatio",
+            "value": abs(gamma) / sfr if math.isfinite(gamma) and math.isfinite(sfr) and sfr > 0 else "",
+            "unit": "ratio",
+            "sourceQuantities": "gammaHiOutsideR25;sfr",
+            "interpretation": "The inflow scale is comparable to the published SFR.",
+        },
+        {
+            "feature": "outerBisymmetricSpanFraction",
+            "value": (extent - onset) / extent if math.isfinite(extent) and extent > 0 and math.isfinite(onset) else "",
+            "unit": "fraction",
+            "sourceQuantities": "axisymmetricResidualMapRadius;bisymmetricModelOnset",
+            "interpretation": "Fraction of the mapped disk occupied by the outer bisymmetric-flow domain.",
+        },
+        {
+            "feature": "bisymmetricAmplitudeGrowth",
+            "value": a_max - a_min if math.isfinite(a_max) and math.isfinite(a_min) else "",
+            "unit": "km/s",
+            "sourceQuantities": "aTotMax;aTotMin",
+            "interpretation": "Growth in coherent non-axisymmetric velocity amplitude across the outer disk.",
+        },
+        {
+            "feature": "bisymmetricAmplitudeGrowthPerArcsec",
+            "value": (a_max - a_min) / (r_max - r_min) if all(math.isfinite(item) for item in [a_max, a_min, r_max, r_min]) and r_max != r_min else "",
+            "unit": "km/s/arcsec",
+            "sourceQuantities": "aTotMax;aTotMin;aTotMaxRadius;aTotMinRadius",
+            "interpretation": "Radial growth rate of the outer perturbation amplitude.",
+        },
+        {
+            "feature": "outerPerturbationToCircularSpeed",
+            "value": a_max / v_mean if math.isfinite(a_max) and math.isfinite(v_mean) and v_mean > 0 else "",
+            "unit": "ratio",
+            "sourceQuantities": "aTotMax;vMean",
+            "interpretation": "Outer perturbation amplitude as a fraction of the circular speed.",
+        },
+        {
+            "feature": "extraplanarHiMassFraction",
+            "value": val("thickDiskHiMassFraction"),
+            "unit": "fraction",
+            "sourceQuantities": "thickDiskHiMassFraction",
+            "interpretation": "Direct 3D-model extraplanar/lowered-rotation HI fraction.",
+        },
+        {
+            "feature": "meanLagAmplitude",
+            "value": safe_mean([val("lagApproaching"), val("lagReceding")]),
+            "unit": "km/s/kpc",
+            "sourceQuantities": "lagApproaching;lagReceding",
+            "interpretation": "Mean of the two published vertical lag sides.",
+        },
+        {
+            "feature": "rotationDip200To250Arcsec",
+            "value": rotation_dip_text,
+            "unit": "km/s",
+            "sourceQuantities": "rotationDip200To250",
+            "interpretation": "Local rotation-curve dip confirmed by HALOGAS, useful as a boundary-shape warning.",
+        },
+    ]
+    return features
+
+
+def v19_ngc3198_numeric_boundary_case_bridge(features: list[dict], value_rows: list[dict]) -> list[dict]:
+    source_boundary_path = DEFAULT_V19_SOURCE_BOUNDARY_TEST_OUT / "mts_v19_source_boundary_test_case_ledger.csv"
+    if not source_boundary_path.exists():
+        write_v19_source_boundary_test_artifacts(DEFAULT_V19_SOURCE_BOUNDARY_TEST_OUT)
+    bridge: list[dict] = []
+    source_rows = [row for row in read_csv_rows(source_boundary_path) if row.get("galaxy") == "NGC3198"] if source_boundary_path.exists() else []
+    for row in source_rows:
+        bridge.append(
+            {
+                "galaxy": "NGC3198",
+                "bridgeType": "source-boundary-score",
+                "variantId": row.get("variantId", ""),
+                "sourceBoundaryFactor": row.get("sourceBoundaryFactor", ""),
+                "lockedV18Rmse": row.get("lockedV18Rmse", ""),
+                "fullSourceRmse": row.get("fullSourceRmse", ""),
+                "candidateRmse": row.get("candidateRmse", ""),
+                "candidateImprovementVsFullSourceKmS": row.get("candidateImprovementVsFullSourceKmS", ""),
+                "interpretation": "previous boundary test score for connecting source evidence to support response",
+                "sourcePath": str(source_boundary_path),
+            }
+        )
+    feature_map = {row["feature"]: row for row in features}
+    for feature in ["absAverageInflowOutsideR25", "outerBisymmetricSpanFraction", "bisymmetricAmplitudeGrowth", "outerPerturbationToCircularSpeed", "extraplanarHiMassFraction", "meanLagAmplitude"]:
+        item = feature_map.get(feature, {})
+        bridge.append(
+            {
+                "galaxy": "NGC3198",
+                "bridgeType": "candidate-numeric-input",
+                "variantId": "",
+                "sourceBoundaryFactor": "",
+                "lockedV18Rmse": "",
+                "fullSourceRmse": "",
+                "candidateRmse": "",
+                "candidateImprovementVsFullSourceKmS": item.get("value", ""),
+                "interpretation": item.get("interpretation", ""),
+                "sourcePath": "mts_v19_ngc3198_numeric_boundary_derived_features.csv",
+            }
+        )
+    extracted_count = sum(1 for row in value_rows if row.get("snippet") != "MISSING")
+    bridge.append(
+        {
+            "galaxy": "NGC3198",
+            "bridgeType": "evidence-coverage",
+            "variantId": "",
+            "sourceBoundaryFactor": "",
+            "lockedV18Rmse": "",
+            "fullSourceRmse": "",
+            "candidateRmse": "",
+            "candidateImprovementVsFullSourceKmS": extracted_count,
+            "interpretation": "number of numeric values with source snippets extracted for NGC3198 and controls",
+            "sourcePath": "mts_v19_ngc3198_numeric_boundary_extracted_values.csv",
+        }
+    )
+    return bridge
+
+
+def write_v19_ngc3198_numeric_boundary_artifacts(out_dir: Path, source_cache: Path, offline: bool) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source_cache.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_ngc3198_numeric_boundary"
+    inventory_rows, tex_paths = v19_ngc3198_numeric_boundary_fetch_sources(source_cache, offline)
+    value_rows, radial_rows = v19_ngc3198_numeric_boundary_extracted_values(tex_paths)
+    features = v19_ngc3198_numeric_boundary_derived_features(value_rows, radial_rows)
+    bridge_rows = v19_ngc3198_numeric_boundary_case_bridge(features, value_rows)
+    missing_rows = []
+    required_quantities = [
+        "gammaHiOutsideR25",
+        "inflowRangeHigh",
+        "residualVelocityPeakAbs",
+        "bisymmetricModelOnset",
+        "aTotMax",
+        "thickDiskHiMassFraction",
+        "lagApproaching",
+        "rotationDip200To250",
+    ]
+    ngc_quantities = {row["quantity"] for row in value_rows if row["galaxy"] == "NGC3198" and row.get("snippet") != "MISSING"}
+    for quantity in required_quantities:
+        if quantity not in ngc_quantities:
+            missing_rows.append({"galaxy": "NGC3198", "missingField": quantity, "whyItMatters": "needed to turn source-boundary evidence into a numeric candidate discriminator", "sourcePath": "MISSING"})
+    feature_values = {row["feature"]: parse_float(row.get("value"), math.nan) for row in features}
+    has_boundary = (
+        parse_float(feature_values.get("absAverageInflowOutsideR25"), 0.0) >= 0.9
+        and parse_float(feature_values.get("outerBisymmetricSpanFraction"), 0.0) >= 0.45
+        and parse_float(feature_values.get("bisymmetricAmplitudeGrowth"), 0.0) >= 5.0
+        and parse_float(feature_values.get("extraplanarHiMassFraction"), 0.0) >= 0.10
+    )
+    if missing_rows:
+        verdict = "partial numeric boundary evidence acquired"
+    elif has_boundary:
+        verdict = "numeric soft-boundary evidence acquired"
+    else:
+        verdict = "numeric boundary evidence weak"
+    write_csv(out_dir / f"{prefix}_source_inventory.csv", inventory_rows)
+    write_csv(out_dir / f"{prefix}_radial_flow_table.csv", radial_rows)
+    write_csv(out_dir / f"{prefix}_extracted_values.csv", value_rows)
+    write_csv(out_dir / f"{prefix}_derived_features.csv", features)
+    write_csv(out_dir / f"{prefix}_case_bridge.csv", bridge_rows)
+    write_csv(out_dir / f"{prefix}_missing_fields.csv", missing_rows)
+    formula = {
+        "candidateId": "mts-v19-ngc3198-numeric-boundary-v1",
+        "status": verdict,
+        "notALaw": True,
+        "purpose": "Acquire direct numeric source-paper variables that may replace named boundary labels in a later held-out candidate.",
+        "candidateNumericInputs": [row["feature"] for row in features],
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameter", "MOND fit parameter", "weak/systematics fitting"],
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-ngc3198-numeric-boundary-v1",
+        "verdict": verdict,
+        "sourceCount": len(V19_NGC3198_NUMERIC_BOUNDARY_SOURCES),
+        "availableSourceCount": sum(1 for row in inventory_rows if row.get("cacheStatus") == "available"),
+        "primaryTexFoundCount": sum(1 for row in inventory_rows if row.get("primaryTexFound")),
+        "radialFlowTableRows": len(radial_rows),
+        "extractedValueRows": len(value_rows),
+        "derivedFeatureRows": len(features),
+        "missingFieldCount": len(missing_rows),
+        "numericBoundaryFeaturePass": has_boundary,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "largeDownloadsAllowed": False,
+        "cacheRoot": str(source_cache),
+    }
+    report = [
+        "# MTS v19 NGC3198 Numeric Boundary Evidence",
+        "",
+        "This is a source-data acquisition mode. It does not change v18, v19, the browser, or any law.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Source bundles available: `{capsule['availableSourceCount']}` / `{capsule['sourceCount']}`.",
+        f"Primary TeX files found: `{capsule['primaryTexFoundCount']}`.",
+        f"Extracted numeric rows: `{len(value_rows)}`.",
+        "",
+        "## Key Numeric Inputs Acquired",
+        "",
+        "| Feature | Value | Unit | Meaning |",
+        "| --- | ---: | --- | --- |",
+    ]
+    for row in features:
+        report.append(f"| {row['feature']} | {row['value']} | {row['unit']} | {row['interpretation']} |")
+    report.extend(
+        [
+            "",
+            "## Next Use",
+            "",
+            "These values are candidates for a later numeric source-boundary discriminator. They are not allowed to enter a formula by galaxy name, and they are not a browser/release change.",
+            "",
+            "## Guardrails",
+            "",
+            "- No FITS cubes or bulk archives were fetched.",
+            "- Every numeric value is tied to a cached source bundle/path and snippet where available.",
+            "- The mode explicitly keeps NGC3198 as an evidence case, not as a named formula rule.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19ngc3198numericboundary(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE
+    capsule = write_v19_ngc3198_numeric_boundary_artifacts(out_dir, source_cache, args.offline)
+    print("MTS v19 NGC3198 numeric boundary evidence")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"sources={capsule['availableSourceCount']}/{capsule['sourceCount']}",
+                f"tex={capsule['primaryTexFoundCount']}",
+                f"values={capsule['extractedValueRows']}",
+                f"missing={capsule['missingFieldCount']}",
+                f"boundary_pass={capsule['numericBoundaryFeaturePass']}",
+            ]
+        )
+    )
+    print(f"Wrote v19 NGC3198 numeric boundary evidence to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -109578,6 +110161,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19sourceboundarytest",
             "v19boundarynumericlaw",
             "observedstatev19boundarynumericlaw",
+            "v19ngc3198numericboundary",
+            "observedstatev19ngc3198numericboundary",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -110025,6 +110610,8 @@ def main() -> None:
         cmd_v19sourceboundarytest(args)
     elif args.mode in {"v19boundarynumericlaw", "observedstatev19boundarynumericlaw"}:
         cmd_v19boundarynumericlaw(args)
+    elif args.mode in {"v19ngc3198numericboundary", "observedstatev19ngc3198numericboundary"}:
+        cmd_v19ngc3198numericboundary(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
