@@ -279,6 +279,8 @@ DEFAULT_V19_BOUNDARY_OUTER_PERTURBATION_OUT = OUTPUT_PACK_ROOT / "mts-v19-bounda
 DEFAULT_V19_SOURCE_BOUNDARY_NUMERIC_GATE_V2_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-numeric-gate-v2"
 DEFAULT_V19_BROAD_SOURCE_BOUNDARY_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-v19-broad-source-boundary-audit-v1"
 DEFAULT_V19_MISSING_BOUNDARY_STATE_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-v19-missing-boundary-state-audit-v1"
+DEFAULT_V19_CASE_TWO_D_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-case-2d-provenance-v1"
+DEFAULT_V19_CASE_TWO_D_PROVENANCE_CACHE = DEFAULT_V19_COUNTER_EVIDENCE_CACHE
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -111767,6 +111769,383 @@ def cmd_v19missingboundarystateaudit(args: argparse.Namespace) -> None:
     print(f"Wrote v19 missing-boundary state audit to {out_dir.resolve()}")
 
 
+V19_CASE_TWO_D_PRIMARY_TARGETS = {
+    "UGC05253": "awkward retained high/source-load blocker",
+    "UGC07089": "protected low-load false-activation blocker",
+    "UGC03205": "retained high/source-load control",
+}
+
+
+def v19_case_two_d_required_outputs() -> dict[str, Path]:
+    counter_dir = DEFAULT_V19_COUNTER_EVIDENCE_OUT
+    state_dir = DEFAULT_V19_MISSING_BOUNDARY_STATE_AUDIT_OUT
+    parser_dir = DEFAULT_V19_EXTERNAL_TWO_D_PARSER_OUT
+    required = {
+        "counterCaseMap": counter_dir / "mts_v19_counter_evidence_case_map.csv",
+        "counterSourceInventory": counter_dir / "mts_v19_counter_evidence_source_inventory.csv",
+        "counterKinematicProvenance": counter_dir / "mts_v19_counter_evidence_kinematic_provenance.csv",
+        "stateNearestArchetypes": state_dir / "mts_v19_missing_boundary_state_audit_nearest_archetypes.csv",
+        "stateTable": state_dir / "mts_v19_missing_boundary_state_audit_state_table.csv",
+        "external2DCaseMetrics": parser_dir / "mts_v19_external_2d_parser_case_metrics.csv",
+    }
+    if not required["counterCaseMap"].exists():
+        write_v19_counter_evidence_artifacts(DEFAULT_V19_COUNTER_EVIDENCE_OUT, DEFAULT_V19_COUNTER_EVIDENCE_CACHE, True)
+    if not required["stateNearestArchetypes"].exists():
+        write_v19_missing_boundary_state_audit_artifacts(DEFAULT_V19_MISSING_BOUNDARY_STATE_AUDIT_OUT)
+    if not required["external2DCaseMetrics"].exists():
+        write_v19_external_2d_parser_artifacts(DEFAULT_V19_EXTERNAL_TWO_D_PARSER_OUT, DEFAULT_V19_EXTERNAL_TWO_D_ACQUIRE_CACHE)
+    return required
+
+
+def v19_case_two_d_cache_roots(source_cache: Path) -> list[Path]:
+    roots = []
+    for root in [source_cache, DEFAULT_V19_COUNTER_EVIDENCE_CACHE]:
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def v19_case_two_d_cache_file(roots: list[Path], role: str, galaxy: str, suffix: str) -> Path | None:
+    stem = safe_file_stem(galaxy)
+    for root in roots:
+        path = root / role / f"{stem}.{suffix}"
+        if path.exists():
+            return path
+    return None
+
+
+def v19_case_two_d_simbad_summary(galaxy: str, cache_roots: list[Path]) -> dict:
+    path = v19_case_two_d_cache_file(cache_roots, "simbad-object-text", galaxy, "txt")
+    if not path:
+        return {"simbadObject": "", "simbadObjectType": "", "simbadMorphology": "", "simbadAngularSize": "", "simbadSourcePath": "MISSING"}
+    text = v19_counter_text_from_path(path)
+    object_match = re.search(r"Object\s+(.+?)\s+---\s+(.+?)\s+---", text)
+    morph_match = re.search(r"Morphological type:\s+(.+)", text)
+    size_match = re.search(r"Angular size:\s+(.+)", text)
+    return {
+        "simbadObject": object_match.group(1).strip() if object_match else "",
+        "simbadObjectType": object_match.group(2).strip() if object_match else "",
+        "simbadMorphology": morph_match.group(1).strip() if morph_match else "",
+        "simbadAngularSize": size_match.group(1).strip() if size_match else "",
+        "simbadSourcePath": str(path),
+    }
+
+
+def v19_case_two_d_metric_rows(required: dict[str, Path]) -> tuple[list[dict], dict[str, dict]]:
+    targets = set(V19_CASE_TWO_D_PRIMARY_TARGETS)
+    raw_rows = [row for row in read_csv_rows(required["external2DCaseMetrics"]) if row.get("galaxy") in targets]
+    by_name: dict[str, dict] = {}
+    metric_rows: list[dict] = []
+    for galaxy in sorted(targets):
+        rows = [row for row in raw_rows if row.get("galaxy") == galaxy]
+        source_ids = sorted({row.get("sourceId", "") for row in rows if row.get("sourceId", "")})
+        source_paths = sorted({row.get("sourcePath", "") for row in rows if row.get("sourcePath", "")})
+        p4_rows = [row for row in rows if row.get("whispP4UGC") or "paper4" in row.get("sourceId", "")]
+        p6_rows = [row for row in rows if row.get("whispP6Band")]
+        hi_rows = [row for row in p6_rows if row.get("whispP6Band") == "HI"]
+        uv_rows = [row for row in p6_rows if row.get("whispP6Band") in {"NUV", "FUV"}]
+        def max_value(key: str, selected: list[dict]) -> float:
+            values = [parse_float(row.get(key), math.nan) for row in selected]
+            values = [value for value in values if math.isfinite(value)]
+            return max(values) if values else math.nan
+        def first_value(key: str, selected: list[dict]) -> float:
+            for row in selected:
+                value = parse_float(row.get(key), math.nan)
+                if math.isfinite(value):
+                    return value
+            return math.nan
+        summary = {
+            "galaxy": galaxy,
+            "external2DSourceIds": ";".join(source_ids),
+            "external2DSourcePaths": ";".join(source_paths),
+            "whispPaper4AsymmetryA": max_value("whispP4AsymmetryA", p4_rows),
+            "whispPaper4AxisSymmetryAxy": max_value("whispP4AxisSymmetryAxy", p4_rows),
+            "whispPaper4Ellipticity": max_value("whispP4Ellipticity", p4_rows),
+            "whispPaper4Concentration": max_value("whispP4Concentration", p4_rows),
+            "whispHIAsymmetryA": max_value("whispP6AsymmetryA", hi_rows),
+            "whispHIGini": max_value("whispP6Gini", hi_rows),
+            "whispHIEllipticity": max_value("whispP6Ellipticity", hi_rows),
+            "whispHIR50Arcsec": first_value("whispP6R50Arcsec", hi_rows),
+            "whispUVAsymmetryMax": max_value("whispP6AsymmetryA", uv_rows),
+            "whispUVEllipticityMax": max_value("whispP6Ellipticity", uv_rows),
+            "whispUVR50ArcsecMax": max_value("whispP6R50Arcsec", uv_rows),
+            "directRadialFlowTable": "MISSING",
+            "directRadialFlowReason": "No cached per-galaxy radial-flow/side-pair table for this source family; only WHISP morphology/UV/HI shape metrics are currently numeric.",
+        }
+        by_name[galaxy] = summary
+        for row in rows:
+            metric_rows.append(
+                {
+                    "galaxy": galaxy,
+                    "sourceId": row.get("sourceId", ""),
+                    "sourceClass": row.get("sourceClass", ""),
+                    "pointCount": row.get("pointCount", ""),
+                    "whispP4AsymmetryA": row.get("whispP4AsymmetryA", ""),
+                    "whispP4AxisSymmetryAxy": row.get("whispP4AxisSymmetryAxy", ""),
+                    "whispP4Ellipticity": row.get("whispP4Ellipticity", ""),
+                    "whispP6Band": row.get("whispP6Band", ""),
+                    "whispP6Gini": row.get("whispP6Gini", ""),
+                    "whispP6M20": row.get("whispP6M20", ""),
+                    "whispP6Concentration": row.get("whispP6Concentration", ""),
+                    "whispP6AsymmetryA": row.get("whispP6AsymmetryA", ""),
+                    "whispP6SmoothnessS": row.get("whispP6SmoothnessS", ""),
+                    "whispP6Ellipticity": row.get("whispP6Ellipticity", ""),
+                    "whispP6R50Arcsec": row.get("whispP6R50Arcsec", ""),
+                    "sourcePath": row.get("sourcePath", ""),
+                }
+            )
+    return metric_rows, by_name
+
+
+def v19_case_two_d_decision(facts: dict) -> tuple[str, str, str, str]:
+    quality = parse_float(facts.get("qualityCode"), math.nan)
+    inc = parse_float(facts.get("inclinationDeg"), math.nan)
+    state_decision = str(facts.get("stateDecision", "")).lower()
+    uv_asym = parse_float(facts.get("whispUVAsymmetryMax"), math.nan)
+    hi_asym = parse_float(facts.get("whispHIAsymmetryA"), math.nan)
+    p4_asym = parse_float(facts.get("whispPaper4AsymmetryA"), math.nan)
+    high_inclination_quality_risk = math.isfinite(quality) and quality > 1 and math.isfinite(inc) and inc >= 75.0
+    low_inclination_quality_risk = math.isfinite(quality) and quality > 1 and math.isfinite(inc) and inc <= 45.0
+    high_uv_or_hi_asymmetry = (math.isfinite(uv_asym) and uv_asym >= 1.5) or (math.isfinite(hi_asym) and hi_asym >= 1.2)
+    high_paper4_asymmetry = math.isfinite(p4_asym) and p4_asym >= 1.2
+    if high_inclination_quality_risk and "protected" in state_decision:
+        return (
+            "cap/protect source loading",
+            "Q>1 high-inclination low-load lookalike with protected-cap state proximity; do not soften this into the high/source-load class.",
+            "2D/provenance protected cap",
+            "future source law should include an observational admissibility cap for high-inclination Q2 lookalikes before any low-load loading.",
+        )
+    if low_inclination_quality_risk and (high_uv_or_hi_asymmetry or high_paper4_asymmetry):
+        return (
+            "hold out until source-specific radial-flow evidence exists",
+            "Q>1 low-inclination system with strong WHISP UV/HI asymmetry; it is not safe as a clean source-load training case without the actual velocity-field/radial-flow provenance.",
+            "ambiguous source-field/provenance boundary",
+            "fetch source-specific radial-flow or tilted-ring notes before using this case to change a law.",
+        )
+    if "source-load" in state_decision and math.isfinite(quality) and quality <= 1:
+        return (
+            "admit as source-loading positive control",
+            "High-quality SPARC row and state/profile proximity both lean source-load; current 2D evidence does not justify a protective cap.",
+            "source-load control",
+            "use as a positive control when testing any later source-admissibility law.",
+        )
+    return (
+        "case remains unresolved",
+        "Available state/profile and 2D provenance do not give a decisive admit/cap boundary.",
+        "unresolved",
+        "do not alter the framework from this case alone.",
+    )
+
+
+def v19_case_two_d_case_rows(source_cache: Path) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    required = v19_case_two_d_required_outputs()
+    cache_roots = v19_case_two_d_cache_roots(source_cache)
+    counter_by_name = {row["galaxy"]: row for row in read_csv_rows(required["counterCaseMap"])}
+    state_by_name = {row["galaxy"]: row for row in read_csv_rows(required["stateNearestArchetypes"])}
+    _, metric_by_name = v19_case_two_d_metric_rows(required)
+    case_rows: list[dict] = []
+    decision_rows: list[dict] = []
+    missing_rows: list[dict] = []
+    next_rows: list[dict] = []
+    for galaxy, target_role in V19_CASE_TWO_D_PRIMARY_TARGETS.items():
+        counter = counter_by_name.get(galaxy, {})
+        state = state_by_name.get(galaxy, {})
+        metrics = metric_by_name.get(galaxy, {})
+        simbad = v19_case_two_d_simbad_summary(galaxy, cache_roots)
+        distance = parse_float(counter.get("distanceMpc"), math.nan)
+        distance_unc = parse_float(counter.get("distanceUncertaintyMpc"), math.nan)
+        facts = {
+            "galaxy": galaxy,
+            "targetRole": target_role,
+            "targetClass": counter.get("targetClass", ""),
+            "set": counter.get("set", ""),
+            "lockedRoute": counter.get("lockedRoute", ""),
+            "sourceClass": counter.get("sourceClass", ""),
+            "external2DDecision": counter.get("external2DDecision", ""),
+            "stateDecision": state.get("stateDecision", ""),
+            "nearestArchetype": state.get("nearestArchetype", ""),
+            "nearestArchetypeRole": state.get("nearestArchetypeRole", ""),
+            "nearestDistance": state.get("nearestDistance", ""),
+            "qualityCode": counter.get("qualityCode", ""),
+            "qualityLabel": counter.get("qualityLabel", ""),
+            "inclinationDeg": counter.get("inclinationDeg", ""),
+            "inclinationUncertaintyDeg": counter.get("inclinationUncertaintyDeg", ""),
+            "distanceMpc": counter.get("distanceMpc", ""),
+            "distanceUncertaintyMpc": counter.get("distanceUncertaintyMpc", ""),
+            "distanceUncertaintyFraction": distance_unc / distance if math.isfinite(distance) and distance > 0 and math.isfinite(distance_unc) else "",
+            "rotationCurveRefCodes": counter.get("rotationCurveRefCodes", ""),
+            "rotationCurveReferences": counter.get("rotationCurveReferences", ""),
+            **simbad,
+            **metrics,
+        }
+        decision, evidence_basis, physical_class, next_action = v19_case_two_d_decision(facts)
+        facts["caseDecision"] = decision
+        facts["caseEvidenceBasis"] = evidence_basis
+        facts["casePhysicalClass"] = physical_class
+        facts["caseNextAction"] = next_action
+        case_rows.append(facts)
+        decision_rows.append(
+            {
+                "galaxy": galaxy,
+                "targetRole": target_role,
+                "stateDecision": facts["stateDecision"],
+                "nearestArchetype": facts["nearestArchetype"],
+                "qualityCode": facts["qualityCode"],
+                "inclinationDeg": facts["inclinationDeg"],
+                "whispHIAsymmetryA": facts.get("whispHIAsymmetryA", ""),
+                "whispUVAsymmetryMax": facts.get("whispUVAsymmetryMax", ""),
+                "admissibilityDecision": decision,
+                "physicalClass": physical_class,
+                "evidenceBasis": evidence_basis,
+                "nextAction": next_action,
+                "usableAsFormulaInputNow": False,
+            }
+        )
+        if facts.get("directRadialFlowTable") == "MISSING":
+            missing_rows.append(
+                {
+                    "galaxy": galaxy,
+                    "missingField": "case-specific numeric radial-flow / side-pair / tilted-ring anomaly table",
+                    "whyItMatters": "Needed before this case can justify changing the source-field law rather than being a provenance/classification constraint.",
+                    "currentFallbackEvidence": "WHISP morphology/UV/HI metrics plus SPARC quality/inclination/reference provenance",
+                    "sourcePath": "MISSING",
+                }
+            )
+        if decision.startswith("hold out"):
+            missing_rows.append(
+                {
+                    "galaxy": galaxy,
+                    "missingField": "source-specific velocity-field interpretation",
+                    "whyItMatters": "Low-inclination Q2 plus high UV/HI asymmetry can mimic source loading or provenance failure.",
+                    "currentFallbackEvidence": facts.get("external2DSourcePaths", ""),
+                    "sourcePath": "MISSING",
+                }
+            )
+        next_rows.append(
+            {
+                "galaxy": galaxy,
+                "recommendedUse": physical_class,
+                "nextCandidateUse": next_action,
+                "formulaInputStatus": "not a formula input; evidence constraint only",
+                "sourcePaths": ";".join(path for path in [facts.get("simbadSourcePath", ""), facts.get("external2DSourcePaths", "")] if path),
+            }
+        )
+    return case_rows, decision_rows, missing_rows, next_rows
+
+
+def v19_case_two_d_source_inventory(source_cache: Path, case_rows: list[dict], metric_rows: list[dict]) -> list[dict]:
+    required = v19_case_two_d_required_outputs()
+    source_paths: dict[str, tuple[str, str]] = {}
+    for role, path in required.items():
+        source_paths[str(path)] = (role, "local prerequisite output")
+    for row in case_rows:
+        for path in [row.get("simbadSourcePath", ""), row.get("external2DSourcePaths", "")]:
+            for item in str(path).split(";"):
+                if item:
+                    source_paths[item] = ("case evidence source", row["galaxy"])
+        for role, suffix in [("ned-object-html", "html"), ("simbad-object-text", "txt")]:
+            path = v19_case_two_d_cache_file(v19_case_two_d_cache_roots(source_cache), role, row["galaxy"], suffix)
+            if path:
+                source_paths[str(path)] = (role, row["galaxy"])
+    for row in metric_rows:
+        if row.get("sourcePath"):
+            source_paths[row["sourcePath"]] = ("external 2D numeric table", row["galaxy"])
+    inventory = []
+    for path_text, (role, galaxy_or_reason) in sorted(source_paths.items()):
+        path = Path(path_text)
+        inventory.append(
+            {
+                "galaxy": galaxy_or_reason if galaxy_or_reason in V19_CASE_TWO_D_PRIMARY_TARGETS else "",
+                "sourceRole": role,
+                "path": path_text,
+                "bytes": path.stat().st_size if path.exists() else "",
+                "sha256": file_sha256(path) if path.exists() else "",
+                "status": "available" if path.exists() else "MISSING",
+                "reason": galaxy_or_reason if galaxy_or_reason not in V19_CASE_TWO_D_PRIMARY_TARGETS else "case-specific provenance input",
+            }
+        )
+    return inventory
+
+
+def write_v19_case_two_d_provenance_artifacts(out_dir: Path, source_cache: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source_cache.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_case_2d_provenance"
+    required = v19_case_two_d_required_outputs()
+    metric_rows, _ = v19_case_two_d_metric_rows(required)
+    case_rows, decision_rows, missing_rows, next_rows = v19_case_two_d_case_rows(source_cache)
+    source_rows = v19_case_two_d_source_inventory(source_cache, case_rows, metric_rows)
+    decision_by_name = {row["galaxy"]: row["admissibilityDecision"] for row in decision_rows}
+    if decision_by_name.get("UGC07089") == "cap/protect source loading" and decision_by_name.get("UGC03205") == "admit as source-loading positive control" and decision_by_name.get("UGC05253", "").startswith("hold out"):
+        verdict = "case-specific provenance splits blockers; UGC05253 needs source-specific radial-flow"
+    elif any(row["admissibilityDecision"].startswith("hold out") for row in decision_rows):
+        verdict = "mixed 2D/provenance boundary; do not force all-case gate"
+    else:
+        verdict = "case-specific provenance insufficient"
+    write_csv(out_dir / f"{prefix}_source_inventory.csv", source_rows)
+    write_csv(out_dir / f"{prefix}_case_facts.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_external_2d_metrics.csv", metric_rows)
+    write_csv(out_dir / f"{prefix}_admissibility_decisions.csv", decision_rows)
+    write_csv(out_dir / f"{prefix}_missing_fields.csv", missing_rows)
+    write_csv(out_dir / f"{prefix}_next_candidate_inputs.csv", next_rows)
+    capsule = {
+        "analysisName": "mts-v19-case-2d-provenance-v1",
+        "verdict": verdict,
+        "targetCount": len(case_rows),
+        "availableSourceCount": sum(1 for row in source_rows if row["status"] == "available"),
+        "missingFieldCount": len(missing_rows),
+        "decisions": decision_by_name,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "lawChanged": False,
+        "largeDownloadsAllowed": False,
+        "cacheRoot": str(source_cache),
+    }
+    report = [
+        "# MTS v19 Case-Specific 2D / Radial-Flow Provenance",
+        "",
+        "This is a focused blocker attack for UGC05253, UGC07089, and UGC03205. It does not change v18, v19, the browser, or any law. Names are used only to assemble source evidence.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "| Galaxy | state/provenance decision | physical class | key basis |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row in decision_rows:
+        report.append(f"| {row['galaxy']} | {row['admissibilityDecision']} | {row['physicalClass']} | {row['evidenceBasis']} |")
+    report.extend(
+        [
+            "",
+            "## What This Means For The Framework",
+            "",
+            "- `UGC07089` should not be used to broaden the source-boundary law: the combined state/provenance evidence says protected cap.",
+            "- `UGC03205` is the useful source-load control: high-quality SPARC row, source-load state proximity, and no current 2D cap evidence.",
+            "- `UGC05253` is the real unresolved blocker: it is Q2, low-inclination, and has strong WHISP UV/HI asymmetry, so it needs source-specific radial-flow or tilted-ring provenance before it can drive a law.",
+            "",
+            "## Guardrails",
+            "",
+            "- No MTS formula, browser preset, q, Gamma0, M/L, residual lookup, raw RMSE lookup, or NFW/MOND fit input was changed.",
+            "- WHISP/UV/HI morphology metrics are treated as evidence constraints, not as a released transport law.",
+            "- Direct radial-flow tables remain missing for these three cases and are recorded explicitly.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19case2dprovenance(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_CASE_TWO_D_PROVENANCE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_V19_CASE_TWO_D_PROVENANCE_CACHE
+    capsule = write_v19_case_two_d_provenance_artifacts(out_dir, source_cache)
+    print("MTS v19 case-specific 2D/radial-flow provenance")
+    print(f"verdict={capsule['verdict']}")
+    print("\t".join([f"targets={capsule['targetCount']}", f"sources={capsule['availableSourceCount']}", f"missing_fields={capsule['missingFieldCount']}"]))
+    print(f"Wrote v19 case-specific provenance to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -112052,6 +112431,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19broadsourceboundaryaudit",
             "v19missingboundarystateaudit",
             "observedstatev19missingboundarystateaudit",
+            "v19case2dprovenance",
+            "observedstatev19case2dprovenance",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -112513,6 +112894,8 @@ def main() -> None:
         cmd_v19broadsourceboundaryaudit(args)
     elif args.mode in {"v19missingboundarystateaudit", "observedstatev19missingboundarystateaudit"}:
         cmd_v19missingboundarystateaudit(args)
+    elif args.mode in {"v19case2dprovenance", "observedstatev19case2dprovenance"}:
+        cmd_v19case2dprovenance(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
