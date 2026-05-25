@@ -263,6 +263,8 @@ DEFAULT_V19_EXTERNAL_TWO_D_PARSER_OUT = OUTPUT_PACK_ROOT / "mts-v19-external-2d-
 DEFAULT_V19_EXTERNAL_TWO_D_ADMISSIBILITY_OUT = OUTPUT_PACK_ROOT / "mts-v19-external-2d-admissibility-v1"
 DEFAULT_V19_COUNTER_EVIDENCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-counter-evidence-v1"
 DEFAULT_V19_COUNTER_EVIDENCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-counter-evidence-v1")
+DEFAULT_V19_NGC3198_COUNTERCASE_OUT = OUTPUT_PACK_ROOT / "mts-v19-ngc3198-countercase-v1"
+DEFAULT_V19_NGC3198_COUNTERCASE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ngc3198-countercase-v1")
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -106895,6 +106897,462 @@ def cmd_v19counterevidence(args: argparse.Namespace) -> None:
     print(f"Wrote v19.4 counterexample evidence to {out_dir.resolve()}")
 
 
+V19_NGC3198_COMPARISON_TARGETS = {
+    "NGC3198": "unresolved protected false activation",
+    "IC2574": "protected cap control",
+    "NGC5055": "protected cap control",
+    "UGC07089": "protected cap control",
+    "NGC2403": "admitted high/source-load control",
+    "NGC3521": "admitted high/source-load control",
+    "NGC7331": "admitted high/source-load control",
+    "NGC4157": "unexplained remaining gap control",
+    "NGC4100": "unexplained remaining gap control",
+}
+
+
+V19_NGC3198_DIRECT_SOURCES = [
+    {
+        "sourceId": "things-noncircular-arxiv",
+        "sourceRole": "source-paper-html",
+        "url": "https://arxiv.org/abs/0810.2116",
+        "maxBytes": 750_000,
+        "reason": "THINGS harmonic decomposition and non-circular motion paper",
+    },
+    {
+        "sourceId": "things-noncircular-pdf",
+        "sourceRole": "candidate-pdf",
+        "url": "https://arxiv.org/pdf/0810.2116",
+        "maxBytes": 8_000_000,
+        "reason": "direct full-text source for NGC3198 non-circular motion context",
+    },
+    {
+        "sourceId": "things-mass-model-arxiv",
+        "sourceRole": "source-paper-html",
+        "url": "https://arxiv.org/abs/0810.2100",
+        "maxBytes": 750_000,
+        "reason": "THINGS mass-model and high-resolution rotation curve paper",
+    },
+    {
+        "sourceId": "things-mass-model-pdf",
+        "sourceRole": "candidate-pdf",
+        "url": "https://arxiv.org/pdf/0810.2100",
+        "maxBytes": 8_000_000,
+        "reason": "direct full-text source for mass-model/inner-bar notes",
+    },
+    {
+        "sourceId": "halogas-ngc3198-arxiv",
+        "sourceRole": "source-paper-html",
+        "url": "https://arxiv.org/abs/1304.4232",
+        "maxBytes": 750_000,
+        "reason": "NGC3198 extraplanar gas and HI structure context",
+    },
+    {
+        "sourceId": "halogas-ngc3198-pdf",
+        "sourceRole": "candidate-pdf",
+        "url": "https://arxiv.org/pdf/1304.4232",
+        "maxBytes": 8_000_000,
+        "reason": "direct NGC3198 gas-structure source evidence",
+    },
+    {
+        "sourceId": "things-noncircular-mpia-pdf",
+        "sourceRole": "candidate-pdf",
+        "url": "https://www2.mpia-hd.mpg.de/THINGS/Publications_files/THINGS_Trachternach.pdf",
+        "maxBytes": 8_000_000,
+        "reason": "publisher-hosted THINGS non-circular motion PDF mirror",
+    },
+]
+
+
+V19_NGC3198_CAP_TERMS = [
+    "warp",
+    "bar",
+    "non-circular",
+    "non circular",
+    "lopsided",
+    "asymmetry",
+    "asymmetric",
+    "beam",
+    "streaming",
+    "c3",
+    "extraplanar",
+]
+
+
+V19_NGC3198_CLEAN_TERMS = [
+    "small",
+    "slight",
+    "slightly",
+    "regular",
+    "coplanar",
+    "good agreement",
+    "less than",
+]
+
+
+def v19_ngc3198_target_rows() -> list[dict]:
+    all_rows = v19_counter_evidence_target_rows()
+    by_name = {row["galaxy"]: row for row in all_rows}
+    rows = []
+    for name, role in V19_NGC3198_COMPARISON_TARGETS.items():
+        base = dict(by_name.get(name, {"galaxy": name}))
+        base["comparisonRole"] = role
+        rows.append(base)
+    return rows
+
+
+def v19_ngc3198_source_targets(target_rows: list[dict], source_cache: Path) -> list[dict]:
+    targets = v19_counter_source_targets(target_rows, source_cache)
+    for source in V19_NGC3198_DIRECT_SOURCES:
+        suffix = "pdf" if source["sourceRole"] == "candidate-pdf" else "html"
+        targets.append(
+            {
+                "galaxy": "MULTI",
+                "referenceCode": source["sourceId"],
+                "referenceText": source["reason"],
+                "sourceRole": source["sourceRole"],
+                "url": source["url"],
+                "cachePath": str(source_cache / source["sourceRole"] / f"{safe_file_stem(source['sourceId'])}.{suffix}"),
+                "maxBytes": source["maxBytes"],
+            }
+        )
+    unique: dict[tuple[str, str], dict] = {}
+    for target in targets:
+        unique[(target["sourceRole"], target["url"])] = target
+    return sorted(unique.values(), key=lambda row: (row["sourceRole"], row["url"]))
+
+
+def v19_ngc3198_fetch_inventory(targets: list[dict], offline: bool) -> list[dict]:
+    rows: list[dict] = []
+    for target in targets:
+        path = Path(target["cachePath"])
+        status = v19_external_2d_fetch(target["url"], path, offline, int(parse_float(target.get("maxBytes"), 750_000) or 750_000))
+        rows.append({**target, **status, "largeDownloadAllowed": False})
+    return rows
+
+
+def v19_ngc3198_source_text(fetch: dict, offline: bool) -> tuple[str, str]:
+    path = Path(fetch["cachePath"])
+    if not path.exists() or fetch.get("cacheStatus") != "available":
+        return "", "missing"
+    return v21_source_text(path, fetch.get("sourceRole", ""), offline)
+
+
+def v19_ngc3198_case_snippets(text: str, galaxy: str) -> tuple[bool, str, str, str, int, int]:
+    if not text:
+        return False, "", "", "", 0, 0
+    lowered = text.lower()
+    snippets: list[str] = []
+    cap_hits: set[str] = set()
+    clean_hits: set[str] = set()
+    for variant in v21_source_name_variants(galaxy):
+        idx = lowered.find(variant.lower())
+        while idx >= 0 and len(snippets) < 8:
+            snippet = re.sub(r"\s+", " ", text[max(0, idx - 280): idx + 480]).strip()
+            snippet_lower = snippet.lower()
+            local_cap = [term for term in V19_NGC3198_CAP_TERMS if term in snippet_lower]
+            local_clean = [term for term in V19_NGC3198_CLEAN_TERMS if term in snippet_lower]
+            if local_cap or local_clean:
+                snippets.append(snippet[:1200])
+                cap_hits.update(local_cap)
+                clean_hits.update(local_clean)
+            idx = lowered.find(variant.lower(), idx + max(1, len(variant)))
+    case_specific = any(variant.lower() in lowered for variant in v21_source_name_variants(galaxy))
+    return case_specific, "; ".join(sorted(cap_hits)), "; ".join(sorted(clean_hits)), " || ".join(snippets), len(cap_hits), len(clean_hits)
+
+
+def v19_ngc3198_evidence_rows(target_rows: list[dict], fetch_rows: list[dict], offline: bool) -> list[dict]:
+    rows: list[dict] = []
+    target_names = [row["galaxy"] for row in target_rows]
+    for fetch in fetch_rows:
+        text, parser = v19_ngc3198_source_text(fetch, offline)
+        if not text:
+            continue
+        if fetch["galaxy"] == "MULTI":
+            names = target_names
+        else:
+            names = [fetch["galaxy"]] if fetch["galaxy"] in target_names else []
+        for name in names:
+            case_specific, cap_hits, clean_hits, snippets, cap_score, clean_score = v19_ngc3198_case_snippets(text, name)
+            if not case_specific and not cap_hits and not clean_hits:
+                continue
+            if cap_score and clean_score:
+                evidence_class = "mixed direct source evidence"
+            elif cap_score:
+                evidence_class = "direct cap/reject evidence"
+            elif clean_score:
+                evidence_class = "direct clean/control evidence"
+            else:
+                evidence_class = "case mention only"
+            rows.append(
+                {
+                    "galaxy": name,
+                    "sourceRole": fetch["sourceRole"],
+                    "referenceCode": fetch.get("referenceCode", ""),
+                    "url": fetch["url"],
+                    "cachePath": fetch["cachePath"],
+                    "parser": parser,
+                    "caseSpecificMention": case_specific,
+                    "capKeywordHits": cap_hits,
+                    "cleanKeywordHits": clean_hits,
+                    "capEvidenceScore": cap_score,
+                    "cleanEvidenceScore": clean_score,
+                    "evidenceClass": evidence_class,
+                    "snippet": snippets,
+                }
+            )
+    return rows
+
+
+def v19_ngc3198_prior_context_rows(target_rows: list[dict]) -> list[dict]:
+    counter_path = DEFAULT_V19_COUNTER_EVIDENCE_OUT / "mts_v19_counter_evidence_admissibility_decisions.csv"
+    if not counter_path.exists():
+        write_v19_counter_evidence_artifacts(DEFAULT_V19_COUNTER_EVIDENCE_OUT, DEFAULT_V19_COUNTER_EVIDENCE_CACHE, True)
+    prior_by_name = {row["galaxy"]: row for row in read_csv_rows(counter_path)}
+    out = []
+    for row in target_rows:
+        prior = prior_by_name.get(row["galaxy"], {})
+        out.append(
+            {
+                "galaxy": row["galaxy"],
+                "comparisonRole": row["comparisonRole"],
+                "targetClass": row.get("targetClass", ""),
+                "lockedRoute": row.get("lockedRoute", ""),
+                "external2DDecision": row.get("external2DDecision", ""),
+                "priorAdmissibilityDecision": prior.get("admissibilityDecision", ""),
+                "priorNextPhysicalVariable": prior.get("nextPhysicalVariable", ""),
+                "mlBestGainPct": row.get("mlBestGainPct", ""),
+                "qualityCode": row.get("qualityCode", ""),
+                "inclinationDeg": row.get("inclinationDeg", ""),
+                "inclinationUncertaintyDeg": row.get("inclinationUncertaintyDeg", ""),
+                "distanceUncertaintyMpc": row.get("distanceUncertaintyMpc", ""),
+                "rotationCurveRefCodes": row.get("rotationCurveRefCodes", ""),
+                "sourcePath": counter_path,
+            }
+        )
+    return out
+
+
+def v19_ngc3198_case_contrast_rows(target_rows: list[dict], evidence_rows: list[dict]) -> list[dict]:
+    by_name: dict[str, list[dict]] = {}
+    for row in evidence_rows:
+        by_name.setdefault(row["galaxy"], []).append(row)
+    prior_by_name = {row["galaxy"]: row for row in v19_ngc3198_prior_context_rows(target_rows)}
+    rows = []
+    for target in target_rows:
+        name = target["galaxy"]
+        evidence = by_name.get(name, [])
+        cap_rows = [row for row in evidence if parse_float(row.get("capEvidenceScore"), 0.0) > 0]
+        clean_rows = [row for row in evidence if parse_float(row.get("cleanEvidenceScore"), 0.0) > 0]
+        mixed_rows = [row for row in evidence if row.get("evidenceClass") == "mixed direct source evidence"]
+        prior = prior_by_name.get(name, {})
+        if mixed_rows:
+            verdict = "mixed direct evidence"
+        elif cap_rows and not clean_rows:
+            verdict = "direct cap/reject evidence"
+        elif clean_rows and not cap_rows:
+            verdict = "direct clean/control evidence"
+        elif evidence:
+            verdict = "case mention only"
+        else:
+            verdict = "direct source evidence missing"
+        rows.append(
+            {
+                "galaxy": name,
+                "comparisonRole": target["comparisonRole"],
+                "lockedRoute": target.get("lockedRoute", ""),
+                "priorDecision": prior.get("priorAdmissibilityDecision", ""),
+                "directEvidenceVerdict": verdict,
+                "directEvidenceRows": len(evidence),
+                "capEvidenceRows": len(cap_rows),
+                "cleanEvidenceRows": len(clean_rows),
+                "mixedEvidenceRows": len(mixed_rows),
+                "bestSourcePaths": ";".join(sorted({row["cachePath"] for row in evidence[:6]})) if evidence else "MISSING",
+            }
+        )
+    return rows
+
+
+def v19_ngc3198_verdict_rows(contrast_rows: list[dict]) -> tuple[list[dict], str]:
+    by_name = {row["galaxy"]: row for row in contrast_rows}
+    ngc = by_name.get("NGC3198", {})
+    cap_controls = [row for row in contrast_rows if row["comparisonRole"] == "protected cap control"]
+    high_controls = [row for row in contrast_rows if row["comparisonRole"] == "admitted high/source-load control"]
+    unresolved_controls = [row for row in contrast_rows if row["comparisonRole"] == "unexplained remaining gap control"]
+    ngc_cap = parse_float(ngc.get("capEvidenceRows"), 0.0)
+    ngc_clean = parse_float(ngc.get("cleanEvidenceRows"), 0.0)
+    cap_control_hits = sum(1 for row in cap_controls if parse_float(row.get("capEvidenceRows"), 0.0) > 0)
+    high_cap_hits = sum(1 for row in high_controls if parse_float(row.get("capEvidenceRows"), 0.0) > 0)
+    high_clean_or_admit = sum(1 for row in high_controls if parse_float(row.get("cleanEvidenceRows"), 0.0) > 0 or "admit" in row.get("priorDecision", ""))
+    unexplained_missing = sum(1 for row in unresolved_controls if row.get("directEvidenceVerdict") in {"direct source evidence missing", "case mention only"})
+    if ngc_cap > 0 and high_cap_hits == 0 and ngc_clean == 0:
+        verdict = "NGC3198 cap evidence found"
+        next_action = "test a source-admissibility cap using direct 2D/kinematic evidence"
+    elif ngc_cap > 0 and high_cap_hits > 0:
+        verdict = "NGC3198 not source-separated"
+        next_action = "direct source-paper wording also hits admitted controls; do not promote a simple text/provenance gate"
+    elif ngc_cap > 0 and ngc_clean > 0:
+        verdict = "NGC3198 mixed direct evidence"
+        next_action = "treat NGC3198 as a mixed source-field boundary; do not promote a simple catalogue gate"
+    elif ngc_clean > 0 and ngc_cap == 0:
+        verdict = "NGC3198 likely true physical counterexample"
+        next_action = "look for a new physical state variable rather than provenance gating"
+    else:
+        verdict = "NGC3198 remains unresolved"
+        next_action = "need source-specific velocity-field table or manual paper extraction for NGC3198"
+    rows = [
+        {
+            "metric": "ngc3198CapEvidenceRows",
+            "value": ngc_cap,
+            "interpretation": "direct cap/reject evidence count for NGC3198",
+        },
+        {
+            "metric": "ngc3198CleanEvidenceRows",
+            "value": ngc_clean,
+            "interpretation": "direct clean/control evidence count for NGC3198",
+        },
+        {
+            "metric": "protectedCapControlHits",
+            "value": cap_control_hits,
+            "interpretation": "cap-control cases with direct cap evidence",
+        },
+        {
+            "metric": "admittedHighControlsWithCapEvidence",
+            "value": high_cap_hits,
+            "interpretation": "admitted high/source-load controls that also have cap-like direct evidence",
+        },
+        {
+            "metric": "admittedHighControlSupport",
+            "value": high_clean_or_admit,
+            "interpretation": "admitted high controls not contradicted by direct source evidence",
+        },
+        {
+            "metric": "unexplainedGapControlsStillMissing",
+            "value": unexplained_missing,
+            "interpretation": "remaining-gap controls without useful direct source evidence",
+        },
+        {
+            "metric": "verdict",
+            "value": verdict,
+            "interpretation": next_action,
+        },
+    ]
+    return rows, verdict
+
+
+def write_v19_ngc3198_countercase_artifacts(out_dir: Path, source_cache: Path, offline: bool) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source_cache.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_ngc3198_countercase"
+    target_rows = v19_ngc3198_target_rows()
+    source_targets = v19_ngc3198_source_targets(target_rows, source_cache)
+    fetch_rows = v19_ngc3198_fetch_inventory(source_targets, offline)
+    evidence_rows = v19_ngc3198_evidence_rows(target_rows, fetch_rows, offline)
+    context_rows = v19_ngc3198_prior_context_rows(target_rows)
+    contrast_rows = v19_ngc3198_case_contrast_rows(target_rows, evidence_rows)
+    verdict_rows, verdict = v19_ngc3198_verdict_rows(contrast_rows)
+    source_inventory = [
+        {
+            "sourceKind": "network-cache",
+            "sourceRole": row["sourceRole"],
+            "referenceCode": row.get("referenceCode", ""),
+            "url": row["url"],
+            "cachePath": row["cachePath"],
+            "cacheStatus": "available" if row["cacheStatus"] == "available" else "unavailable",
+            "bytes": row.get("bytes", "") if row["cacheStatus"] == "available" else 0,
+            "sha256": row.get("sha256", "") if row["cacheStatus"] == "available" else "",
+            "largeDownloadAllowed": False,
+            "error": "" if row["cacheStatus"] == "available" else "not cached or fetch failed",
+        }
+        for row in fetch_rows
+    ]
+    next_rows = []
+    for row in contrast_rows:
+        if row["galaxy"] == "NGC3198":
+            recommended = "source-specific velocity-field extraction" if row["directEvidenceVerdict"] in {"direct source evidence missing", "case mention only"} else "direct-evidence source admissibility gate"
+        elif row["comparisonRole"] == "unexplained remaining gap control" and row["directEvidenceVerdict"] in {"direct source evidence missing", "case mention only"}:
+            recommended = "leave as missing-variable/fitted-halo-flexibility control"
+        else:
+            recommended = "use as comparison evidence only"
+        next_rows.append(
+            {
+                "galaxy": row["galaxy"],
+                "comparisonRole": row["comparisonRole"],
+                "directEvidenceVerdict": row["directEvidenceVerdict"],
+                "recommendedNextInput": recommended,
+                "usableAsFormulaInputNow": False,
+                "sourcePaths": row["bestSourcePaths"],
+            }
+        )
+    write_csv(out_dir / f"{prefix}_source_targets.csv", source_targets)
+    write_csv(out_dir / f"{prefix}_source_inventory.csv", source_inventory)
+    write_csv(out_dir / f"{prefix}_prior_context.csv", context_rows)
+    write_csv(out_dir / f"{prefix}_evidence_table.csv", evidence_rows)
+    write_csv(out_dir / f"{prefix}_case_contrast.csv", contrast_rows)
+    write_csv(out_dir / f"{prefix}_ngc3198_verdict.csv", verdict_rows)
+    write_csv(out_dir / f"{prefix}_candidate_implications.csv", next_rows)
+    capsule = {
+        "analysisName": "mts-v19-ngc3198-countercase-v1",
+        "verdict": verdict,
+        "targetCount": len(target_rows),
+        "sourceTargetCount": len(source_targets),
+        "availableSourceCount": sum(1 for row in fetch_rows if row["cacheStatus"] == "available"),
+        "directEvidenceRows": len(evidence_rows),
+        "ngc3198Verdict": next((row["interpretation"] for row in verdict_rows if row["metric"] == "verdict"), ""),
+        "largeDownloadsAllowed": False,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "cacheRoot": str(source_cache),
+    }
+    report = [
+        "# MTS v19.5 NGC3198 Countercase",
+        "",
+        "This mode attacks the single unresolved protected false activation from v19.4. It fetches bounded direct source-paper/object evidence and compares NGC3198 against protected-cap, admitted-high, and unexplained-gap controls. It does not change MTS.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Available source products: `{capsule['availableSourceCount']}` / `{len(fetch_rows)}`.",
+        f"Direct evidence rows: `{len(evidence_rows)}`.",
+        "",
+        "| Galaxy | role | direct evidence | cap rows | clean rows | prior decision |",
+        "| --- | --- | --- | ---: | ---: | --- |",
+    ]
+    for row in contrast_rows:
+        report.append(f"| {row['galaxy']} | {row['comparisonRole']} | {row['directEvidenceVerdict']} | {row['capEvidenceRows']} | {row['cleanEvidenceRows']} | {row['priorDecision']} |")
+    report.extend(
+        [
+            "",
+            "## Guardrails",
+            "",
+            "- No v18/v19/browser formula changed.",
+            "- Names are used only for source lookup and case comparison.",
+            "- PDF/source products are bounded and cached on D:; no cubes/FITS/bulk archives are fetched.",
+            "- Direct source snippets are evidence for the next physics question, not formula inputs.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19ngc3198countercase(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_NGC3198_COUNTERCASE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    source_cache = Path(args.source_cache) if args.source_cache else DEFAULT_V19_NGC3198_COUNTERCASE_CACHE
+    capsule = write_v19_ngc3198_countercase_artifacts(out_dir, source_cache, args.offline)
+    print("MTS v19.5 NGC3198 countercase")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"targets={capsule['targetCount']}",
+                f"available_sources={capsule['availableSourceCount']}",
+                f"direct_rows={capsule['directEvidenceRows']}",
+            ]
+        )
+    )
+    print(f"Wrote v19.5 NGC3198 countercase to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -107154,6 +107612,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19external2dadmissibility",
             "v19counterevidence",
             "observedstatev19counterevidence",
+            "v19ngc3198countercase",
+            "observedstatev19ngc3198countercase",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -107589,6 +108049,8 @@ def main() -> None:
         cmd_v19external2dadmissibility(args)
     elif args.mode in {"v19counterevidence", "observedstatev19counterevidence"}:
         cmd_v19counterevidence(args)
+    elif args.mode in {"v19ngc3198countercase", "observedstatev19ngc3198countercase"}:
+        cmd_v19ngc3198countercase(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
