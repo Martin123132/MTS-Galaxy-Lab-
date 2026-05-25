@@ -252,6 +252,7 @@ DEFAULT_V19_MOTION_FIELD_LAW_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-law-
 DEFAULT_V19_SOURCE_EQUATION_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-equation-v1"
 DEFAULT_V19_SOURCE_ADMISSIBILITY_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-admissibility-v1"
 DEFAULT_V19_SOURCE_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-provenance-discriminator-v1"
+DEFAULT_V19_SOURCE_REGIME_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-regime-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -103286,6 +103287,283 @@ def cmd_v19sourceprovenance(args: argparse.Namespace) -> None:
     print(f"Wrote v19 source-provenance discriminator to {out_dir.resolve()}")
 
 
+V19_SOURCE_REGIME_IDS = [
+    "mass-coherence",
+    "mass-coherence-route-loading",
+    "mass-coherence-disk-regularity",
+    "two-regime-dwarf-suppressed",
+]
+
+
+def v19_regime_sigmoid(value: float, center: float, width: float) -> float:
+    if not math.isfinite(value):
+        return 0.0
+    safe_width = max(1.0e-6, width)
+    arg = clamp((value - center) / safe_width, -40.0, 40.0)
+    return 1.0 / (1.0 + math.exp(-arg))
+
+
+def v19_source_regime_activation(curve: dict, regime_id: str, table1_by_name: dict[str, dict]) -> tuple[float, dict]:
+    prov = v19_source_provenance_features(curve, table1_by_name)
+    local = v19_admissibility_features(curve)
+    lum = max(1.0e-9, parse_float(prov.get("luminosity36_1e9Lsun"), 0.0))
+    log_lum = math.log10(lum)
+    h_type = parse_float(prov.get("hubbleType"), math.nan)
+    vflat = parse_float(prov.get("vflatKmS"), math.nan)
+    hi_mass = max(1.0e-9, parse_float(prov.get("hiMass_1e9Msun"), 0.0))
+    log_hi = math.log10(hi_mass)
+    quality = parse_float(prov.get("qualityCode"), math.nan)
+    inc_unc = parse_float(prov.get("inclinationUncertaintyDeg"), math.nan)
+    route = curve.get("lockedModelRoute", "")
+
+    mass_coherence = v19_regime_sigmoid(log_lum, math.log10(38.33462), 0.35)
+    dwarf_suppression = 1.0 - clamp(
+        0.45 * (1.0 - mass_coherence)
+        + 0.25 * v19_regime_sigmoid(h_type, 8.5, 1.0)
+        + 0.20 * (1.0 - v19_regime_sigmoid(log_hi, math.log10(1.291), 0.45))
+        + 0.10 * v19_regime_sigmoid(2.0 - quality if math.isfinite(quality) else 0.0, 0.0, 1.0),
+        0.0,
+        0.95,
+    )
+    route_loading = clamp(
+        0.38 * clamp(local["memoryLoad"] / 6.0, 0.0, 1.0)
+        + 0.24 * clamp(local["uOut"] / 0.45, 0.0, 1.0)
+        + 0.18 * clamp(local["lGapOverH"] / 1.4, 0.0, 1.0)
+        + 0.20 * (1.0 if route == "low-load" else 0.65),
+        0.0,
+        1.0,
+    )
+    disk_regularity = clamp(
+        0.34 * v19_regime_sigmoid(vflat, 120.0, 45.0)
+        + 0.24 * (1.0 - clamp((inc_unc if math.isfinite(inc_unc) else 8.0) / 12.0, 0.0, 1.0))
+        + 0.22 * clamp(local["pointDensity"] / 1.6, 0.0, 1.0)
+        + 0.20 * clamp(local["outerDiskShare"] / 0.60, 0.0, 1.0),
+        0.0,
+        1.0,
+    )
+
+    if regime_id == "mass-coherence":
+        activation = mass_coherence
+    elif regime_id == "mass-coherence-route-loading":
+        activation = mass_coherence * route_loading
+    elif regime_id == "mass-coherence-disk-regularity":
+        activation = mass_coherence * disk_regularity
+    elif regime_id == "two-regime-dwarf-suppressed":
+        activation = dwarf_suppression * clamp(0.55 * route_loading + 0.45 * disk_regularity, 0.0, 1.0)
+    else:
+        raise ValueError(f"Unknown source regime: {regime_id}")
+
+    return clamp(activation, 0.0, 1.0), {
+        **prov,
+        **local,
+        "massCoherence": mass_coherence,
+        "dwarfSuppression": dwarf_suppression,
+        "routeLoading": route_loading,
+        "diskRegularity": disk_regularity,
+    }
+
+
+def v19_source_regime_scale(curves: list[dict], weak_names: set[str], supports_by_name: dict[str, list[float]], table1_by_name: dict[str, dict], regime_id: str) -> float:
+    numerator = 0.0
+    denominator = 0.0
+    for curve in curves:
+        if curve["name"] in weak_names:
+            continue
+        target = supports_by_name.get(curve["name"], [])
+        if len(target) != len(curve["points"]):
+            continue
+        raw, _ = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        activation, _ = v19_source_regime_activation(curve, regime_id, table1_by_name)
+        for raw_value, target_value in zip(raw, target):
+            candidate = max(0.0, raw_value) * activation
+            numerator += candidate * max(0.0, target_value)
+            denominator += candidate * candidate
+    return numerator / denominator if denominator > 1.0e-12 else 0.0
+
+
+def v19_source_regime_case_rows(regime_id: str) -> tuple[list[dict], dict]:
+    context = observed_state_candidate_context()
+    curves = context["curves"]
+    weak_names = set(context["weakNames"])
+    high_names = set(context["highNames"])
+    table1_by_name = v18_mass_scale_table1()[0]
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    scale = v19_source_regime_scale(curves, weak_names, supports_by_name, table1_by_name, regime_id)
+    rows = []
+    for curve in curves:
+        target = supports_by_name.get(curve["name"], [])
+        if len(target) != len(curve["points"]):
+            continue
+        raw, _ = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        activation, features = v19_source_regime_activation(curve, regime_id, table1_by_name)
+        supports = [max(0.0, scale * activation * value) for value in raw]
+        score = v18_competitor_support_score(curve, supports)
+        target_score = v18_competitor_support_score(curve, target)
+        canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+        target_gain = pct_improvement(canonical["rmse"], target_score["rmse"])
+        candidate_gain = pct_improvement(canonical["rmse"], score["rmse"])
+        set_name = "weak-systematics-excluded" if curve["name"] in weak_names else ("clean-high-rmse" if curve["name"] in high_names else "clean-protected")
+        rows.append(
+            {
+                "galaxy": curve["name"],
+                "set": set_name,
+                "regimeId": regime_id,
+                "activation": activation,
+                "globalScale": scale,
+                "canonicalRmse": canonical["rmse"],
+                "lockedV18Rmse": target_score["rmse"],
+                "regimeSourceRmse": score["rmse"],
+                "sourceMinusV18KmS": score["rmse"] - target_score["rmse"],
+                "gainVsCanonicalPct": candidate_gain,
+                "v18RepairRetentionPct": candidate_gain / target_gain * 100.0 if abs(target_gain) > 1.0e-9 else math.nan,
+                **v19_source_acceleration_shape_metrics(curve, target, supports),
+                **features,
+            }
+        )
+    return rows, {"globalScale": scale}
+
+
+def v19_source_regime_score_rows() -> tuple[list[dict], list[dict], str, dict]:
+    all_case_rows = []
+    score_rows = []
+    for regime_id in V19_SOURCE_REGIME_IDS:
+        rows, meta = v19_source_regime_case_rows(regime_id)
+        all_case_rows.extend(rows)
+        clean = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+        high = [row for row in clean if row["set"] == "clean-high-rmse"]
+        protected = [row for row in clean if row["set"] == "clean-protected"]
+        canonical_clean = safe_mean(parse_float(row["canonicalRmse"]) for row in clean)
+        v18_clean = safe_mean(parse_float(row["lockedV18Rmse"]) for row in clean)
+        candidate_clean = safe_mean(parse_float(row["regimeSourceRmse"]) for row in clean)
+        canonical_high = safe_mean(parse_float(row["canonicalRmse"]) for row in high)
+        v18_high = safe_mean(parse_float(row["lockedV18Rmse"]) for row in high)
+        candidate_high = safe_mean(parse_float(row["regimeSourceRmse"]) for row in high)
+        score_rows.append(
+            {
+                "regimeId": regime_id,
+                "globalScale": meta["globalScale"],
+                "cleanMeanRmse": candidate_clean,
+                "cleanGainVsCanonicalPct": pct_improvement(canonical_clean, candidate_clean),
+                "cleanV18RepairRetentionPct": (canonical_clean - candidate_clean) / (canonical_clean - v18_clean) * 100.0 if abs(canonical_clean - v18_clean) > 1.0e-9 else math.nan,
+                "highMeanRmse": candidate_high,
+                "highGainVsCanonicalPct": pct_improvement(canonical_high, candidate_high),
+                "highV18RepairRetentionPct": (canonical_high - candidate_high) / (canonical_high - v18_high) * 100.0 if abs(canonical_high - v18_high) > 1.0e-9 else math.nan,
+                "protectedMaxRegressionVsV18KmS": max([parse_float(row["sourceMinusV18KmS"], 0.0) for row in protected] or [0.0]),
+                "protectedMeanRegressionVsV18KmS": safe_mean(max(0.0, parse_float(row["sourceMinusV18KmS"], 0.0)) for row in protected),
+                "meanAccelerationShapeRmse": safe_mean(parse_float(row["accelerationShapeRmse"]) for row in clean),
+                "activeHighCount": sum(1 for row in high if parse_float(row["activation"], 0.0) >= 0.5),
+                "activeProtectedCount": sum(1 for row in protected if parse_float(row["activation"], 0.0) >= 0.5),
+                "weakSystematicsLeakage": 0,
+            }
+        )
+    best = min(
+        score_rows,
+        key=lambda row: (
+            parse_float(row["protectedMaxRegressionVsV18KmS"], math.inf),
+            -parse_float(row["highV18RepairRetentionPct"], -math.inf),
+            parse_float(row["meanAccelerationShapeRmse"], math.inf),
+        ),
+    )
+    if parse_float(best["protectedMaxRegressionVsV18KmS"], math.inf) <= 3.0 and parse_float(best["highV18RepairRetentionPct"], 0.0) >= 45.0:
+        verdict = "source-regime candidate for review"
+    elif parse_float(best["highV18RepairRetentionPct"], 0.0) >= 25.0:
+        verdict = "source-regime anatomy only"
+    else:
+        verdict = "mass/coherence gate insufficient"
+    return score_rows, all_case_rows, verdict, best
+
+
+def write_v19_source_regime_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_source_regime"
+    score_rows, case_rows, verdict, best = v19_source_regime_score_rows()
+    best_cases = [row for row in case_rows if row["regimeId"] == best["regimeId"]]
+    false_rows = sorted(
+        [row for row in best_cases if row["set"] == "clean-protected" and parse_float(row["sourceMinusV18KmS"], 0.0) > 3.0],
+        key=lambda row: parse_float(row["sourceMinusV18KmS"], 0.0),
+        reverse=True,
+    )
+    hit_rows = sorted(
+        [row for row in best_cases if row["set"] == "clean-high-rmse" and parse_float(row["v18RepairRetentionPct"], 0.0) >= 50.0],
+        key=lambda row: parse_float(row["v18RepairRetentionPct"], 0.0),
+        reverse=True,
+    )
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_false_activation_ledger.csv", false_rows)
+    write_csv(out_dir / f"{prefix}_retained_high_ledger.csv", hit_rows)
+    formula = {
+        "candidateId": "mts-v19-source-regime-candidate-v1",
+        "status": verdict,
+        "bestRegime": best,
+        "baseEquation": "curvature-memory-growth-equation",
+        "physicalQuestion": "does baryonic scale/coherence control whether the motion-field memory source may load?",
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name", "raw residual", "raw RMSE", "NFW parameter", "MOND parameter", "weak/systematics fitting"],
+    }
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19.4 Source Regime Candidate",
+        "",
+        "This tests whether the source-equation failure is controlled by a baryonic scale/coherence regime. It does not alter v18 or the browser law.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Best regime: `{best['regimeId']}`.",
+        f"High v18 repair retention: `{fmt(best['highV18RepairRetentionPct'])}%`.",
+        f"Clean v18 repair retention: `{fmt(best['cleanV18RepairRetentionPct'])}%`.",
+        f"Protected max regression vs v18: `{fmt(best['protectedMaxRegressionVsV18KmS'])}` km/s.",
+        f"Active high cases: `{best['activeHighCount']}`.",
+        f"Active protected cases: `{best['activeProtectedCount']}`.",
+        "",
+        "## Interpretation",
+        "",
+        "This is aimed at the physical MTS question: what condition lets baryonic structure load the motion field? If mass/coherence gates fail, the missing condition is not simple luminosity or SPARC Table1 provenance; it is likely a dynamical morphology/kinematic coherence variable.",
+        "",
+        verdict,
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-source-regime-candidate-v1",
+        "verdict": verdict,
+        "bestRegime": best,
+        "falseActivationCount": len(false_rows),
+        "retainedHighCount": len(hit_rows),
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_false_activation_ledger.csv",
+            f"{prefix}_retained_high_ledger.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19sourceregime(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SOURCE_REGIME_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_source_regime_artifacts(out_dir)
+    best = capsule["bestRegime"]
+    print("MTS v19.4 source-regime candidate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['regimeId']}",
+                f"high_retention={fmt(best['highV18RepairRetentionPct'])}%",
+                f"clean_retention={fmt(best['cleanV18RepairRetentionPct'])}%",
+                f"protected_reg={fmt(best['protectedMaxRegressionVsV18KmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v19 source-regime candidate to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -103527,6 +103805,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19sourceadmissibility",
             "v19sourceprovenance",
             "observedstatev19sourceprovenance",
+            "v19sourceregime",
+            "observedstatev19sourceregime",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -103944,6 +104224,8 @@ def main() -> None:
         cmd_v19sourceadmissibility(args)
     elif args.mode in {"v19sourceprovenance", "observedstatev19sourceprovenance"}:
         cmd_v19sourceprovenance(args)
+    elif args.mode in {"v19sourceregime", "observedstatev19sourceregime"}:
+        cmd_v19sourceregime(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
