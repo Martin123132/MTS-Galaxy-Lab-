@@ -269,6 +269,7 @@ DEFAULT_V19_NUMERIC_TWO_D_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-numeric-2d-fie
 DEFAULT_V19_KINEMATIC_TWO_D_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-kinematic-2d-field-v1"
 DEFAULT_V19_NGC3198_KINEMATIC_FACTS_OUT = OUTPUT_PACK_ROOT / "mts-v19-ngc3198-kinematic-facts-v1"
 DEFAULT_V19_NGC3198_KINEMATIC_FACTS_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ngc3198-kinematic-facts-v1")
+DEFAULT_V19_SOURCE_BOUNDARY_TEST_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-test-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -108270,6 +108271,453 @@ def cmd_v19ngc3198kinematicfacts(args: argparse.Namespace) -> None:
     print(f"Wrote v19 NGC3198 kinematic source facts to {out_dir.resolve()}")
 
 
+V19_SOURCE_BOUNDARY_TARGET_ROLES = {
+    "IC2574": "protected cap control",
+    "NGC5055": "protected cap control",
+    "UGC07089": "protected cap control",
+    "NGC3198": "quiet-boundary protected countercase",
+    "NGC2403": "admit high/source-load control",
+    "NGC3521": "admit high/source-load control",
+    "NGC7331": "admit high/source-load control",
+    "UGC03205": "admit high/source-load control",
+    "UGC05253": "admit high/source-load control",
+    "NGC4157": "unexplained remaining-gap control",
+    "NGC4100": "unexplained remaining-gap control",
+}
+
+
+def v19_source_boundary_variant_specs() -> list[dict]:
+    cap_controls = {"IC2574", "NGC5055", "UGC07089"}
+    quiet = {"NGC3198"}
+    admit_boundary = {"NGC2403"}
+    all_protected_boundary = cap_controls | quiet
+    return [
+        {
+            "variantId": "full-source-equation",
+            "variantClass": "control",
+            "description": "Existing curvature-memory source equation; no boundary cap.",
+            "factors": {},
+            "promotable": False,
+        },
+        {
+            "variantId": "prior-protected-cap-only",
+            "variantClass": "evidence-gated-stress",
+            "description": "Cap the three previously identified protected false activations; leave NGC3198 fully admitted.",
+            "factors": {name: 0.0 for name in cap_controls},
+            "promotable": False,
+        },
+        {
+            "variantId": "quiet-boundary-soften-050",
+            "variantClass": "evidence-gated-stress",
+            "description": "Cap prior protected controls and soften NGC3198 halfway toward canonical support.",
+            "factors": {**{name: 0.0 for name in cap_controls}, **{name: 0.50 for name in quiet}},
+            "promotable": False,
+        },
+        {
+            "variantId": "quiet-boundary-soften-025",
+            "variantClass": "evidence-gated-stress",
+            "description": "Cap prior protected controls and keep a small 25% source response in NGC3198.",
+            "factors": {**{name: 0.0 for name in cap_controls}, **{name: 0.25 for name in quiet}},
+            "promotable": False,
+        },
+        {
+            "variantId": "quiet-boundary-cap",
+            "variantClass": "evidence-gated-stress",
+            "description": "Cap prior protected controls and cap NGC3198 fully to canonical support.",
+            "factors": {name: 0.0 for name in all_protected_boundary},
+            "promotable": False,
+        },
+        {
+            "variantId": "overbroad-boundary-cap",
+            "variantClass": "negative-control",
+            "description": "Cap every boundary/streaming evidence case including NGC2403; should fail if boundary evidence alone is too broad.",
+            "factors": {name: 0.0 for name in (all_protected_boundary | admit_boundary)},
+            "promotable": False,
+        },
+    ]
+
+
+def v19_source_boundary_supports(curve: dict, source_supports: list[float], factor: float) -> list[float]:
+    canonical = v18_competitor_canonical_supports(curve)
+    return [
+        max(0.0, c + factor * (s - c))
+        for c, s in zip(canonical, source_supports)
+    ]
+
+
+def v19_source_boundary_evidence_context() -> tuple[dict[str, dict], dict[str, dict]]:
+    counter_path = DEFAULT_V19_COUNTER_EVIDENCE_OUT / "mts_v19_counter_evidence_admissibility_decisions.csv"
+    if not counter_path.exists():
+        write_v19_counter_evidence_artifacts(DEFAULT_V19_COUNTER_EVIDENCE_OUT, DEFAULT_V19_COUNTER_EVIDENCE_CACHE, True)
+    facts_path = DEFAULT_V19_NGC3198_KINEMATIC_FACTS_OUT / "mts_v19_ngc3198_kinematic_facts_case_verdicts.csv"
+    if not facts_path.exists():
+        write_v19_ngc3198_kinematic_facts_artifacts(
+            DEFAULT_V19_NGC3198_KINEMATIC_FACTS_OUT,
+            DEFAULT_V19_NGC3198_KINEMATIC_FACTS_CACHE,
+            True,
+        )
+    counter = {row.get("galaxy", ""): row for row in read_csv_rows(counter_path)} if counter_path.exists() else {}
+    facts = {row.get("galaxy", ""): row for row in read_csv_rows(facts_path)} if facts_path.exists() else {}
+    return counter, facts
+
+
+def v19_source_boundary_case_base() -> tuple[dict[str, dict], dict[str, list[float]], dict[str, list[float]], dict[str, list[float]], dict]:
+    if not V18_NFW_SHELF_ARTIFACT_PATH.exists():
+        write_v18_nfw_gap_shelf_release_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_38_NFW_SHELF_RELEASE_LOCK_OUT)
+    context = observed_state_candidate_context()
+    curves = {curve["name"]: curve for curve in context["curves"]}
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    scales = v19_source_equation_global_scales(list(curves.values()), set(context["weakNames"]), supports_by_name)
+    source_supports: dict[str, list[float]] = {}
+    canonical_supports: dict[str, list[float]] = {}
+    v18_supports: dict[str, list[float]] = {}
+    for name in V19_SOURCE_BOUNDARY_TARGET_ROLES:
+        curve = curves.get(name)
+        if not curve:
+            continue
+        raw, _ = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        source_supports[name] = [max(0.0, scales["curvature-memory-growth-equation"] * value) for value in raw]
+        canonical_supports[name] = v18_competitor_canonical_supports(curve)
+        v18_supports[name] = supports_by_name.get(name, [])
+    return curves, source_supports, canonical_supports, v18_supports, context
+
+
+def v19_source_boundary_score_variant(
+    variant: dict,
+    curves: dict[str, dict],
+    source_supports: dict[str, list[float]],
+    canonical_supports: dict[str, list[float]],
+    v18_supports: dict[str, list[float]],
+    counter_context: dict[str, dict],
+    facts_context: dict[str, dict],
+) -> tuple[dict, list[dict]]:
+    case_rows: list[dict] = []
+    factors = variant.get("factors", {})
+    for name, role in V19_SOURCE_BOUNDARY_TARGET_ROLES.items():
+        curve = curves.get(name)
+        source = source_supports.get(name, [])
+        canonical = canonical_supports.get(name, [])
+        target = v18_supports.get(name, [])
+        if not curve or len(source) != len(curve["points"]) or len(target) != len(curve["points"]):
+            continue
+        factor = parse_float(factors.get(name, 1.0), 1.0)
+        candidate_supports = v19_source_boundary_supports(curve, source, factor)
+        source_score = v18_competitor_support_score(curve, source)
+        candidate_score = v18_competitor_support_score(curve, candidate_supports)
+        canonical_score = v18_competitor_support_score(curve, canonical)
+        v18_score = v18_competitor_support_score(curve, target)
+        counter = counter_context.get(name, {})
+        facts = facts_context.get(name, {})
+        case_rows.append(
+            {
+                "variantId": variant["variantId"],
+                "variantClass": variant["variantClass"],
+                "galaxy": name,
+                "targetRole": role,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "sourceBoundaryFactor": factor,
+                "canonicalRmse": canonical_score["rmse"],
+                "lockedV18Rmse": v18_score["rmse"],
+                "fullSourceRmse": source_score["rmse"],
+                "candidateRmse": candidate_score["rmse"],
+                "sourceMinusV18KmS": source_score["rmse"] - v18_score["rmse"],
+                "candidateMinusV18KmS": candidate_score["rmse"] - v18_score["rmse"],
+                "candidateImprovementVsFullSourceKmS": source_score["rmse"] - candidate_score["rmse"],
+                "candidateGainVsCanonicalPct": pct_improvement(canonical_score["rmse"], candidate_score["rmse"]),
+                "fullSourceGainVsCanonicalPct": pct_improvement(canonical_score["rmse"], source_score["rmse"]),
+                "lockedV18GainVsCanonicalPct": pct_improvement(canonical_score["rmse"], v18_score["rmse"]),
+                "counterEvidenceDecision": counter.get("admissibilityDecision", ""),
+                "counterNextPhysicalVariable": counter.get("nextPhysicalVariable", ""),
+                "kinematicFactsVerdict": facts.get("verdict", ""),
+                "quietEvidenceRows": facts.get("quietEvidenceRows", ""),
+                "boundaryEvidenceRows": facts.get("boundaryEvidenceRows", ""),
+                "numericEvidenceRows": facts.get("numericEvidenceRows", ""),
+            }
+        )
+    protected_rows = [row for row in case_rows if "protected" in row["targetRole"]]
+    prior_cap_rows = [row for row in case_rows if row["targetRole"] == "protected cap control"]
+    admit_rows = [row for row in case_rows if row["targetRole"] == "admit high/source-load control"]
+    unexplained_rows = [row for row in case_rows if "unexplained" in row["targetRole"]]
+    ngc3198 = next((row for row in case_rows if row["galaxy"] == "NGC3198"), {})
+    protected_improvement = safe_mean(parse_float(row["candidateImprovementVsFullSourceKmS"], 0.0) for row in protected_rows)
+    prior_cap_improvement = safe_mean(parse_float(row["candidateImprovementVsFullSourceKmS"], 0.0) for row in prior_cap_rows)
+    admit_penalty = safe_mean(max(0.0, parse_float(row["candidateRmse"], 0.0) - parse_float(row["fullSourceRmse"], 0.0)) for row in admit_rows)
+    metric = {
+        "variantId": variant["variantId"],
+        "variantClass": variant["variantClass"],
+        "description": variant["description"],
+        "promotableAsLaw": variant["promotable"],
+        "targetCaseCount": len(case_rows),
+        "protectedCaseCount": len(protected_rows),
+        "admitCaseCount": len(admit_rows),
+        "protectedMeanImprovementVsFullSourceKmS": protected_improvement,
+        "priorCapMeanImprovementVsFullSourceKmS": prior_cap_improvement,
+        "ngc3198ImprovementVsFullSourceKmS": parse_float(ngc3198.get("candidateImprovementVsFullSourceKmS"), math.nan),
+        "ngc3198CandidateMinusV18KmS": parse_float(ngc3198.get("candidateMinusV18KmS"), math.nan),
+        "admitMeanPenaltyVsFullSourceKmS": admit_penalty,
+        "admitMaxPenaltyVsFullSourceKmS": max([max(0.0, parse_float(row["candidateRmse"], 0.0) - parse_float(row["fullSourceRmse"], 0.0)) for row in admit_rows] or [0.0]),
+        "protectedMaxRegressionVsV18KmS": max([parse_float(row["candidateMinusV18KmS"], -math.inf) for row in protected_rows] or [0.0]),
+        "priorCapMaxRegressionVsV18KmS": max([parse_float(row["candidateMinusV18KmS"], -math.inf) for row in prior_cap_rows] or [0.0]),
+        "unexplainedMeanCandidateMinusV18KmS": safe_mean(parse_float(row["candidateMinusV18KmS"], 0.0) for row in unexplained_rows),
+        "targetUtilityKmS": protected_improvement - admit_penalty,
+    }
+    return metric, case_rows
+
+
+def v19_source_boundary_null_controls(
+    curves: dict[str, dict],
+    source_supports: dict[str, list[float]],
+    canonical_supports: dict[str, list[float]],
+    v18_supports: dict[str, list[float]],
+    counter_context: dict[str, dict],
+    facts_context: dict[str, dict],
+    seed: int = 20260525,
+    draws: int = 500,
+) -> list[dict]:
+    names = [name for name in V19_SOURCE_BOUNDARY_TARGET_ROLES if name in curves]
+    active_count = 4
+    rng = random.Random(seed)
+    rows: list[dict] = []
+    for draw in range(draws):
+        capped = set(rng.sample(names, min(active_count, len(names))))
+        variant = {
+            "variantId": f"random-cap-{draw}",
+            "variantClass": "same-active-count-null",
+            "description": "Randomly cap the same number of target cases as the quiet-boundary cap.",
+            "factors": {name: 0.0 for name in capped},
+            "promotable": False,
+        }
+        metric, _ = v19_source_boundary_score_variant(
+            variant,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            counter_context,
+            facts_context,
+        )
+        rows.append(
+            {
+                "nullType": "same-active-count-random-cap",
+                "draw": draw,
+                "activeCount": len(capped),
+                "activeTargets": ";".join(sorted(capped)),
+                "targetUtilityKmS": metric["targetUtilityKmS"],
+                "protectedMeanImprovementVsFullSourceKmS": metric["protectedMeanImprovementVsFullSourceKmS"],
+                "ngc3198ImprovementVsFullSourceKmS": metric["ngc3198ImprovementVsFullSourceKmS"],
+                "admitMeanPenaltyVsFullSourceKmS": metric["admitMeanPenaltyVsFullSourceKmS"],
+            }
+        )
+    for draw in range(draws):
+        softened = set(rng.sample(names, min(active_count, len(names))))
+        variant = {
+            "variantId": f"random-soften-{draw}",
+            "variantClass": "same-active-count-null",
+            "description": "Randomly soften the same number of target cases to a 25% source response.",
+            "factors": {name: 0.25 for name in softened},
+            "promotable": False,
+        }
+        metric, _ = v19_source_boundary_score_variant(
+            variant,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            counter_context,
+            facts_context,
+        )
+        rows.append(
+            {
+                "nullType": "same-active-count-random-soften-025",
+                "draw": draw,
+                "activeCount": len(softened),
+                "activeTargets": ";".join(sorted(softened)),
+                "targetUtilityKmS": metric["targetUtilityKmS"],
+                "protectedMeanImprovementVsFullSourceKmS": metric["protectedMeanImprovementVsFullSourceKmS"],
+                "ngc3198ImprovementVsFullSourceKmS": metric["ngc3198ImprovementVsFullSourceKmS"],
+                "admitMeanPenaltyVsFullSourceKmS": metric["admitMeanPenaltyVsFullSourceKmS"],
+            }
+        )
+    return rows
+
+
+def v19_source_boundary_null_summary(null_rows: list[dict]) -> dict:
+    utilities = [parse_float(row["targetUtilityKmS"], math.nan) for row in null_rows]
+    utilities = [value for value in utilities if math.isfinite(value)]
+    return {
+        "nullUtilityMedianKmS": safe_median(utilities) if utilities else math.nan,
+        "nullUtilityP95KmS": v19_quantile(utilities, 0.95) if utilities else math.nan,
+        "nullUtilityMaxKmS": max(utilities) if utilities else math.nan,
+    }
+
+
+def write_v19_source_boundary_test_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_source_boundary_test"
+    curves, source_supports, canonical_supports, v18_supports, context = v19_source_boundary_case_base()
+    counter_context, facts_context = v19_source_boundary_evidence_context()
+    score_rows: list[dict] = []
+    case_rows: list[dict] = []
+    variant_rows: list[dict] = []
+    for variant in v19_source_boundary_variant_specs():
+        metric, cases = v19_source_boundary_score_variant(
+            variant,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            counter_context,
+            facts_context,
+        )
+        score_rows.append(metric)
+        case_rows.extend(cases)
+        variant_rows.append(
+            {
+                "variantId": variant["variantId"],
+                "variantClass": variant["variantClass"],
+                "description": variant["description"],
+                "sourceBoundaryFactors": ";".join(f"{name}:{factor}" for name, factor in sorted(variant.get("factors", {}).items())) or "all targets:1.0",
+                "promotableAsLaw": variant["promotable"],
+            }
+        )
+    null_rows = v19_source_boundary_null_controls(
+        curves,
+        source_supports,
+        canonical_supports,
+        v18_supports,
+        counter_context,
+        facts_context,
+    )
+    null_summary = v19_source_boundary_null_summary(null_rows)
+    candidates = [row for row in score_rows if row["variantClass"] == "evidence-gated-stress"]
+    best = max(candidates, key=lambda row: (parse_float(row["targetUtilityKmS"], -math.inf), parse_float(row["ngc3198ImprovementVsFullSourceKmS"], -math.inf)))
+    overbroad = next((row for row in score_rows if row["variantId"] == "overbroad-boundary-cap"), {})
+    if (
+        parse_float(best["ngc3198ImprovementVsFullSourceKmS"], 0.0) > 0.25
+        and parse_float(best["admitMaxPenaltyVsFullSourceKmS"], math.inf) <= 1.0
+        and parse_float(best["targetUtilityKmS"], -math.inf) > parse_float(null_summary["nullUtilityP95KmS"], math.inf)
+    ):
+        verdict = "source-boundary candidate input"
+    elif (
+        parse_float(best["ngc3198ImprovementVsFullSourceKmS"], 0.0) > 0.25
+        and parse_float(best["admitMaxPenaltyVsFullSourceKmS"], math.inf) <= 1.0
+    ):
+        verdict = "quiet-boundary cap anatomy"
+    elif parse_float(overbroad.get("admitMaxPenaltyVsFullSourceKmS"), 0.0) > 1.0:
+        verdict = "boundary evidence too broad"
+    else:
+        verdict = "source-boundary rule not supported"
+    formula = {
+        "candidateId": "mts-v19-source-boundary-test-v1",
+        "status": verdict,
+        "baseEquation": "curvature-memory-growth-equation",
+        "bestVariant": best,
+        "sourceBoundaryOperation": "S_candidate(r)=S_canonical(r)+f_boundary*(S_source_equation(r)-S_canonical(r))",
+        "boundaryFactorMeaning": "f=1 full source response; f=0 canonical/no added source response; 0<f<1 softened source loading",
+        "promotableAsLaw": False,
+        "whyNotPromotableYet": "This mode uses named source-evidence cases to test the boundary hypothesis. A future law must derive the cap from numeric pre-residual source variables.",
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "forbiddenInputsForFutureLaw": ["galaxy name", "raw residual", "raw RMSE", "NFW parameter", "MOND parameter", "weak/systematics fitting"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_variant_ledger.csv", variant_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 Source-Boundary Admissibility Test",
+        "",
+        "This is a direct source-boundary stress test. It does not change v18, v19, the browser, or any release law.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Best variant: `{best['variantId']}`.",
+        f"NGC3198 improvement vs full source equation: `{fmt(best['ngc3198ImprovementVsFullSourceKmS'])}` km/s.",
+        f"Protected mean improvement vs full source equation: `{fmt(best['protectedMeanImprovementVsFullSourceKmS'])}` km/s.",
+        f"Admitted high/source-load max penalty vs full source equation: `{fmt(best['admitMaxPenaltyVsFullSourceKmS'])}` km/s.",
+        f"Target utility: `{fmt(best['targetUtilityKmS'])}` km/s; null p95 `{fmt(null_summary['nullUtilityP95KmS'])}` km/s.",
+        "",
+        "## What Changed",
+        "",
+        "Nothing in the locked framework changed. The tested operation only blends the v19 source-equation support back toward canonical MTS support for evidence-tagged boundary/cap cases:",
+        "",
+        "```text",
+        "S_candidate(r) = S_canonical(r) + f_boundary * [S_source(r) - S_canonical(r)]",
+        "```",
+        "",
+        "## Variant Scores",
+        "",
+        "| Variant | Protected improve | NGC3198 improve | Admit max penalty | Utility |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['variantId']} | {fmt(row['protectedMeanImprovementVsFullSourceKmS'])} | {fmt(row['ngc3198ImprovementVsFullSourceKmS'])} | {fmt(row['admitMaxPenaltyVsFullSourceKmS'])} | {fmt(row['targetUtilityKmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "NGC3198 is treated as a quiet-boundary countercase: source papers suggest a generally regular velocity field plus coherent boundary/streaming/extraplanar structure. The useful question is whether that class should soften or cap source loading, without also suppressing admitted high/source-load controls.",
+            "",
+            "The overbroad-boundary negative control is deliberately included: if it damages admitted controls, boundary keywords alone are not a physical law.",
+            "",
+            "## Guardrails",
+            "",
+            "- No browser or v18 release law was changed.",
+            "- No weak/systematics cases are fitted.",
+            "- Names are used only to attach external evidence cases in this stress test.",
+            "- A future promotable law must replace the evidence labels with numeric pre-residual source variables.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-source-boundary-test-v1",
+        "verdict": verdict,
+        "bestVariant": best,
+        "nullSummary": null_summary,
+        "targetCount": len(V19_SOURCE_BOUNDARY_TARGET_ROLES),
+        "weakSystematicsLeakage": 0,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "releaseLawChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_variant_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19sourceboundarytest(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SOURCE_BOUNDARY_TEST_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_source_boundary_test_artifacts(out_dir)
+    best = capsule["bestVariant"]
+    print("MTS v19 source-boundary admissibility test")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['variantId']}",
+                f"ngc3198_improve={fmt(best['ngc3198ImprovementVsFullSourceKmS'])}",
+                f"protected_improve={fmt(best['protectedMeanImprovementVsFullSourceKmS'])}",
+                f"admit_penalty={fmt(best['admitMaxPenaltyVsFullSourceKmS'])}",
+                f"utility={fmt(best['targetUtilityKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v19 source-boundary test to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -108537,6 +108985,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19kinematic2dfield",
             "v19ngc3198kinematicfacts",
             "observedstatev19ngc3198kinematicfacts",
+            "v19sourceboundarytest",
+            "observedstatev19sourceboundarytest",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -108980,6 +109430,8 @@ def main() -> None:
         cmd_v19kinematic2dfield(args)
     elif args.mode in {"v19ngc3198kinematicfacts", "observedstatev19ngc3198kinematicfacts"}:
         cmd_v19ngc3198kinematicfacts(args)
+    elif args.mode in {"v19sourceboundarytest", "observedstatev19sourceboundarytest"}:
+        cmd_v19sourceboundarytest(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
