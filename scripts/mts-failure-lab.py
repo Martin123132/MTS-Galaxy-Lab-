@@ -276,6 +276,7 @@ DEFAULT_V19_NGC3198_NUMERIC_BOUNDARY_CACHE = Path(r"D:\Users\ollet\Desktop\g pro
 DEFAULT_V19_SOURCE_BOUNDARY_NUMERIC_GATE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-numeric-gate-v1"
 DEFAULT_V19_SOURCE_BOUNDARY_CONTROL_COVERAGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-control-coverage-v1"
 DEFAULT_V19_BOUNDARY_OUTER_PERTURBATION_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-outer-perturbation-v1"
+DEFAULT_V19_SOURCE_BOUNDARY_NUMERIC_GATE_V2_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-numeric-gate-v2"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -110914,6 +110915,291 @@ def cmd_v19boundaryouterperturbationfetch(args: argparse.Namespace) -> None:
     print(f"Wrote v19 boundary outer-perturbation proxy to {out_dir.resolve()}")
 
 
+def v19_source_boundary_numeric_gate_v2_variants(proxy_rows: list[dict]) -> list[dict]:
+    proxy_by_name = {row["galaxy"]: row for row in proxy_rows}
+    cap_controls = {row["galaxy"] for row in proxy_rows if row["gateV2Role"] == "cap/reject control"}
+    legacy_protected_caps = {"UGC07089"}
+    soft_controls = {row["galaxy"] for row in proxy_rows if row["gateV2Role"] == "soft-boundary admit"}
+    ready_non_cap = {row["galaxy"] for row in proxy_rows if row["gateV2Role"] not in {"missing", "cap/reject control", "weak control"}}
+    source_load_controls = {row["galaxy"] for row in proxy_rows if "source-load" in row["gateV2Role"]}
+    return [
+        {
+            "variantId": "caps-only-proxy-control",
+            "variantClass": "control",
+            "description": "Cap source loading for proxy-proven protected cap controls only.",
+            "factors": {**{name: 0.0 for name in cap_controls}, **{name: 0.0 for name in legacy_protected_caps}},
+            "formula": "if source evidence class is shell/outflow/merger protected cap: f_boundary=0",
+            "promotable": False,
+        },
+        {
+            "variantId": "proxy-guarded-soft050",
+            "variantClass": "numeric-gate-v2",
+            "description": "Proxy cap controls plus 50% source response for the quiet growing outer-boundary numeric class.",
+            "factors": {
+                **{name: 0.0 for name in cap_controls},
+                **{name: 0.0 for name in legacy_protected_caps},
+                **{name: 0.50 for name in soft_controls},
+            },
+            "formula": "cap shell/outflow/merger controls; if gamma_HI<0, 0.75<=abs(gamma_HI)/SFR<=1.50, matched outer growth>=5 km/s, span>=0.40, and no cap/caution evidence: f_boundary=0.50",
+            "promotable": False,
+        },
+        {
+            "variantId": "proxy-guarded-soft025",
+            "variantClass": "numeric-gate-v2",
+            "description": "Same guarded numeric class at 25% source response.",
+            "factors": {
+                **{name: 0.0 for name in cap_controls},
+                **{name: 0.0 for name in legacy_protected_caps},
+                **{name: 0.25 for name in soft_controls},
+            },
+            "formula": "same as proxy-guarded-soft050, f_boundary=0.25",
+            "promotable": False,
+        },
+        {
+            "variantId": "unsafe-all-ready-soft050",
+            "variantClass": "negative-control",
+            "description": "Cap controls, then soften every ready non-cap proxy class.",
+            "factors": {
+                **{name: 0.0 for name in cap_controls},
+                **{name: 0.0 for name in legacy_protected_caps},
+                **{name: 0.50 for name in ready_non_cap},
+            },
+            "formula": "unsafe negative control: soften all ready non-cap source-boundary proxy classes",
+            "promotable": False,
+        },
+        {
+            "variantId": "unsafe-source-load-soft050",
+            "variantClass": "negative-control",
+            "description": "Cap controls, then soften source-load/caution controls instead of the quiet boundary case.",
+            "factors": {
+                **{name: 0.0 for name in cap_controls},
+                **{name: 0.0 for name in legacy_protected_caps},
+                **{name: 0.50 for name in source_load_controls},
+            },
+            "formula": "unsafe negative control: soften source-load/caution controls",
+            "promotable": False,
+        },
+    ]
+
+
+def v19_source_boundary_numeric_gate_v2_nulls(
+    curves: dict[str, dict],
+    source_supports: dict[str, list[float]],
+    canonical_supports: dict[str, list[float]],
+    v18_supports: dict[str, list[float]],
+    counter_context: dict[str, dict],
+    facts_context: dict[str, dict],
+    proxy_rows: list[dict],
+    seed: int = 20260525,
+) -> list[dict]:
+    cap_controls = {row["galaxy"] for row in proxy_rows if row["gateV2Role"] == "cap/reject control"} | {"UGC07089"}
+    ready_non_cap = [row["galaxy"] for row in proxy_rows if row["gateV2Role"] not in {"missing", "cap/reject control", "weak control"} and row["galaxy"] in curves]
+    source_load = [row["galaxy"] for row in proxy_rows if "source-load" in row["gateV2Role"] and row["galaxy"] in curves]
+    rng = random.Random(seed)
+    rows: list[dict] = []
+    for draw in range(300):
+        selected = set(rng.sample(ready_non_cap, 1)) if ready_non_cap else set()
+        variant = {
+            "variantId": f"random-ready-soft-{draw}",
+            "variantClass": "same-active-ready-null",
+            "description": "Fixed cap controls plus one random ready non-cap proxy soft target.",
+            "factors": {**{name: 0.0 for name in cap_controls}, **{name: 0.50 for name in selected}},
+            "promotable": False,
+        }
+        metric, _ = v19_source_boundary_score_variant(
+            variant,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            counter_context,
+            facts_context,
+        )
+        rows.append(
+            {
+                "nullType": "same-active-ready-non-cap",
+                "draw": draw,
+                "activeTargets": ";".join(sorted(selected)),
+                "targetUtilityKmS": metric["targetUtilityKmS"],
+                "ngc3198ImprovementVsFullSourceKmS": metric["ngc3198ImprovementVsFullSourceKmS"],
+                "admitMaxPenaltyVsFullSourceKmS": metric["admitMaxPenaltyVsFullSourceKmS"],
+            }
+        )
+    for draw in range(300):
+        selected = set(rng.sample(source_load, 1)) if source_load else set()
+        variant = {
+            "variantId": f"random-source-load-soft-{draw}",
+            "variantClass": "source-load-control-null",
+            "description": "Fixed cap controls plus one random source-load/caution soft target.",
+            "factors": {**{name: 0.0 for name in cap_controls}, **{name: 0.50 for name in selected}},
+            "promotable": False,
+        }
+        metric, _ = v19_source_boundary_score_variant(
+            variant,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            counter_context,
+            facts_context,
+        )
+        rows.append(
+            {
+                "nullType": "source-load-only-soft",
+                "draw": draw,
+                "activeTargets": ";".join(sorted(selected)),
+                "targetUtilityKmS": metric["targetUtilityKmS"],
+                "ngc3198ImprovementVsFullSourceKmS": metric["ngc3198ImprovementVsFullSourceKmS"],
+                "admitMaxPenaltyVsFullSourceKmS": metric["admitMaxPenaltyVsFullSourceKmS"],
+            }
+        )
+    return rows
+
+
+def write_v19_source_boundary_numeric_gate_v2_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_source_boundary_numeric_gate_v2"
+    if not (DEFAULT_V19_BOUNDARY_OUTER_PERTURBATION_OUT / "mts_v19_boundary_outer_perturbation_capsule.json").exists():
+        write_v19_boundary_outer_perturbation_artifacts(DEFAULT_V19_BOUNDARY_OUTER_PERTURBATION_OUT)
+    curves, source_supports, canonical_supports, v18_supports, _context = v19_source_boundary_case_base()
+    counter_context, facts_context = v19_source_boundary_evidence_context()
+    proxy_rows = v19_boundary_outer_proxy_rows()
+    score_rows: list[dict] = []
+    case_rows: list[dict] = []
+    branch_rows: list[dict] = []
+    for variant in v19_source_boundary_numeric_gate_v2_variants(proxy_rows):
+        metric, cases = v19_source_boundary_score_variant(
+            variant,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            counter_context,
+            facts_context,
+        )
+        metric["numericFormula"] = variant["formula"]
+        score_rows.append(metric)
+        case_rows.extend(cases)
+        branch_rows.append(
+            {
+                "variantId": variant["variantId"],
+                "variantClass": variant["variantClass"],
+                "formula": variant["formula"],
+                "activeFactors": ";".join(f"{name}:{factor}" for name, factor in sorted(variant["factors"].items())) or "all targets:1.0",
+                "description": variant["description"],
+                "promotableAsLaw": False,
+            }
+        )
+    best = next(row for row in score_rows if row["variantId"] == "proxy-guarded-soft050")
+    null_rows = v19_source_boundary_numeric_gate_v2_nulls(
+        curves,
+        source_supports,
+        canonical_supports,
+        v18_supports,
+        counter_context,
+        facts_context,
+        proxy_rows,
+    )
+    ready_null_utils = [parse_float(row["targetUtilityKmS"], math.nan) for row in null_rows if row["nullType"] == "same-active-ready-non-cap"]
+    source_null_utils = [parse_float(row["targetUtilityKmS"], math.nan) for row in null_rows if row["nullType"] == "source-load-only-soft"]
+    ready_null_p95 = v19_quantile(ready_null_utils, 0.95) if ready_null_utils else math.nan
+    source_null_p95 = v19_quantile(source_null_utils, 0.95) if source_null_utils else math.nan
+    ready_margin = parse_float(best["targetUtilityKmS"], math.nan) - ready_null_p95 if math.isfinite(ready_null_p95) else math.nan
+    source_margin = parse_float(best["targetUtilityKmS"], math.nan) - source_null_p95 if math.isfinite(source_null_p95) else math.nan
+    if (
+        parse_float(best["ngc3198ImprovementVsFullSourceKmS"], 0.0) >= 5.0
+        and parse_float(best["admitMaxPenaltyVsFullSourceKmS"], math.inf) <= 1.0
+        and source_margin >= 2.0
+        and ready_margin > 0.0
+    ):
+        verdict = "guarded numeric source-boundary candidate"
+    elif parse_float(best["ngc3198ImprovementVsFullSourceKmS"], 0.0) >= 5.0 and parse_float(best["admitMaxPenaltyVsFullSourceKmS"], math.inf) <= 1.0:
+        verdict = "guarded numeric source-boundary evidence, not null-promoted"
+    else:
+        verdict = "numeric source-boundary gate v2 not supported"
+    formula = {
+        "candidateId": "mts-v19-source-boundary-numeric-gate-v2",
+        "status": verdict,
+        "bestVariant": best,
+        "formula": "cap external shell/outflow/merger protected controls; soften source response by 50% only when flow/SFR is near unity and matched outer perturbation grows across a broad, quiet boundary domain",
+        "allowedInputs": ["radial HI flow sign", "abs(radial HI flow)/SFR", "matched outer perturbation growth", "matched outer span", "harmonic/cap provenance class"],
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameter", "MOND parameter", "weak/systematics training"],
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    write_csv(out_dir / f"{prefix}_proxy_matrix.csv", proxy_rows)
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_branch_ledger.csv", branch_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-source-boundary-numeric-gate-v2",
+        "verdict": verdict,
+        "bestVariant": best["variantId"],
+        "targetUtilityKmS": best["targetUtilityKmS"],
+        "ngc3198ImprovementVsFullSourceKmS": best["ngc3198ImprovementVsFullSourceKmS"],
+        "admitMaxPenaltyVsFullSourceKmS": best["admitMaxPenaltyVsFullSourceKmS"],
+        "readyNullP95UtilityKmS": ready_null_p95,
+        "readyNullMarginKmS": ready_margin,
+        "sourceLoadNullP95UtilityKmS": source_null_p95,
+        "sourceLoadNullMarginKmS": source_margin,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+    }
+    report = [
+        "# MTS v19 Source-Boundary Numeric Gate v2",
+        "",
+        "This is the guarded replay after adding numeric/control outer-perturbation proxies. It does not update v18, v19, the browser, or the release law.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Best variant: `{best['variantId']}`.",
+        f"NGC3198 improvement vs full source equation: `{fmt(best['ngc3198ImprovementVsFullSourceKmS'])}` km/s.",
+        f"Admitted-control max penalty: `{fmt(best['admitMaxPenaltyVsFullSourceKmS'])}` km/s.",
+        f"Same-active ready-null p95 utility: `{fmt(ready_null_p95)}`; margin `{fmt(ready_margin)}`.",
+        f"Source-load-only null p95 utility: `{fmt(source_null_p95)}`; margin `{fmt(source_margin)}`.",
+        "",
+        "| Variant | utility | NGC3198 improve | admit max penalty |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['variantId']} | {fmt(row['targetUtilityKmS'])} | {fmt(row['ngc3198ImprovementVsFullSourceKmS'])} | {fmt(row['admitMaxPenaltyVsFullSourceKmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Result",
+            "",
+            "The guarded gate keeps the useful NGC3198 soft-boundary correction and avoids penalties on admitted/source-load controls. It is still not a release law because the same-active ready null can choose the same single soft case; this remains a physically motivated source-boundary input that needs either more matched controls or a broader source-field variable before promotion.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19sourceboundarynumericgatev2(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SOURCE_BOUNDARY_NUMERIC_GATE_V2_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_source_boundary_numeric_gate_v2_artifacts(out_dir)
+    print("MTS v19 source-boundary numeric gate v2")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={capsule['bestVariant']}",
+                f"ngc3198_improve={fmt(capsule['ngc3198ImprovementVsFullSourceKmS'])}",
+                f"admit_penalty={fmt(capsule['admitMaxPenaltyVsFullSourceKmS'])}",
+                f"ready_margin={fmt(capsule['readyNullMarginKmS'])}",
+                f"source_margin={fmt(capsule['sourceLoadNullMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote v19 source-boundary numeric gate v2 to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -111193,6 +111479,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19sourceboundarycontrolcoverage",
             "v19boundaryouterperturbationfetch",
             "observedstatev19boundaryouterperturbationfetch",
+            "v19sourceboundarynumericgatev2",
+            "observedstatev19sourceboundarynumericgatev2",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -111648,6 +111936,8 @@ def main() -> None:
         cmd_v19sourceboundarycontrolcoverage(args)
     elif args.mode in {"v19boundaryouterperturbationfetch", "observedstatev19boundaryouterperturbationfetch"}:
         cmd_v19boundaryouterperturbationfetch(args)
+    elif args.mode in {"v19sourceboundarynumericgatev2", "observedstatev19sourceboundarynumericgatev2"}:
+        cmd_v19sourceboundarynumericgatev2(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
