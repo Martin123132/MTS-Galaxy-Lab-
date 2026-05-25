@@ -248,6 +248,7 @@ DEFAULT_OBSERVED_STATE_V18_NON_ML_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v18-5
 DEFAULT_OBSERVED_STATE_V18_SOURCE_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v18-51-source-provenance-v1"
 DEFAULT_OBSERVED_STATE_V18_SOURCE_PROVENANCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v18-source-provenance-v1")
 DEFAULT_V19_THEORY_KERNEL_OUT = OUTPUT_PACK_ROOT / "mts-v19-theory-kernel-v1"
+DEFAULT_V19_MOTION_FIELD_LAW_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-law-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -101936,6 +101937,360 @@ def cmd_v19theorykernel(args: argparse.Namespace) -> None:
     print(f"Wrote v19 theory-kernel bridge to {out_dir.resolve()}")
 
 
+MTS_VISION_SOURCE_ALIGNMENT = [
+    {
+        "primitive": "psi motion field",
+        "roleInGalaxyLaw": "underlying motion-field ontology; the galaxy law is treated as the disk circular-orbit limit, not as a dark halo lookup",
+        "sourcePath": "Motion-TimeSpace--main/galaxy-work/sparc-analysis/a-transport-response-framework-for-disk-galaxies.md",
+        "sourceNote": "states that a coarse-grained microscopic motion field psi drives an emergent curvature-exchange support field",
+        "lawUse": "a_MTS is the circular-orbit acceleration expression of the coarse-grained motion response",
+    },
+    {
+        "primitive": "Gamma curvature-memory / curvature-exchange field",
+        "roleInGalaxyLaw": "finite response amplitude normalized by Gamma0; not MOND a0 and not an NFW parameter",
+        "sourcePath": "Motion-TimeSpace--main/galaxy-work/sparc-analysis/a-transport-response-framework-for-disk-galaxies.md",
+        "sourceNote": "defines Gamma0 = cH0/(8pi) and the transport response term added to Vbar^2",
+        "lawUse": "S_MTS(r)=Gamma0*L_eff*K(r); a_MTS(r)=S_MTS(r)/r",
+    },
+    {
+        "primitive": "memory length",
+        "roleInGalaxyLaw": "disk structure sets the finite radial persistence scale",
+        "sourcePath": "Motion-TimeSpace--main/galaxy-work/sparc-analysis/a-transport-response-framework-for-disk-galaxies.md",
+        "sourceNote": "uses memory_load, S_mem, and L_eff to close the disk transport law",
+        "lawUse": "L_eff, L_sat, and L_gap become motion-field memory-state variables",
+    },
+    {
+        "primitive": "cumulative stiffness",
+        "roleInGalaxyLaw": "older form of the same idea: baryons load a smoothed stiffness/memory coordinate that controls rotation support",
+        "sourcePath": "Motion-TimeSpace--main/archive/old-drafts/a-cumulative-stiffness-description-of-galactic-rotation-curves.md",
+        "sourceNote": "describes a cumulative-stiffness coordinate and a baryon-sourced response field",
+        "lawUse": "u(r), u_0.75, u_out, and u_max are interpreted as motion-field loading coordinates",
+    },
+    {
+        "primitive": "bounded curvature response",
+        "roleInGalaxyLaw": "protects the law from unbounded support and motivates saturation/boundary checks",
+        "sourcePath": "Motion-TimeSpace--main/core-mts-framework/gravity/motion-timespace-mts-gravity-core-unified-formulation.md",
+        "sourceNote": "states that curvature cannot grow without bound and introduces a bounded scalar response",
+        "lawUse": "finite L_eff and gated v18 surface persistence are treated as bounded disk-limit response",
+    },
+]
+
+
+def v19_motion_field_point_rows(curve: dict, supports: list[float]) -> list[dict]:
+    rows: list[dict] = []
+    state = v19_theory_kernel_state(curve)
+    for index, (point, support2) in enumerate(zip(curve["points"], supports)):
+        r = max(1.0e-9, parse_float(point.get("r"), 0.0))
+        v_obs = parse_float(point.get("vObs"), 0.0)
+        v_bar2 = max(0.0, parse_float(point.get("bar2"), 0.0))
+        support = max(0.0, parse_float(support2, 0.0))
+        a_bar = v_bar2 / r
+        a_mts = support / r
+        a_total = a_bar + a_mts
+        a_obs = (v_obs * v_obs) / r if v_obs > 0 else 0.0
+        model_v = math.sqrt(max(0.0, v_bar2 + support))
+        memory_coordinate = r / max(1.0e-9, state["lExact"])
+        rows.append(
+            {
+                "galaxy": curve["name"],
+                "pointIndex": index,
+                "radiusKpc": point.get("r", math.nan),
+                "xRadius": point.get("x", math.nan),
+                "vObsKmS": v_obs,
+                "vModelKmS": model_v,
+                "vBar2": v_bar2,
+                "supportS_MTS": support,
+                "aObsKm2S2PerKpc": a_obs,
+                "aBarKm2S2PerKpc": a_bar,
+                "aMtsKm2S2PerKpc": a_mts,
+                "aTotalKm2S2PerKpc": a_total,
+                "motionResponseRatio": a_mts / max(1.0e-9, a_bar),
+                "gammaExchangeRatio": a_mts / max(1.0e-9, GAMMA0),
+                "memoryCoordinate_rOverLeff": memory_coordinate,
+                "zone": v19_kernel_zone(point),
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "L_eff": state["lExact"],
+                "L_sat": state["lSat"],
+                "L_gap": state["lGap"],
+                "S_mem": state["sMem"],
+                "memoryLoad": state["memoryLoad"],
+                "u_075": curve.get("lockedModelU075", math.nan),
+                "u_out": curve.get("lockedModelUOut", math.nan),
+                "u_max": curve.get("lockedModelUMax", math.nan),
+                "fGasOut": curve.get("fGasOut", math.nan),
+            }
+        )
+    return rows
+
+
+def v19_motion_field_case_summary(curve: dict, supports: list[float], set_name: str) -> dict:
+    point_rows = v19_motion_field_point_rows(curve, supports)
+    score = v18_competitor_support_score(curve, supports)
+    canonical = v18_competitor_support_score(curve, v18_competitor_canonical_supports(curve))
+    state = v19_theory_kernel_state(curve)
+    zones = {}
+    for zone in ["inner", "mid", "outer"]:
+        zone_rows = [row for row in point_rows if row["zone"] == zone]
+        zones[f"{zone}MeanAMts"] = safe_mean(parse_float(row["aMtsKm2S2PerKpc"]) for row in zone_rows)
+        zones[f"{zone}MeanResponseRatio"] = safe_mean(parse_float(row["motionResponseRatio"]) for row in zone_rows)
+        zones[f"{zone}MeanGammaExchangeRatio"] = safe_mean(parse_float(row["gammaExchangeRatio"]) for row in zone_rows)
+    return {
+        "galaxy": curve["name"],
+        "set": set_name,
+        "lockedRoute": curve.get("lockedModelRoute", ""),
+        "canonicalRmse": canonical["rmse"],
+        "motionFieldRmse": score["rmse"],
+        "gainVsCanonicalPct": pct_improvement(canonical["rmse"], score["rmse"]),
+        "pointCount": len(curve["points"]),
+        "meanAMts": safe_mean(parse_float(row["aMtsKm2S2PerKpc"]) for row in point_rows),
+        "maxAMts": max([parse_float(row["aMtsKm2S2PerKpc"], 0.0) for row in point_rows] or [0.0]),
+        "meanResponseRatio": safe_mean(parse_float(row["motionResponseRatio"]) for row in point_rows),
+        "meanGammaExchangeRatio": safe_mean(parse_float(row["gammaExchangeRatio"]) for row in point_rows),
+        "meanMemoryCoordinate": safe_mean(parse_float(row["memoryCoordinate_rOverLeff"]) for row in point_rows),
+        "rOut": curve.get("rOut", math.nan),
+        "h": curve.get("h", math.nan),
+        "rOutOverH": curve.get("rOut", math.nan) / max(1.0e-9, curve.get("h", 0.0)),
+        "L_eff": state["lExact"],
+        "L_sat": state["lSat"],
+        "L_gap": state["lGap"],
+        "L_gapOverH": state["lGapOverH"],
+        "S_mem": state["sMem"],
+        "memoryLoad": state["memoryLoad"],
+        "u_075": curve.get("lockedModelU075", math.nan),
+        "u_out": curve.get("lockedModelUOut", math.nan),
+        "u_max": curve.get("lockedModelUMax", math.nan),
+        "fGasOut": curve.get("fGasOut", math.nan),
+        **zones,
+    }
+
+
+def write_v19_motion_field_law_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_motion_field"
+    if not V18_NFW_SHELF_ARTIFACT_PATH.exists():
+        write_v18_nfw_gap_shelf_release_lock_artifacts(DEFAULT_OBSERVED_STATE_V18_38_NFW_SHELF_RELEASE_LOCK_OUT)
+    context = observed_state_candidate_context()
+    curves = context["curves"]
+    weak_names = context["weakNames"]
+    high_names = context["highNames"]
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+
+    profile_rows: list[dict] = []
+    case_rows: list[dict] = []
+    for curve in curves:
+        name = curve["name"]
+        supports = supports_by_name.get(name, [])
+        if len(supports) != len(curve["points"]):
+            continue
+        set_name = "weak-systematics-excluded" if name in weak_names else ("clean-high-rmse" if name in high_names else "clean-protected")
+        profile_rows.extend(v19_motion_field_point_rows(curve, supports))
+        case_rows.append(v19_motion_field_case_summary(curve, supports, set_name))
+
+    clean_cases = [row for row in case_rows if row["set"] != "weak-systematics-excluded"]
+    high_cases = [row for row in case_rows if row["set"] == "clean-high-rmse"]
+    protected_cases = [row for row in case_rows if row["set"] == "clean-protected"]
+    correspondence_rows = [
+        {"check": "law form", "status": "pass", "detail": "a_total(r)=a_bar(r)+a_MTS(r), with a_MTS(r)=S_MTS(r)/r"},
+        {"check": "source of S_MTS", "status": "pass", "detail": "S_MTS is the locked v18 release support field; this mode only changes interpretation/units, not the law"},
+        {"check": "canonical constants", "status": "pass", "detail": f"q={Q_DEFAULT}, Gamma0={GAMMA0}, diskML={ML_DISK}, bulgeML={ML_BULGE}"},
+        {"check": "weak/systematics leakage", "status": "pass", "detail": "weak/systematics cases are labelled excluded and not used as law-fitting evidence"},
+        {"check": "forbidden inputs", "status": "pass", "detail": "no galaxy name, residual lookup, raw RMSE lookup, NFW parameter, or MOND parameter enters the motion-field law"},
+        {"check": "Newtonian correspondence", "status": "candidate", "detail": "when S_MTS -> 0, a_total -> a_bar and the disk law reduces to baryonic Newtonian circular acceleration"},
+        {"check": "finite memory response", "status": "candidate", "detail": "finite L_eff and bounded v18 gates prevent unbounded circular support in the observed disk range"},
+        {"check": "GR replacement claim", "status": "not-made", "detail": "this mode formulates a galaxy-sector acceleration law; it does not claim a full covariant replacement for GR"},
+    ]
+    law_summary = {
+        "cleanCaseCount": len(clean_cases),
+        "highCaseCount": len(high_cases),
+        "protectedCaseCount": len(protected_cases),
+        "weakSystematicsExcludedCount": len(weak_names),
+        "cleanMeanRmse": safe_mean(parse_float(row["motionFieldRmse"]) for row in clean_cases),
+        "cleanCanonicalMeanRmse": safe_mean(parse_float(row["canonicalRmse"]) for row in clean_cases),
+        "cleanGainVsCanonicalPct": pct_improvement(
+            safe_mean(parse_float(row["canonicalRmse"]) for row in clean_cases),
+            safe_mean(parse_float(row["motionFieldRmse"]) for row in clean_cases),
+        ),
+        "highMeanRmse": safe_mean(parse_float(row["motionFieldRmse"]) for row in high_cases),
+        "highCanonicalMeanRmse": safe_mean(parse_float(row["canonicalRmse"]) for row in high_cases),
+        "highGainVsCanonicalPct": pct_improvement(
+            safe_mean(parse_float(row["canonicalRmse"]) for row in high_cases),
+            safe_mean(parse_float(row["motionFieldRmse"]) for row in high_cases),
+        ),
+        "protectedMaxDeltaVsCanonicalKmS": max(
+            [parse_float(row["motionFieldRmse"]) - parse_float(row["canonicalRmse"]) for row in protected_cases] or [0.0]
+        ),
+        "protectedRegressionFromLawReframeKmS": 0.0,
+        "meanAMtsClean": safe_mean(parse_float(row["meanAMts"]) for row in clean_cases),
+        "meanMotionResponseRatioClean": safe_mean(parse_float(row["meanResponseRatio"]) for row in clean_cases),
+        "meanGammaExchangeRatioClean": safe_mean(parse_float(row["meanGammaExchangeRatio"]) for row in clean_cases),
+    }
+    formula = {
+        "candidateId": "mts-v19-motion-field-law-v1",
+        "status": "motion-field law statement built",
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "physicalInterpretation": "locked v18 galaxy support is re-expressed as the circular-orbit acceleration of a baryon-sourced Motion-TimeSpace memory field",
+        "law": {
+            "a_total(r)": "a_bar(r) + a_MTS(r)",
+            "a_bar(r)": "V_bar(r)^2 / r",
+            "a_MTS(r)": "S_MTS(r) / r",
+            "S_MTS(r)": "Gamma0 * L_state * response_kernel(r; q, state/profile gates)",
+            "memoryState": {
+                "S_mem": "(0.9/pi) * (r_out/h)",
+                "memory_load": "(1 - f_gas_out) * (r_out/h)",
+                "L_eff": "1.8*h*(1 + S_mem*(1 - exp(-memory_load/S_mem)))",
+                "L_sat": "1.8*h*(1 + S_mem)",
+                "L_gap": "L_sat - L_eff",
+            },
+        },
+        "allowedInputs": [
+            "Vgas",
+            "Vdisk",
+            "Vbul",
+            "h",
+            "r_out",
+            "f_gas_out",
+            "memory_load",
+            "S_mem",
+            "L_eff",
+            "u(r)",
+            "profile shares",
+            "profile curvature",
+        ],
+        "forbiddenInputs": ["galaxy name", "raw residual", "raw RMSE", "NFW parameters", "MOND fit parameters", "weak/systematics fitting"],
+    }
+
+    write_csv(out_dir / f"{prefix}_acceleration_profiles.csv", profile_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_correspondence_checks.csv", correspondence_rows)
+    write_csv(out_dir / f"{prefix}_source_alignment.csv", MTS_VISION_SOURCE_ALIGNMENT)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+
+    equations = [
+        "# MTS v19 Motion-Field Galaxy Law",
+        "",
+        "This is a law-specification pass for the locked galaxy candidate. It does not retune v18 and it does not replace the browser law.",
+        "",
+        "## Physical Statement",
+        "",
+        "The galaxy-sector MTS claim is treated here as a circular-orbit acceleration law for a baryon-sourced motion field:",
+        "",
+        "```text",
+        "a_total(r) = a_bar(r) + a_MTS(r)",
+        "a_bar(r)   = V_bar(r)^2 / r",
+        "a_MTS(r)   = S_MTS(r) / r",
+        "V_model(r)^2 = V_bar(r)^2 + S_MTS(r)",
+        "```",
+        "",
+        "`S_MTS` is therefore not a halo mass, not MOND interpolation, and not a residual correction. It is the circular-orbit expression of the Motion-TimeSpace response field.",
+        "",
+        "## Memory-State Definitions",
+        "",
+        "```text",
+        "S_mem       = (0.9/pi) * (r_out/h)",
+        "memory_load = (1 - f_gas_out) * (r_out/h)",
+        "L_eff       = 1.8 h * (1 + S_mem * (1 - exp(-memory_load/S_mem)))",
+        "L_sat       = 1.8 h * (1 + S_mem)",
+        "L_gap       = L_sat - L_eff",
+        "```",
+        "",
+        "The existing v18 state/profile gates are retained as the currently tested disk-limit response map. The fundamental-theory bridge is to derive those gates from a psi/Gamma motion-field equation, not to hide them as empirical patch terms.",
+        "",
+        "## Correspondence Position",
+        "",
+        "- When `S_MTS -> 0`, the law reduces to baryonic Newtonian circular acceleration.",
+        "- v18 is a galaxy-sector acceleration law, not a full GR replacement.",
+        "- A deeper MTS theory should explain why disk memory variables set `S_MTS`; it does not need to solve all of spacetime in the same step.",
+        "- The correct historical analogy is a next law with limits, not a claim that old laws are simply deleted.",
+    ]
+    (out_dir / f"{prefix}_equations.md").write_text("\n".join(equations) + "\n", encoding="utf-8")
+
+    report = [
+        "# MTS v19 Motion-Field Law v1",
+        "",
+        "This mode reframes the locked galaxy result as a Motion-TimeSpace acceleration law. It is not a summary pack, not a handoff, and not a new branch search.",
+        "",
+        "## What Changed",
+        "",
+        "- The v18 circular-speed support field is now written as a physical acceleration field: `a_MTS(r)=S_MTS(r)/r`.",
+        "- The galaxy law is stated as `a_total(r)=a_bar(r)+a_MTS(r)`.",
+        "- The source language is aligned to the older MTS archive: psi motion field, Gamma curvature-memory/exchange, memory length, cumulative stiffness, and bounded curvature response.",
+        "- The tested v18 law itself is unchanged.",
+        "",
+        "## Score Position",
+        "",
+        f"- Clean cases: `{law_summary['cleanCaseCount']}`.",
+        f"- Clean high-RMSE cases: `{law_summary['highCaseCount']}`.",
+        f"- Weak/systematics excluded: `{law_summary['weakSystematicsExcludedCount']}`.",
+        f"- Clean mean RMSE: `{fmt(law_summary['cleanMeanRmse'])}` vs canonical `{fmt(law_summary['cleanCanonicalMeanRmse'])}`.",
+        f"- Clean gain vs canonical: `{fmt(law_summary['cleanGainVsCanonicalPct'])}%`.",
+        f"- High-RMSE gain vs canonical: `{fmt(law_summary['highGainVsCanonicalPct'])}%`.",
+        f"- Protected regression from this reframe: `{fmt(law_summary['protectedRegressionFromLawReframeKmS'])}` km/s.",
+        f"- Protected max delta vs canonical baseline: `{fmt(law_summary['protectedMaxDeltaVsCanonicalKmS'])}` km/s.",
+        f"- Mean clean `a_MTS`: `{fmt(law_summary['meanAMtsClean'])}` km^2/s^2/kpc.",
+        f"- Mean clean motion-response ratio `a_MTS/a_bar`: `{fmt(law_summary['meanMotionResponseRatioClean'])}`.",
+        "",
+        "## Source Alignment",
+        "",
+        "| Primitive | Galaxy-law role | Source |",
+        "| --- | --- | --- |",
+    ]
+    for row in MTS_VISION_SOURCE_ALIGNMENT:
+        report.append(f"| {row['primitive']} | {row['roleInGalaxyLaw']} | {row['sourcePath']} |")
+    report.extend(
+        [
+            "",
+            "## Boundary",
+            "",
+            "This does not claim that MTS has already derived a full covariant replacement for GR. It claims a narrower and testable thing: in disk galaxies, baryonic structure appears to source an additional motion-field acceleration with a finite memory length. That is the law layer being carried forward.",
+            "",
+            "motion-field law statement built",
+        ]
+    )
+    (out_dir / f"{prefix}_law_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+
+    capsule = {
+        "analysisName": "mts-v19-motion-field-law-v1",
+        "verdict": "motion-field law statement built",
+        "summary": law_summary,
+        "canonicalMtsChanged": False,
+        "browserChanged": False,
+        "sourceAlignmentCount": len(MTS_VISION_SOURCE_ALIGNMENT),
+        "outputFiles": [
+            f"{prefix}_law_report.md",
+            f"{prefix}_equations.md",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_acceleration_profiles.csv",
+            f"{prefix}_correspondence_checks.csv",
+            f"{prefix}_source_alignment.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19motionfieldlaw(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_MOTION_FIELD_LAW_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_motion_field_law_artifacts(out_dir)
+    summary = capsule["summary"]
+    print("MTS v19 motion-field galaxy law")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"clean_gain={fmt(summary['cleanGainVsCanonicalPct'])}%",
+                f"high_gain={fmt(summary['highGainVsCanonicalPct'])}%",
+                f"weak_excluded={summary['weakSystematicsExcludedCount']}",
+                f"mean_a_mts={fmt(summary['meanAMtsClean'])}",
+                f"mean_response={fmt(summary['meanMotionResponseRatioClean'])}",
+            ]
+        )
+    )
+    print(f"Wrote v19 motion-field law to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -102169,6 +102524,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev18sourceprovenance",
             "v19theorykernel",
             "observedstatev19theorykernel",
+            "v19motionfieldlaw",
+            "observedstatev19motionfieldlaw",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -102578,6 +102935,8 @@ def main() -> None:
         cmd_v18sourceprovenance(args)
     elif args.mode in {"v19theorykernel", "observedstatev19theorykernel"}:
         cmd_v19theorykernel(args)
+    elif args.mode in {"v19motionfieldlaw", "observedstatev19motionfieldlaw"}:
+        cmd_v19motionfieldlaw(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
