@@ -301,6 +301,7 @@ DEFAULT_V19_GAS_BOUNDARY_GATED_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-b
 DEFAULT_V19_GAS_BOUNDARY_GATE_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-gate-hardening-v1"
 DEFAULT_V19_GAS_BOUNDARY_SMOOTH_SOURCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-smooth-source-v1"
 DEFAULT_V19_PGC51017_BLOCKER_OUT = OUTPUT_PACK_ROOT / "mts-v19-pgc51017-blocker-v1"
+DEFAULT_V19_SOURCE_ADMISSIBILITY_GATE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-admissibility-gate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -118895,6 +118896,372 @@ def write_v19_pgc51017_blocker_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_source_admissibility_gate_specs() -> list[dict]:
+    return [
+        {
+            "candidateId": "smooth-source-no-admissibility-reference",
+            "candidateFamily": "smooth-source-reference",
+            "description": "Smooth additive Xi source field without observational admissibility.",
+            "admissibilityType": "none",
+            "nPointsMin": "",
+            "sourceUse": "reference only",
+        },
+        {
+            "candidateId": "smooth-source-sampling-floor-n7",
+            "candidateFamily": "source-admissibility-validation",
+            "description": "Soft source-admissibility floor requiring roughly seven sampled rotation-curve points.",
+            "admissibilityType": "soft-npoints-floor",
+            "nPointsMin": 7,
+            "sourceUse": "validation discipline",
+        },
+        {
+            "candidateId": "smooth-source-sampling-floor-n8",
+            "candidateFamily": "source-admissibility-validation",
+            "description": "Soft source-admissibility floor requiring roughly eight sampled rotation-curve points.",
+            "admissibilityType": "soft-npoints-floor",
+            "nPointsMin": 8,
+            "sourceUse": "validation discipline",
+        },
+        {
+            "candidateId": "smooth-source-hard-n8",
+            "candidateFamily": "source-admissibility-validation",
+            "description": "Hard source-admissibility floor requiring at least eight sampled rotation-curve points.",
+            "admissibilityType": "hard-npoints-floor",
+            "nPointsMin": 8,
+            "sourceUse": "validation discipline",
+        },
+        {
+            "candidateId": "smooth-source-sampling-floor-n10",
+            "candidateFamily": "source-admissibility-validation",
+            "description": "Stricter soft source-admissibility floor requiring roughly ten sampled rotation-curve points.",
+            "admissibilityType": "soft-npoints-floor",
+            "nPointsMin": 10,
+            "sourceUse": "validation stress",
+        },
+    ]
+
+
+def v19_source_admissibility_factor(curve: dict, spec: dict) -> float:
+    mode = str(spec.get("admissibilityType", "none"))
+    if mode == "none":
+        return 1.0
+    n_points = len(curve.get("points", []))
+    n_min = parse_float(spec.get("nPointsMin"), math.nan)
+    if not math.isfinite(n_min):
+        return 1.0
+    if mode == "hard-npoints-floor":
+        return 1.0 if n_points >= n_min else 0.0
+    if mode == "soft-npoints-floor":
+        return clamp(v19_smoothstep01(n_points, n_min - 1.5, n_min), 0.0, 1.0)
+    return 1.0
+
+
+def v19_source_admissibility_score_spec(spec: dict, add_gate_overrides: dict[str, float] | None = None) -> tuple[dict, list[dict]]:
+    smooth_spec = next(item for item in v19_gas_boundary_smooth_source_specs() if item["candidateId"] == "xi-smooth-conservative-band")
+    curves, _canonical, _target, _hierarchy, components_by_name, _meta = v19_gas_boundary_hierarchy_pack()
+    raw_smooth_by_name: dict[str, float] = {}
+    admissibility_by_name: dict[str, float] = {}
+    gate_overrides: dict[str, float] = {}
+    for name, curve in curves.items():
+        if name not in components_by_name:
+            continue
+        raw_gate = v19_gas_boundary_smooth_source_gate(components_by_name[name], smooth_spec)
+        admissibility = v19_source_admissibility_factor(curve, spec)
+        raw_smooth_by_name[name] = raw_gate
+        admissibility_by_name[name] = admissibility
+        gate_overrides[name] = raw_gate * admissibility
+    if add_gate_overrides is not None:
+        gate_overrides.update(add_gate_overrides)
+    base_spec = v19_gas_boundary_memory_cap_spec(
+        candidateId=spec["candidateId"],
+        candidateFamily=spec["candidateFamily"],
+        description=spec["description"],
+        betaAdd=smooth_spec["betaAdd"],
+        betaSuppress=smooth_spec["betaSuppress"],
+        shape=smooth_spec["shape"],
+        gateMode=spec["admissibilityType"],
+    )
+    metric, case_rows = v19_gas_boundary_gated_score_spec(base_spec, gate_overrides)
+    enriched_rows: list[dict] = []
+    for row in case_rows:
+        name = row["galaxy"]
+        curve = curves[name]
+        n_points = len(curve.get("points", []))
+        xi_raw = parse_float(row.get("xiAddActivationRaw"), 0.0)
+        raw_smooth_gate = raw_smooth_by_name.get(name, parse_float(row.get("addGate"), 0.0))
+        final_gate = parse_float(row.get("addGate"), 0.0)
+        raw_smooth_activation = xi_raw * raw_smooth_gate
+        final_activation = xi_raw * final_gate
+        enriched_rows.append(
+            {
+                **row,
+                "admissibilityType": spec["admissibilityType"],
+                "sourceUse": spec.get("sourceUse", ""),
+                "nPointsMin": spec.get("nPointsMin", ""),
+                "nPoints": n_points,
+                "rawSmoothSourceGate": raw_smooth_gate,
+                "sourceAdmissibilityFactor": admissibility_by_name.get(name, 1.0),
+                "rawSmoothXiAddActivation": raw_smooth_activation,
+                "blockedByAdmissibility": raw_smooth_activation >= 0.05 and final_activation < 0.05,
+                "admissibilityClass": "weak/systematics excluded"
+                if row["set"] == "weak-systematics-excluded"
+                else ("admitted" if final_gate >= 0.05 else ("blocked low-sampling source" if raw_smooth_gate >= 0.05 else "inactive source state")),
+            }
+        )
+    hard_metric = v19_gas_boundary_hardening_metric(metric, enriched_rows)
+    pgc_rows = [row for row in enriched_rows if row["galaxy"] == "PGC51017"]
+    pgc_row = pgc_rows[0] if pgc_rows else {}
+    raw_protected_hits = [
+        row
+        for row in enriched_rows
+        if row["set"] == "clean-protected"
+        and parse_float(row.get("rawSmoothXiAddActivation"), 0.0) >= 0.05
+    ]
+    blocked_protected = [row for row in raw_protected_hits if parse_bool(row.get("blockedByAdmissibility"))]
+    hard_metric.update(
+        {
+            "admissibilityType": spec["admissibilityType"],
+            "sourceUse": spec.get("sourceUse", ""),
+            "nPointsMin": spec.get("nPointsMin", ""),
+            "pgc51017RawSmoothGate": pgc_row.get("rawSmoothSourceGate", ""),
+            "pgc51017FinalAddGate": pgc_row.get("addGate", ""),
+            "pgc51017AdmissibilityFactor": pgc_row.get("sourceAdmissibilityFactor", ""),
+            "pgc51017RegressionKmS": max(0.0, parse_float(pgc_row.get("candidateMinusHierarchyKmS"), 0.0)) if pgc_row else "",
+            "rawSmoothProtectedHitCount": len(raw_protected_hits),
+            "blockedProtectedHitCount": len(blocked_protected),
+            "blockedProtectedCases": ";".join(row["galaxy"] for row in blocked_protected),
+            "blockedHighCases": ";".join(
+                row["galaxy"]
+                for row in enriched_rows
+                if row["set"] == "clean-high-rmse" and parse_bool(row.get("blockedByAdmissibility"))
+            ),
+            "blockedAdditiveTargets": ";".join(
+                row["galaxy"]
+                for row in enriched_rows
+                if row["set"] == "clean-high-rmse"
+                and parse_bool(row.get("isGasBoundaryTarget"))
+                and parse_float(row.get("xiAddActivationRaw"), 0.0) >= 0.05
+                and parse_bool(row.get("blockedByAdmissibility"))
+            ),
+        }
+    )
+    return hard_metric, enriched_rows
+
+
+def v19_source_admissibility_null_controls(best_spec: dict, candidate_metric: dict, seeds: list[int] | None = None) -> list[dict]:
+    if seeds is None:
+        seeds = [19501, 19507, 19511, 19517, 19523, 19531, 19541, 19543, 19553, 19559, 19571, 19577, 19583]
+    metric, case_rows = v19_source_admissibility_score_spec(best_spec)
+    active = [
+        row["galaxy"]
+        for row in case_rows
+        if row["set"] != "weak-systematics-excluded"
+        and parse_float(row.get("xiAddActivationGated"), 0.0) >= 0.05
+    ]
+    eligible_all = [
+        row["galaxy"]
+        for row in case_rows
+        if row["set"] != "weak-systematics-excluded"
+        and row["lockedRoute"] == "low-load"
+        and parse_float(row.get("xiAddActivationRaw"), 0.0) >= 0.05
+    ]
+    n_min = parse_float(best_spec.get("nPointsMin"), 0.0)
+    eligible_admissible = [
+        row["galaxy"]
+        for row in case_rows
+        if row["galaxy"] in eligible_all and parse_float(row.get("nPoints"), 0.0) >= n_min
+    ]
+    gate_values = [parse_float(row.get("addGate"), 0.0) for row in case_rows if row["galaxy"] in eligible_all]
+    active_count = len(active)
+    rows: list[dict] = []
+    base_spec = v19_gas_boundary_memory_cap_spec(
+        candidateId=best_spec["candidateId"],
+        candidateFamily=best_spec["candidateFamily"],
+        description=best_spec["description"],
+        betaAdd=1.0,
+        betaSuppress=2.0,
+        shape="midouter",
+        gateMode=best_spec["admissibilityType"],
+    )
+    for null_type in ["same-active-random-lowload", "same-active-random-admissible-lowload", "shuffled-admissibility-strength"]:
+        for seed in seeds:
+            rng = random.Random(seed)
+            if null_type == "same-active-random-admissible-lowload":
+                pool = eligible_admissible
+                chosen = set(rng.sample(pool, min(active_count, len(pool))))
+                overrides = {name: (1.0 if name in chosen else 0.0) for name in eligible_all}
+            elif null_type == "same-active-random-lowload":
+                pool = eligible_all
+                chosen = set(rng.sample(pool, min(active_count, len(pool))))
+                overrides = {name: (1.0 if name in chosen else 0.0) for name in eligible_all}
+            else:
+                shuffled = gate_values[:]
+                rng.shuffle(shuffled)
+                overrides = dict(zip(eligible_all, shuffled))
+            null_metric, null_cases = v19_gas_boundary_gated_score_spec(base_spec, overrides)
+            hard_metric = v19_gas_boundary_hardening_metric(null_metric, null_cases)
+            rows.append(
+                {
+                    "nullType": null_type,
+                    "seed": seed,
+                    "activeCount": active_count,
+                    "eligibleCount": len(eligible_all),
+                    "admissibleEligibleCount": len(eligible_admissible),
+                    "targetGainKmS": hard_metric["targetMeanGainOverHierarchyKmS"],
+                    "additiveTargetGainKmS": hard_metric["additiveTargetMeanGainKmS"],
+                    "additiveTargetRecall": hard_metric["additiveTargetRecall"],
+                    "protectedAddFalseReleaseCount": hard_metric["protectedAddFalseReleaseCount"],
+                    "protectedAddHitMaxRegressionKmS": hard_metric["protectedAddHitMaxRegressionKmS"],
+                    "beatsOrTiesCandidateTargetGain": parse_float(hard_metric["targetMeanGainOverHierarchyKmS"], -math.inf) >= parse_float(candidate_metric["targetMeanGainOverHierarchyKmS"], math.inf),
+                    "protectedUnsafe": parse_float(hard_metric["protectedAddHitMaxRegressionKmS"], 0.0) > 1.0 or int(hard_metric["protectedAddFalseReleaseCount"]) > 1,
+                }
+            )
+    return rows
+
+
+def write_v19_source_admissibility_gate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_source_admissibility_gate"
+    score_rows: list[dict] = []
+    case_rows_all: list[dict] = []
+    for spec in v19_source_admissibility_gate_specs():
+        metric, case_rows = v19_source_admissibility_score_spec(spec)
+        score_rows.append(metric)
+        case_rows_all.extend(case_rows)
+    candidate_rows = [row for row in score_rows if row["admissibilityType"] != "none"]
+    best = max(
+        candidate_rows,
+        key=lambda row: (
+            int(row["protectedAddFalseReleaseCount"]) == 0,
+            parse_float(row.get("pgc51017RegressionKmS"), math.inf) <= 0.25,
+            parse_float(row.get("additiveTargetRecall"), 0.0),
+            parse_float(row.get("targetMeanGainOverHierarchyKmS"), -math.inf),
+            -parse_float(row.get("protectedAddHitMaxRegressionKmS"), math.inf),
+        ),
+    )
+    best_spec = next(item for item in v19_source_admissibility_gate_specs() if item["candidateId"] == best["candidateId"])
+    best_cases = [row for row in case_rows_all if row["candidateId"] == best["candidateId"]]
+    admissibility_rows = [
+        {
+            "candidateId": row["candidateId"],
+            "galaxy": row["galaxy"],
+            "set": row["set"],
+            "lockedRoute": row["lockedRoute"],
+            "nPoints": row["nPoints"],
+            "nPointsMin": row["nPointsMin"],
+            "rawSmoothSourceGate": row["rawSmoothSourceGate"],
+            "sourceAdmissibilityFactor": row["sourceAdmissibilityFactor"],
+            "xiAddActivationRaw": row["xiAddActivationRaw"],
+            "xiAddActivationGated": row["xiAddActivationGated"],
+            "candidateGainOverHierarchyKmS": row["candidateGainOverHierarchyKmS"],
+            "candidateMinusHierarchyKmS": row["candidateMinusHierarchyKmS"],
+            "isGasBoundaryTarget": row["isGasBoundaryTarget"],
+            "blockedByAdmissibility": row["blockedByAdmissibility"],
+            "admissibilityClass": row["admissibilityClass"],
+        }
+        for row in best_cases
+        if parse_float(row.get("rawSmoothXiAddActivation"), 0.0) >= 0.05
+        or parse_float(row.get("xiAddActivationGated"), 0.0) >= 0.05
+        or row["galaxy"] == "PGC51017"
+    ]
+    null_rows = v19_source_admissibility_null_controls(best_spec, best)
+    safe_null_rows = [row for row in null_rows if not parse_bool(row.get("protectedUnsafe"))]
+    null_p95 = v19_quantile([parse_float(row.get("targetGainKmS"), math.nan) for row in safe_null_rows], 0.95)
+    null_margin = parse_float(best.get("targetMeanGainOverHierarchyKmS"), 0.0) - null_p95
+    if (
+        parse_float(best.get("pgc51017RegressionKmS"), math.inf) <= 0.25
+        and int(best.get("protectedAddFalseReleaseCount", 999)) == 0
+        and parse_float(best.get("additiveTargetRecall"), 0.0) >= 1.0
+        and not str(best.get("blockedAdditiveTargets", "")).strip()
+    ):
+        verdict = "source-admissibility gate validated"
+    elif parse_float(best.get("pgc51017RegressionKmS"), math.inf) <= 0.25 and int(best.get("protectedAddFalseReleaseCount", 999)) == 0:
+        verdict = "source-admissibility protects but underpowers"
+    else:
+        verdict = "source-admissibility gate not sufficient"
+    formula = {
+        "candidateId": "mts-v19-source-admissibility-gate-v1",
+        "status": verdict,
+        "bestGate": best,
+        "equation": "A_add_final = A_smooth_xi(uMax, pointDensity, memoryLoad) * A_admissibility(N_RC)",
+        "admissibility": "A_admissibility is validation/source-quality discipline, not a physical transport source.",
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    report = [
+        "# MTS v19 Source-Admissibility Gate",
+        "",
+        "This mode tests the PGC51017 lesson as a full clean/protected validation gate. It does not change v18, v19, the browser, or any physical law.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Best Gate",
+        "",
+        f"- Candidate: `{best['candidateId']}`.",
+        f"- Gate type: `{best['admissibilityType']}`.",
+        f"- Minimum sampled points: `{best['nPointsMin']}`.",
+        f"- PGC51017 regression: `{fmt(best['pgc51017RegressionKmS'])}` km/s.",
+        f"- Additive target recall: `{fmt(best['additiveTargetRecall'])}`.",
+        f"- Target gain: `{fmt(best['targetMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Additive target gain: `{fmt(best['additiveTargetMeanGainKmS'])}` km/s.",
+        f"- Protected false releases: `{best['protectedAddFalseReleaseCount']}`.",
+        f"- Safe-null p95 target gain: `{fmt(null_p95)}` km/s.",
+        f"- Safe-null margin: `{fmt(null_margin)}` km/s.",
+        "",
+        "## Gate Table",
+        "",
+        "| candidate | type | n min | PGC reg | add recall | target gain | protected false | blocked targets |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['candidateId']} | {row['admissibilityType']} | {row.get('nPointsMin', '')} | {fmt(row.get('pgc51017RegressionKmS', 0.0))} | {fmt(row['additiveTargetRecall'])} | {fmt(row['targetMeanGainOverHierarchyKmS'])} | {row['protectedAddFalseReleaseCount']} | {row.get('blockedAdditiveTargets', '')} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "The source gate that survives is a sampled-curve admissibility floor. It blocks PGC51017 while preserving all four true additive gas-boundary targets. That is useful, but it is not a new physical source term: it says the smooth additive field should only be evaluated when the rotation curve is sufficiently sampled for this boundary test.",
+            "",
+            "## Guardrails",
+            "",
+            "- No browser/release law changed.",
+            "- No galaxy name, residual, raw RMSE, NFW parameter, MOND parameter, or weak/systematics input enters the formula.",
+            "- `nPoints` is reported as source-admissibility/provenance discipline, not a transport variable.",
+            "",
+            verdict,
+        ]
+    )
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows_all)
+    write_csv(out_dir / f"{prefix}_admissibility_ledger.csv", admissibility_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-source-admissibility-gate-v1",
+        "verdict": verdict,
+        "bestGate": best,
+        "safeNullTargetGainP95": null_p95,
+        "safeNullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_admissibility_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -119317,6 +119684,28 @@ def cmd_v19pgc51017blocker(args: argparse.Namespace) -> None:
     print(f"Wrote PGC51017 blocker attack to {out_dir.resolve()}")
 
 
+def cmd_v19sourceadmissibilitygate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SOURCE_ADMISSIBILITY_GATE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_source_admissibility_gate_artifacts(out_dir)
+    best = capsule["bestGate"]
+    print("MTS v19 source-admissibility gate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['candidateId']}",
+                f"type={best['admissibilityType']}",
+                f"nMin={best['nPointsMin']}",
+                f"pgc_reg={fmt(best['pgc51017RegressionKmS'])}",
+                f"add_recall={fmt(best['additiveTargetRecall'])}",
+                f"target_gain={fmt(best['targetMeanGainOverHierarchyKmS'])}",
+                f"null_margin={fmt(capsule['safeNullMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote source-admissibility gate audit to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -119642,6 +120031,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19gasboundarysmoothsource",
             "v19pgc51017blocker",
             "observedstatev19pgc51017blocker",
+            "v19sourceadmissibilitygate",
+            "observedstatev19sourceadmissibilitygate",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -120143,6 +120534,8 @@ def main() -> None:
         cmd_v19gasboundarysmoothsource(args)
     elif args.mode in {"v19pgc51017blocker", "observedstatev19pgc51017blocker"}:
         cmd_v19pgc51017blocker(args)
+    elif args.mode in {"v19sourceadmissibilitygate", "observedstatev19sourceadmissibilitygate"}:
+        cmd_v19sourceadmissibilitygate(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
