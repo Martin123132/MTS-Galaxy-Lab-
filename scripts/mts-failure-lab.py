@@ -296,6 +296,7 @@ DEFAULT_V19_PERSISTENCE_FIELD_BRIDGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-persisten
 DEFAULT_V19_PHASE_FIELD_BRIDGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-phase-field-bridge-v1"
 DEFAULT_V19_FIELD_HIERARCHY_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-v19-field-hierarchy-audit-v1"
 DEFAULT_V19_GAS_BOUNDARY_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-field-v1"
+DEFAULT_V19_GAS_BOUNDARY_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-discriminator-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -117178,6 +117179,500 @@ def write_v19_gas_boundary_field_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_gas_boundary_discriminator_source_maps() -> dict:
+    paths = {
+        "counterDecisions": DEFAULT_V19_COUNTER_EVIDENCE_OUT / "mts_v19_counter_evidence_admissibility_decisions.csv",
+        "counterKinematic": DEFAULT_V19_COUNTER_EVIDENCE_OUT / "mts_v19_counter_evidence_kinematic_provenance.csv",
+        "case2dFacts": DEFAULT_V19_CASE_TWO_D_PROVENANCE_OUT / "mts_v19_case_2d_provenance_case_facts.csv",
+        "case2dDecisions": DEFAULT_V19_CASE_TWO_D_PROVENANCE_OUT / "mts_v19_case_2d_provenance_admissibility_decisions.csv",
+        "external2d": DEFAULT_V19_EXTERNAL_TWO_D_ADMISSIBILITY_OUT / "mts_v19_external_2d_admissibility_case_ledger.csv",
+    }
+    maps: dict[str, dict] = {"paths": paths}
+    for key, path in paths.items():
+        if key == "counterKinematic":
+            by_name: dict[str, list[dict]] = {}
+            if path.exists():
+                for row in read_csv_rows(path):
+                    by_name.setdefault(row.get("galaxy", ""), []).append(row)
+            maps[key] = by_name
+        else:
+            maps[key] = {row.get("galaxy", ""): row for row in read_csv_rows(path)} if path.exists() else {}
+    return maps
+
+
+def v19_gas_boundary_discriminator_best_kinematic_row(rows: list[dict]) -> dict:
+    if not rows:
+        return {}
+    official = [row for row in rows if row.get("evidenceType") == "official SPARC Table1"]
+    return official[0] if official else rows[0]
+
+
+def v19_gas_boundary_discriminator_source_paths(name: str, source_maps: dict) -> str:
+    paths: set[str] = set()
+    for key in ["counterDecisions", "case2dFacts", "case2dDecisions", "external2d"]:
+        row = source_maps.get(key, {}).get(name, {})
+        for field in ["sourcePath", "sourcePaths"]:
+            value = str(row.get(field, "")).strip()
+            if value and value != "MISSING":
+                for item in value.split(";"):
+                    if item.strip() and item.strip() != "MISSING":
+                        paths.add(item.strip())
+    for row in source_maps.get("counterKinematic", {}).get(name, []):
+        value = str(row.get("sourcePath", "")).strip()
+        if value and value != "MISSING":
+            paths.add(value)
+    return ";".join(sorted(paths)) if paths else "MISSING"
+
+
+def v19_gas_boundary_discriminator_case_rows() -> list[dict]:
+    spec = next(item for item in v19_gas_boundary_field_specs() if item["fieldId"] == "xi-split-strong")
+    _metric, case_rows, field_rows = v19_gas_boundary_score_spec(spec)
+    field_by_name = {row["galaxy"]: row for row in field_rows}
+    source_maps = v19_gas_boundary_discriminator_source_maps()
+    rows: list[dict] = []
+    for case in case_rows:
+        add_activation = parse_float(case.get("xiAddActivation"), 0.0)
+        if case.get("fieldId") != "xi-split-strong" or add_activation < 0.05:
+            continue
+        name = case["galaxy"]
+        set_name = case.get("set", "")
+        gain = parse_float(case.get("xiGainOverHierarchyKmS"), 0.0)
+        regression = parse_float(case.get("xiMinusHierarchyKmS"), 0.0)
+        is_target = parse_bool(case.get("isGasBoundaryTarget"))
+        if set_name == "clean-high-rmse" and is_target and gain > 0.0:
+            klass = "true-additive-target"
+        elif set_name == "clean-protected" and regression > 0.25:
+            klass = "protected-false-additive"
+        elif set_name == "clean-protected":
+            klass = "protected-safe-additive"
+        elif set_name == "clean-high-rmse":
+            klass = "other-high-additive"
+        else:
+            klass = "other-additive"
+        field = field_by_name.get(name, {})
+        counter_decision = source_maps.get("counterDecisions", {}).get(name, {})
+        case2d_fact = source_maps.get("case2dFacts", {}).get(name, {})
+        case2d_decision = source_maps.get("case2dDecisions", {}).get(name, {})
+        external2d = source_maps.get("external2d", {}).get(name, {})
+        kin_rows = source_maps.get("counterKinematic", {}).get(name, [])
+        kin_best = v19_gas_boundary_discriminator_best_kinematic_row(kin_rows)
+        quality = (
+            case2d_fact.get("qualityCode")
+            or counter_decision.get("qualityCode")
+            or kin_best.get("qualityCode")
+            or external2d.get("qualityCode")
+            or "MISSING"
+        )
+        inclination = (
+            case2d_fact.get("inclinationDeg")
+            or counter_decision.get("inclinationDeg")
+            or kin_best.get("inclinationDeg")
+            or external2d.get("inclinationDeg")
+            or "MISSING"
+        )
+        inclination_unc = (
+            case2d_fact.get("inclinationUncertaintyDeg")
+            or counter_decision.get("inclinationUncertaintyDeg")
+            or kin_best.get("inclinationUncertaintyDeg")
+            or external2d.get("inclinationUncertaintyDeg")
+            or "MISSING"
+        )
+        distance_unc = (
+            case2d_fact.get("distanceUncertaintyFraction")
+            or counter_decision.get("distanceUncertaintyFraction")
+            or kin_best.get("distanceUncertaintyFraction")
+            or external2d.get("distanceUncertaintyFraction")
+            or "MISSING"
+        )
+        rows.append(
+            {
+                "galaxy": name,
+                "discriminatorClass": klass,
+                "set": set_name,
+                "lockedRoute": case.get("lockedRoute", ""),
+                "isGasBoundaryTarget": is_target,
+                "hierarchyRmse": case.get("hierarchyRmse", ""),
+                "xiRmse": case.get("xiRmse", ""),
+                "xiGainOverHierarchyKmS": gain,
+                "xiMinusHierarchyKmS": regression,
+                "xiAddActivation": add_activation,
+                "xiSuppressActivation": case.get("xiSuppressActivation", ""),
+                "xiBoundary": field.get("xiBoundary", ""),
+                "memoryLoad": field.get("memoryLoad", ""),
+                "fGasOut": field.get("fGasOut", ""),
+                "u075": field.get("u075", ""),
+                "uOut": field.get("uOut", ""),
+                "uMax": field.get("uMax", ""),
+                "outerGasShare": field.get("outerGasShare", "MISSING"),
+                "outerDiskShare": field.get("outerDiskShare", ""),
+                "outerBulgeShare": field.get("outerBulgeShare", "MISSING"),
+                "barCurvAbs": field.get("barCurvAbs", "MISSING"),
+                "pointDensity": field.get("pointDensity", ""),
+                "rOutOverH": field.get("rOutOverH", ""),
+                "lGapOverH": field.get("lGapOverH", "MISSING"),
+                "satFraction": field.get("satFraction", "MISSING"),
+                "qualityCode": quality,
+                "inclinationDeg": inclination,
+                "inclinationUncertaintyDeg": inclination_unc,
+                "distanceUncertaintyFraction": distance_unc,
+                "counterAdmissibilityDecision": counter_decision.get("admissibilityDecision", "MISSING"),
+                "counterNextPhysicalVariable": counter_decision.get("nextPhysicalVariable", "MISSING"),
+                "case2DDecision": case2d_fact.get("caseDecision", case2d_decision.get("caseDecision", "MISSING")),
+                "external2DDecision": external2d.get("decision", external2d.get("admissibilityDecision", "MISSING")),
+                "kinematicEvidenceRows": len(kin_rows),
+                "mlEvidenceRows": counter_decision.get("mlEvidenceRows", "MISSING"),
+                "sourcePaths": v19_gas_boundary_discriminator_source_paths(name, source_maps),
+            }
+        )
+    return rows
+
+
+def v19_gas_boundary_discriminator_numeric_features() -> list[str]:
+    return [
+        "xiAddActivation",
+        "xiBoundary",
+        "memoryLoad",
+        "fGasOut",
+        "u075",
+        "uOut",
+        "uMax",
+        "outerGasShare",
+        "outerDiskShare",
+        "outerBulgeShare",
+        "barCurvAbs",
+        "pointDensity",
+        "rOutOverH",
+        "lGapOverH",
+        "satFraction",
+        "qualityCode",
+        "inclinationDeg",
+        "inclinationUncertaintyDeg",
+        "distanceUncertaintyFraction",
+        "kinematicEvidenceRows",
+    ]
+
+
+def v19_gas_boundary_discriminator_feature_contrast(rows: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for klass in ["true-additive-target", "protected-false-additive", "protected-safe-additive", "other-high-additive"]:
+        group = [row for row in rows if row["discriminatorClass"] == klass]
+        for feature in v19_gas_boundary_discriminator_numeric_features():
+            values = [parse_float(row.get(feature), math.nan) for row in group]
+            values = [value for value in values if math.isfinite(value)]
+            out.append(
+                {
+                    "discriminatorClass": klass,
+                    "feature": feature,
+                    "count": len(values),
+                    "mean": safe_mean(values),
+                    "median": safe_median(values),
+                    "min": min(values) if values else math.nan,
+                    "max": max(values) if values else math.nan,
+                }
+            )
+    return out
+
+
+def v19_gas_boundary_thresholds(values: list[float]) -> list[float]:
+    finite = sorted({value for value in values if math.isfinite(value)})
+    if len(finite) <= 1:
+        return finite
+    mids = [(a + b) / 2.0 for a, b in zip(finite, finite[1:])]
+    quantiles = [v19_quantile(finite, q) for q in [0.20, 0.33, 0.50, 0.66, 0.80]]
+    return sorted({value for value in mids + quantiles if math.isfinite(value)})
+
+
+def v19_gas_boundary_discriminator_rule_candidates(rows: list[dict]) -> list[dict]:
+    rules: list[dict] = []
+    features = v19_gas_boundary_discriminator_numeric_features()
+    for feature in features:
+        values = [parse_float(row.get(feature), math.nan) for row in rows]
+        for threshold in v19_gas_boundary_thresholds(values):
+            for direction in ["high", "low"]:
+                rules.append(
+                    {
+                        "ruleId": f"{feature}-{direction}-{fmt(threshold)}",
+                        "ruleType": "single-feature-threshold",
+                        "featureA": feature,
+                        "directionA": direction,
+                        "thresholdA": threshold,
+                        "featureB": "",
+                        "directionB": "",
+                        "thresholdB": "",
+                        "usesExternalProvenance": feature in {"qualityCode", "inclinationDeg", "inclinationUncertaintyDeg", "distanceUncertaintyFraction", "kinematicEvidenceRows"},
+                    }
+                )
+    pairs = [
+        ("memoryLoad", "pointDensity"),
+        ("memoryLoad", "fGasOut"),
+        ("fGasOut", "outerDiskShare"),
+        ("uMax", "pointDensity"),
+        ("rOutOverH", "outerDiskShare"),
+        ("xiAddActivation", "inclinationDeg"),
+        ("outerDiskShare", "qualityCode"),
+        ("memoryLoad", "qualityCode"),
+        ("u075", "inclinationDeg"),
+    ]
+    for feature_a, feature_b in pairs:
+        thresholds_a = v19_gas_boundary_thresholds([parse_float(row.get(feature_a), math.nan) for row in rows])
+        thresholds_b = v19_gas_boundary_thresholds([parse_float(row.get(feature_b), math.nan) for row in rows])
+        for threshold_a in thresholds_a:
+            for threshold_b in thresholds_b:
+                for direction_a, direction_b in [("high", "high"), ("high", "low"), ("low", "high"), ("low", "low")]:
+                    rules.append(
+                        {
+                            "ruleId": f"{feature_a}-{direction_a}-{fmt(threshold_a)}__{feature_b}-{direction_b}-{fmt(threshold_b)}",
+                            "ruleType": "two-feature-and-threshold",
+                            "featureA": feature_a,
+                            "directionA": direction_a,
+                            "thresholdA": threshold_a,
+                            "featureB": feature_b,
+                            "directionB": direction_b,
+                            "thresholdB": threshold_b,
+                            "usesExternalProvenance": feature_a in {"qualityCode", "inclinationDeg", "inclinationUncertaintyDeg", "distanceUncertaintyFraction", "kinematicEvidenceRows"} or feature_b in {"qualityCode", "inclinationDeg", "inclinationUncertaintyDeg", "distanceUncertaintyFraction", "kinematicEvidenceRows"},
+                        }
+                    )
+    return rules
+
+
+def v19_gas_boundary_rule_side(value: float, direction: str, threshold: float) -> bool:
+    if not math.isfinite(value):
+        return False
+    return value >= threshold if direction == "high" else value <= threshold
+
+
+def v19_gas_boundary_rule_hit(row: dict, rule: dict) -> bool:
+    value_a = parse_float(row.get(rule["featureA"]), math.nan)
+    if not v19_gas_boundary_rule_side(value_a, rule["directionA"], parse_float(rule["thresholdA"], math.nan)):
+        return False
+    if rule["ruleType"] == "single-feature-threshold":
+        return True
+    value_b = parse_float(row.get(rule["featureB"]), math.nan)
+    return v19_gas_boundary_rule_side(value_b, rule["directionB"], parse_float(rule["thresholdB"], math.nan))
+
+
+def v19_gas_boundary_score_discriminator_rule(rows: list[dict], rule: dict, labels: dict[str, str] | None = None) -> dict:
+    positives = [row for row in rows if (labels or {}).get(row["galaxy"], row["discriminatorClass"]) == "true-additive-target"]
+    negatives = [row for row in rows if (labels or {}).get(row["galaxy"], row["discriminatorClass"]) == "protected-false-additive"]
+    neutral = [row for row in rows if (labels or {}).get(row["galaxy"], row["discriminatorClass"]) not in {"true-additive-target", "protected-false-additive"}]
+    pos_hits = [row for row in positives if v19_gas_boundary_rule_hit(row, rule)]
+    neg_hits = [row for row in negatives if v19_gas_boundary_rule_hit(row, rule)]
+    neutral_hits = [row for row in neutral if v19_gas_boundary_rule_hit(row, rule)]
+    recall = len(pos_hits) / len(positives) if positives else 0.0
+    false_rate = len(neg_hits) / len(negatives) if negatives else 0.0
+    precision = len(pos_hits) / max(1, len(pos_hits) + len(neg_hits))
+    target_gain = safe_mean(parse_float(row.get("xiGainOverHierarchyKmS"), math.nan) for row in pos_hits)
+    false_reg = max([parse_float(row.get("xiMinusHierarchyKmS"), 0.0) for row in neg_hits] or [0.0])
+    utility = 100.0 * recall - 100.0 * false_rate + 15.0 * precision - 2.0 * len(neutral_hits)
+    return {
+        **rule,
+        "positiveCount": len(positives),
+        "negativeProtectedFalseCount": len(negatives),
+        "positiveHitCount": len(pos_hits),
+        "protectedFalseHitCount": len(neg_hits),
+        "neutralHitCount": len(neutral_hits),
+        "targetRecall": recall,
+        "protectedFalseHitRate": false_rate,
+        "precisionNonNeutral": precision,
+        "hitTargetMeanGainKmS": target_gain,
+        "hitProtectedMaxRegressionKmS": false_reg,
+        "utility": utility,
+        "hitTrueTargets": ";".join(row["galaxy"] for row in pos_hits),
+        "hitProtectedFalse": ";".join(row["galaxy"] for row in neg_hits),
+        "hitNeutralCases": ";".join(row["galaxy"] for row in neutral_hits),
+    }
+
+
+def v19_gas_boundary_discriminator_rule_scores(rows: list[dict]) -> list[dict]:
+    rules = v19_gas_boundary_discriminator_rule_candidates(rows)
+    scored = [v19_gas_boundary_score_discriminator_rule(rows, rule) for rule in rules]
+    return sorted(scored, key=lambda row: (parse_float(row["utility"], -math.inf), parse_float(row["targetRecall"], 0.0), -parse_float(row["protectedFalseHitRate"], 1.0)), reverse=True)
+
+
+def v19_gas_boundary_discriminator_null_controls(rows: list[dict], rules: list[dict], seeds: list[int] | None = None) -> list[dict]:
+    if seeds is None:
+        seeds = [19001, 19007, 19013, 19019, 19027, 19031, 19033, 19049, 19051, 19073, 19079]
+    non_neutral = [row for row in rows if row["discriminatorClass"] in {"true-additive-target", "protected-false-additive"}]
+    base_labels = [row["discriminatorClass"] for row in non_neutral]
+    out: list[dict] = []
+    for seed in seeds:
+        rng = random.Random(seed)
+        shuffled = base_labels[:]
+        rng.shuffle(shuffled)
+        labels = {row["galaxy"]: label for row, label in zip(non_neutral, shuffled)}
+        best = max((v19_gas_boundary_score_discriminator_rule(rows, rule, labels) for rule in rules), key=lambda row: parse_float(row["utility"], -math.inf))
+        out.append(
+            {
+                "nullType": "shuffled-additive-target-vs-protected-false-labels",
+                "seed": seed,
+                "bestRuleId": best["ruleId"],
+                "bestUtility": best["utility"],
+                "bestTargetRecall": best["targetRecall"],
+                "bestProtectedFalseHitRate": best["protectedFalseHitRate"],
+                "bestProtectedFalseHitCount": best["protectedFalseHitCount"],
+                "bestHitTrueTargets": best["hitTrueTargets"],
+                "bestHitProtectedFalse": best["hitProtectedFalse"],
+            }
+        )
+    return out
+
+
+def write_v19_gas_boundary_discriminator_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_gas_boundary_discriminator"
+    case_rows = v19_gas_boundary_discriminator_case_rows()
+    contrast_rows = v19_gas_boundary_discriminator_feature_contrast(case_rows)
+    rule_scores = v19_gas_boundary_discriminator_rule_scores(case_rows)
+    state_rules = [row for row in rule_scores if not parse_bool(row.get("usesExternalProvenance"))]
+    best_all = rule_scores[0] if rule_scores else {}
+    best_state = state_rules[0] if state_rules else {}
+    null_rows = v19_gas_boundary_discriminator_null_controls(case_rows, rule_scores[:250])
+    null_p95 = v19_quantile([parse_float(row["bestUtility"], math.nan) for row in null_rows], 0.95)
+    utility_margin = parse_float(best_all.get("utility"), -math.inf) - null_p95
+    target_count = sum(1 for row in case_rows if row["discriminatorClass"] == "true-additive-target")
+    protected_false_count = sum(1 for row in case_rows if row["discriminatorClass"] == "protected-false-additive")
+    if (
+        parse_float(best_all.get("targetRecall"), 0.0) >= 0.75
+        and int(parse_float(best_all.get("protectedFalseHitCount"), math.inf)) <= 1
+        and utility_margin >= 10.0
+    ):
+        verdict = "current-vector additive discriminator found"
+    elif parse_bool(best_all.get("usesExternalProvenance")) and parse_float(best_all.get("protectedFalseHitRate"), 1.0) < parse_float(best_state.get("protectedFalseHitRate"), 1.0):
+        verdict = "provenance helps but incomplete"
+    elif parse_float(best_state.get("targetRecall"), 0.0) < 0.75 or int(parse_float(best_state.get("protectedFalseHitCount"), math.inf)) > 1:
+        verdict = "state vector not enough for additive Xi"
+    else:
+        verdict = "missing additive source variable remains"
+    next_rows: list[dict] = []
+    for row in case_rows:
+        if row["discriminatorClass"] == "protected-false-additive":
+            if row["sourcePaths"] == "MISSING":
+                recommendation = "fetch case-specific 2D/provenance evidence"
+            elif row["counterAdmissibilityDecision"] != "MISSING" or row["external2DDecision"] != "MISSING":
+                recommendation = "test provenance-admissibility as safety evidence, not as source formula"
+            else:
+                recommendation = "missing additive source variable remains"
+        elif row["discriminatorClass"] == "true-additive-target":
+            recommendation = "positive additive Xi target; retain as future law target if safety discriminator emerges"
+        else:
+            recommendation = "neutral additive hit; keep as safety/control row"
+        next_rows.append(
+            {
+                "galaxy": row["galaxy"],
+                "discriminatorClass": row["discriminatorClass"],
+                "recommendedNextInput": recommendation,
+                "usableAsFormulaInputNow": False,
+                "reason": "This mode is a discriminator audit only; no law/browser replacement is made.",
+                "sourcePaths": row["sourcePaths"],
+            }
+        )
+    formula = {
+        "candidateId": "mts-v19-gas-boundary-discriminator-v1",
+        "status": verdict,
+        "fieldUnderTest": "additive side of Xi gas-boundary field",
+        "bestRule": best_all,
+        "bestStateOnlyRule": best_state,
+        "nullUtilityP95": null_p95,
+        "utilityMargin": utility_margin,
+        "allowedInputs": v19_gas_boundary_discriminator_numeric_features(),
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+        "lockedV18Changed": False,
+        "browserChanged": False,
+    }
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_feature_contrast.csv", contrast_rows)
+    write_csv(out_dir / f"{prefix}_rule_scores.csv", rule_scores)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_next_candidate_inputs.csv", next_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 Gas-Boundary Additive Discriminator",
+        "",
+        "This mode tests the failure of the previous `Xi` gas-boundary field: the additive side helps the missed gas-rich low-load targets, but it also hits protected lookalikes. It does not change locked v18, v19, the browser, or any law.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Case Counts",
+        "",
+        f"- True additive targets: `{target_count}`.",
+        f"- Protected false additive activations: `{protected_false_count}`.",
+        f"- Protected safe/neutral additive activations: `{sum(1 for row in case_rows if row['discriminatorClass'] == 'protected-safe-additive')}`.",
+        "",
+        "## Best Rule",
+        "",
+        f"- Rule: `{best_all.get('ruleId', 'MISSING')}`.",
+        f"- Uses external/provenance variable: `{best_all.get('usesExternalProvenance', '')}`.",
+        f"- Target recall: `{fmt(best_all.get('targetRecall', math.nan))}`.",
+        f"- Protected false hits: `{best_all.get('protectedFalseHitCount', '')}` / `{best_all.get('negativeProtectedFalseCount', '')}`.",
+        f"- Utility: `{fmt(best_all.get('utility', math.nan))}`.",
+        f"- Null utility p95: `{fmt(null_p95)}`.",
+        f"- Utility margin: `{fmt(utility_margin)}`.",
+        f"- Hit true targets: `{best_all.get('hitTrueTargets', '')}`.",
+        f"- Hit protected false cases: `{best_all.get('hitProtectedFalse', '')}`.",
+        "",
+        "## Best State-Only Rule",
+        "",
+        f"- Rule: `{best_state.get('ruleId', 'MISSING')}`.",
+        f"- Target recall: `{fmt(best_state.get('targetRecall', math.nan))}`.",
+        f"- Protected false hits: `{best_state.get('protectedFalseHitCount', '')}` / `{best_state.get('negativeProtectedFalseCount', '')}`.",
+        f"- Utility: `{fmt(best_state.get('utility', math.nan))}`.",
+        f"- Hit true targets: `{best_state.get('hitTrueTargets', '')}`.",
+        f"- Hit protected false cases: `{best_state.get('hitProtectedFalse', '')}`.",
+        "",
+        "## Interpretation",
+        "",
+        "A promotable additive `Xi` safety rule would need to recover at least three of the four true additive targets while hitting no more than one protected false activation and beating shuffled-label nulls. If that fails, the additive field is real anatomy but still missing a physical admissibility variable.",
+        "",
+        "## Additive Target / False-Release Ledger",
+        "",
+        "| class | galaxy | gain/regression km/s | source/provenance |",
+        "| --- | --- | ---: | --- |",
+    ]
+    for row in case_rows:
+        if row["discriminatorClass"] not in {"true-additive-target", "protected-false-additive"}:
+            continue
+        value = row["xiGainOverHierarchyKmS"] if row["discriminatorClass"] == "true-additive-target" else row["xiMinusHierarchyKmS"]
+        evidence = row["counterAdmissibilityDecision"] if row["counterAdmissibilityDecision"] != "MISSING" else row["external2DDecision"]
+        report.append(f"| {row['discriminatorClass']} | {row['galaxy']} | {fmt(value)} | {evidence} |")
+    report.extend(
+        [
+            "",
+            "## Guardrails",
+            "",
+            "- No v18/browser/canonical law changed.",
+            "- Galaxy names are used only to join evidence and report ledgers, not as formula inputs.",
+            "- No raw residual, raw RMSE, NFW/MOND parameter, or weak/systematics fitting is used.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-gas-boundary-discriminator-v1",
+        "verdict": verdict,
+        "trueAdditiveTargetCount": target_count,
+        "protectedFalseAdditiveCount": protected_false_count,
+        "bestRule": best_all,
+        "bestStateOnlyRule": best_state,
+        "nullUtilityP95": null_p95,
+        "utilityMargin": utility_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_feature_contrast.csv",
+            f"{prefix}_rule_scores.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_next_candidate_inputs.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -117500,6 +117995,25 @@ def cmd_v19gasboundaryfield(args: argparse.Namespace) -> None:
     print(f"Wrote gas-boundary field attack to {out_dir.resolve()}")
 
 
+def cmd_v19gasboundarydiscriminator(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_GAS_BOUNDARY_DISCRIMINATOR_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_gas_boundary_discriminator_artifacts(out_dir)
+    best = capsule["bestRule"]
+    print("MTS v19 gas-boundary additive discriminator")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best.get('ruleId', 'MISSING')}",
+                f"recall={fmt(best.get('targetRecall', math.nan))}",
+                f"false_hits={best.get('protectedFalseHitCount', '')}",
+                f"utility_margin={fmt(capsule['utilityMargin'])}",
+            ]
+        )
+    )
+    print(f"Wrote gas-boundary discriminator to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -117815,6 +118329,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19fieldhierarchyaudit",
             "v19gasboundaryfield",
             "observedstatev19gasboundaryfield",
+            "v19gasboundarydiscriminator",
+            "observedstatev19gasboundarydiscriminator",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -118306,6 +118822,8 @@ def main() -> None:
         cmd_v19fieldhierarchyaudit(args)
     elif args.mode in {"v19gasboundaryfield", "observedstatev19gasboundaryfield"}:
         cmd_v19gasboundaryfield(args)
+    elif args.mode in {"v19gasboundarydiscriminator", "observedstatev19gasboundarydiscriminator"}:
+        cmd_v19gasboundarydiscriminator(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
