@@ -302,6 +302,7 @@ DEFAULT_V19_GAS_BOUNDARY_GATE_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-bo
 DEFAULT_V19_GAS_BOUNDARY_SMOOTH_SOURCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-smooth-source-v1"
 DEFAULT_V19_PGC51017_BLOCKER_OUT = OUTPUT_PACK_ROOT / "mts-v19-pgc51017-blocker-v1"
 DEFAULT_V19_SOURCE_ADMISSIBILITY_GATE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-admissibility-gate-v1"
+DEFAULT_V19_MOTION_FIELD_KERNEL_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-kernel-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -119262,6 +119263,462 @@ def write_v19_source_admissibility_gate_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_motion_field_kernel_specs() -> list[dict]:
+    return [
+        {
+            "kernelId": "no-xi-source-control",
+            "kernelFamily": "control",
+            "description": "Psi+Pi+Theta hierarchy with no gas-boundary motion-source kernel.",
+            "equation": "A_add=0; A_sink=0",
+            "betaAdd": 0.0,
+            "betaSink": 0.0,
+            "admissibility": "none",
+            "kernelType": "none",
+            "shape": "midouter",
+        },
+        {
+            "kernelId": "boundary-flux-no-admissibility",
+            "kernelFamily": "motion-source-flux-control",
+            "description": "Continuous gas-boundary source flux without external sampling admissibility.",
+            "equation": "A_add=B_gas*u_cap*band(memoryLoad)*band(pointDensity)*band(outerDisk); no N_RC mask",
+            "betaAdd": 1.0,
+            "betaSink": 2.0,
+            "admissibility": "none",
+            "kernelType": "boundary-flux",
+            "shape": "midouter",
+        },
+        {
+            "kernelId": "boundary-flux-admissible-n8",
+            "kernelFamily": "motion-source-flux",
+            "description": "Continuous gas-boundary source flux with an external sampled-curve admissibility floor.",
+            "equation": "A_add=B_gas*u_cap*band(memoryLoad)*band(pointDensity)*band(outerDisk)*A_obs(N_RC>=8)",
+            "betaAdd": 1.0,
+            "betaSink": 2.0,
+            "admissibility": "soft-npoints-floor-n8",
+            "kernelType": "boundary-flux",
+            "shape": "midouter",
+        },
+        {
+            "kernelId": "memory-gap-flux-admissible-n8",
+            "kernelFamily": "motion-source-flux",
+            "description": "Memory-gap source flux: uses saturation gap rather than point-density as the central source strength.",
+            "equation": "A_add=B_gas*u_cap*band(memoryLoad)*smooth(L_gap/h)*band(outerDisk)*A_obs(N_RC>=8)",
+            "betaAdd": 1.0,
+            "betaSink": 2.0,
+            "admissibility": "soft-npoints-floor-n8",
+            "kernelType": "memory-gap-flux",
+            "shape": "midouter",
+        },
+        {
+            "kernelId": "gas-disk-coupling-admissible-n8",
+            "kernelFamily": "motion-source-flux",
+            "description": "Gas-disk coupling flux: source appears only where outer gas and outer disk coexist.",
+            "equation": "A_add=B_gas*u_cap*band(memoryLoad)*sqrt(outerGas*outerDisk)*A_obs(N_RC>=8)",
+            "betaAdd": 1.0,
+            "betaSink": 2.0,
+            "admissibility": "soft-npoints-floor-n8",
+            "kernelType": "gas-disk-coupling",
+            "shape": "midouter",
+        },
+        {
+            "kernelId": "hard-memory-cap-reference",
+            "kernelFamily": "threshold-anatomy-reference",
+            "description": "Previous hard memory-capped additive Xi gate, kept as the anatomy ceiling.",
+            "equation": "A_add=A_xi_raw if uMax<=0.8429 and pointDensity<=1.6421 and memoryLoad<=2.50 else 0",
+            "betaAdd": 1.0,
+            "betaSink": 2.0,
+            "admissibility": "none",
+            "kernelType": "hard-memory-cap-reference",
+            "shape": "midouter",
+        },
+    ]
+
+
+def v19_motion_field_admissibility_factor(curve: dict, spec: dict) -> float:
+    mode = str(spec.get("admissibility", "none"))
+    if mode == "soft-npoints-floor-n8":
+        return clamp(v19_smoothstep01(len(curve.get("points", [])), 6.5, 8.0), 0.0, 1.0)
+    return 1.0
+
+
+def v19_motion_field_kernel_activations(curve: dict, components: dict, spec: dict) -> tuple[float, float, dict]:
+    kernel_type = str(spec.get("kernelType", "none"))
+    if kernel_type == "none":
+        return 0.0, 0.0, {"sourceBoundary": 0.0, "sourceAdmissibility": 1.0}
+    boundary = clamp(parse_float(components.get("xiBoundary"), 0.0), 0.0, 1.0)
+    umax = parse_float(components.get("uMax"), 0.0)
+    point_density = parse_float(components.get("pointDensity"), 0.0)
+    memory_load = parse_float(components.get("memoryLoad"), 0.0)
+    outer_disk = clamp(parse_float(components.get("outerDiskShare"), 0.0), 0.0, 1.0)
+    outer_gas = clamp(parse_float(components.get("outerGasShare"), 0.0), 0.0, 1.0)
+    fgas = clamp(parse_float(components.get("fGasOut"), 0.0), 0.0, 1.0)
+    l_gap = parse_float(components.get("lGapOverH"), 0.0)
+    admissibility = v19_motion_field_admissibility_factor(curve, spec)
+    u_cap = 1.0 - v19_smoothstep01(umax, 0.82, 0.90)
+    memory_band = v19_smooth_band(memory_load, 1.70, 2.60, 0.30)
+    density_band = v19_smooth_band(point_density, 0.70, 1.90, 0.35)
+    disk_band = v19_smooth_band(outer_disk, 0.30, 0.68, 0.12)
+    gap_gate = v19_smooth_band(l_gap, 0.24, 1.15, 0.28)
+    gas_disk = math.sqrt(max(0.0, outer_gas * outer_disk))
+    sink = (
+        boundary
+        * (1.0 - v19_smoothstep01(memory_load, 1.10, 1.80))
+        * (1.0 - v19_smoothstep01(point_density, 0.80, 1.35))
+        * v19_smoothstep01(outer_disk, 0.38, 0.55)
+        * (1.0 - v19_smoothstep01(fgas, 0.70, 0.82))
+        * v19_smoothstep01(umax, 0.70, 0.82)
+    )
+    if kernel_type == "hard-memory-cap-reference":
+        hard_gate = 1.0 if umax <= 0.8428907339912761 and point_density <= 1.6421069661467111 and memory_load <= 2.50 else 0.0
+        add = clamp(parse_float(components.get("xiAddActivation"), 0.0) * hard_gate, 0.0, 1.0)
+        sink = clamp(parse_float(components.get("xiSuppressActivation"), 0.0), 0.0, 1.0)
+    elif kernel_type == "memory-gap-flux":
+        add = boundary * u_cap * memory_band * gap_gate * disk_band * admissibility
+    elif kernel_type == "gas-disk-coupling":
+        add = boundary * u_cap * memory_band * gas_disk * admissibility
+    else:
+        add = boundary * u_cap * memory_band * density_band * disk_band * admissibility
+    details = {
+        "sourceBoundary": boundary,
+        "sourceAdmissibility": admissibility,
+        "sourceUCap": u_cap,
+        "sourceMemoryBand": memory_band,
+        "sourceDensityBand": density_band,
+        "sourceDiskBand": disk_band,
+        "sourceGapGate": gap_gate,
+        "sourceGasDiskCoupling": gas_disk,
+    }
+    return clamp(add, 0.0, 1.0), clamp(sink, 0.0, 1.0), details
+
+
+def v19_motion_field_support_delta_rmse(target: list[float], hierarchy: list[float], candidate: list[float]) -> float:
+    if not target or len(target) != len(hierarchy) or len(target) != len(candidate):
+        return math.nan
+    return math.sqrt(
+        safe_mean(((cand - base) - (truth - base)) ** 2 for truth, base, cand in zip(target, hierarchy, candidate))
+    )
+
+
+def v19_motion_field_kernel_score_spec(spec: dict, activation_overrides: dict[str, tuple[float, float]] | None = None) -> tuple[dict, list[dict], list[dict]]:
+    hierarchy_rows, _field_rows, _metadata = v19_field_hierarchy_case_rows()
+    target_names = v19_gas_boundary_target_names(hierarchy_rows)
+    curves, canonical_by_name, target_by_name, hierarchy_by_name, components_by_name, _meta = v19_gas_boundary_hierarchy_pack()
+    context = observed_state_candidate_context()
+    weak_names = set(context["weakNames"])
+    high_names = set(context["highNames"])
+    case_rows: list[dict] = []
+    shape_rows: list[dict] = []
+    for name, curve in curves.items():
+        if name not in target_by_name:
+            continue
+        canonical = canonical_by_name[name]
+        target = target_by_name[name]
+        hierarchy = hierarchy_by_name[name]
+        components = components_by_name[name]
+        add_activation, sink_activation, details = v19_motion_field_kernel_activations(curve, components, spec)
+        if activation_overrides is not None and name in activation_overrides:
+            add_activation, sink_activation = activation_overrides[name]
+        field_spec = {
+            "fieldId": spec["kernelId"],
+            "fieldFamily": spec["kernelFamily"],
+            "betaAdd": spec["betaAdd"],
+            "betaSuppress": spec["betaSink"],
+            "shape": spec.get("shape", "midouter"),
+        }
+        supports = v19_gas_boundary_field_supports(curve, canonical, hierarchy, components, field_spec, (add_activation, sink_activation))
+        set_name = "weak-systematics-excluded" if name in weak_names else ("clean-high-rmse" if name in high_names else "clean-protected")
+        canonical_score = v18_competitor_support_score(curve, canonical)
+        target_score = v18_competitor_support_score(curve, target)
+        hierarchy_score = v18_competitor_support_score(curve, hierarchy)
+        candidate_score = v18_competitor_support_score(curve, supports)
+        shape = v19_source_acceleration_shape_metrics(curve, target, supports)
+        delta_rmse = v19_motion_field_support_delta_rmse(target, hierarchy, supports)
+        row = {
+            "kernelId": spec["kernelId"],
+            "kernelFamily": spec["kernelFamily"],
+            "galaxy": name,
+            "set": set_name,
+            "lockedRoute": curve.get("lockedModelRoute", ""),
+            "isGasBoundaryTarget": name in target_names,
+            "nPoints": len(curve.get("points", [])),
+            "canonicalRmse": canonical_score["rmse"],
+            "lockedV18Rmse": target_score["rmse"],
+            "hierarchyRmse": hierarchy_score["rmse"],
+            "candidateRmse": candidate_score["rmse"],
+            "candidateGainOverHierarchyKmS": hierarchy_score["rmse"] - candidate_score["rmse"],
+            "candidateMinusHierarchyKmS": candidate_score["rmse"] - hierarchy_score["rmse"],
+            "candidateMinusV18KmS": candidate_score["rmse"] - target_score["rmse"],
+            "addActivation": add_activation,
+            "sinkActivation": sink_activation,
+            "xiAddActivationRaw": components.get("xiAddActivation", 0.0),
+            "xiSinkActivationRaw": components.get("xiSuppressActivation", 0.0),
+            "effectiveActivation": max(abs(parse_float(spec["betaAdd"]) * add_activation), abs(parse_float(spec["betaSink"]) * sink_activation)),
+            "supportDeltaRmseVsV18": delta_rmse,
+            "memoryLoad": components.get("memoryLoad", math.nan),
+            "fGasOut": components.get("fGasOut", math.nan),
+            "u075": components.get("u075", math.nan),
+            "uOut": components.get("uOut", math.nan),
+            "uMax": components.get("uMax", math.nan),
+            "outerGasShare": components.get("outerGasShare", math.nan),
+            "outerDiskShare": components.get("outerDiskShare", math.nan),
+            "pointDensity": components.get("pointDensity", math.nan),
+            "lGapOverH": components.get("lGapOverH", math.nan),
+            **details,
+            **shape,
+        }
+        case_rows.append(row)
+        shape_rows.append(
+            {
+                "kernelId": spec["kernelId"],
+                "galaxy": name,
+                "set": set_name,
+                "isGasBoundaryTarget": name in target_names,
+                "supportDeltaRmseVsV18": delta_rmse,
+                "accelerationShapeRmse": shape.get("accelerationShapeRmse", math.nan),
+                "accelerationFieldRmse": shape.get("accelerationFieldRmse", math.nan),
+                "innerAccelerationBias": shape.get("innerAccelerationBias", math.nan),
+                "midAccelerationBias": shape.get("midAccelerationBias", math.nan),
+                "outerAccelerationBias": shape.get("outerAccelerationBias", math.nan),
+                "addActivation": add_activation,
+                "sinkActivation": sink_activation,
+            }
+        )
+    clean = [row for row in case_rows if row["set"] != "weak-systematics-excluded"]
+    high = [row for row in clean if row["set"] == "clean-high-rmse"]
+    protected = [row for row in clean if row["set"] == "clean-protected"]
+    targets = [row for row in clean if parse_bool(row.get("isGasBoundaryTarget"))]
+    active_high = [row for row in high if parse_float(row.get("addActivation"), 0.0) >= 0.05 or parse_float(row.get("sinkActivation"), 0.0) >= 0.05]
+    active_protected = [row for row in protected if parse_float(row.get("addActivation"), 0.0) >= 0.05 or parse_float(row.get("sinkActivation"), 0.0) >= 0.05]
+    additive_target_pool = [
+        row
+        for row in targets
+        if row["set"] == "clean-high-rmse" and parse_float(row.get("xiAddActivationRaw"), 0.0) >= 0.05
+    ]
+    additive_target_hits = [
+        row
+        for row in additive_target_pool
+        if parse_float(row.get("addActivation"), 0.0) >= 0.05
+    ]
+
+    def mean_gain(group: list[dict]) -> float:
+        return safe_mean(parse_float(row.get("candidateGainOverHierarchyKmS"), math.nan) for row in group)
+
+    metric = {
+        "kernelId": spec["kernelId"],
+        "kernelFamily": spec["kernelFamily"],
+        "kernelType": spec["kernelType"],
+        "betaAdd": spec["betaAdd"],
+        "betaSink": spec["betaSink"],
+        "admissibility": spec["admissibility"],
+        "cleanCount": len(clean),
+        "highCount": len(high),
+        "protectedCount": len(protected),
+        "targetCount": len(targets),
+        "activeHighCount": len(active_high),
+        "activeProtectedCount": len(active_protected),
+        "targetMeanGainOverHierarchyKmS": mean_gain(targets),
+        "highMeanGainOverHierarchyKmS": mean_gain(high),
+        "cleanMeanGainOverHierarchyKmS": mean_gain(clean),
+        "additiveTargetCount": len(additive_target_pool),
+        "additiveTargetHitCount": len(additive_target_hits),
+        "additiveTargetRecall": len(additive_target_hits) / len(additive_target_pool) if additive_target_pool else 0.0,
+        "additiveTargetMeanGainKmS": safe_mean(parse_float(row.get("candidateGainOverHierarchyKmS"), math.nan) for row in additive_target_pool),
+        "additiveTargetHitMeanGainKmS": safe_mean(parse_float(row.get("candidateGainOverHierarchyKmS"), math.nan) for row in additive_target_hits),
+        "additiveTargetHitCases": ";".join(row["galaxy"] for row in additive_target_hits),
+        "protectedMaxRegressionOverHierarchyKmS": max(0.0, max([parse_float(row.get("candidateMinusHierarchyKmS"), 0.0) for row in protected] or [0.0])),
+        "protectedActiveMaxRegressionKmS": max(0.0, max([parse_float(row.get("candidateMinusHierarchyKmS"), 0.0) for row in active_protected] or [0.0])),
+        "protectedFalseReleaseCount": sum(1 for row in active_protected if parse_float(row.get("candidateMinusHierarchyKmS"), 0.0) > 0.25),
+        "highMaxRegressionOverHierarchyKmS": max(0.0, max([parse_float(row.get("candidateMinusHierarchyKmS"), 0.0) for row in high] or [0.0])),
+        "meanSupportDeltaRmseVsV18": safe_mean(parse_float(row.get("supportDeltaRmseVsV18"), math.nan) for row in clean),
+        "targetSupportDeltaRmseVsV18": safe_mean(parse_float(row.get("supportDeltaRmseVsV18"), math.nan) for row in targets),
+        "protectedSupportDeltaRmseVsV18": safe_mean(parse_float(row.get("supportDeltaRmseVsV18"), math.nan) for row in protected),
+        "targetImprovedCases": ";".join(row["galaxy"] for row in targets if parse_float(row["candidateGainOverHierarchyKmS"], 0.0) > 0.25),
+        "targetWorsenedCases": ";".join(row["galaxy"] for row in targets if parse_float(row["candidateMinusHierarchyKmS"], 0.0) > 0.25),
+        "activeHighCases": ";".join(row["galaxy"] for row in active_high),
+        "activeProtectedCases": ";".join(row["galaxy"] for row in active_protected),
+        "protectedRegressedCases": ";".join(row["galaxy"] for row in protected if parse_float(row["candidateMinusHierarchyKmS"], 0.0) > 0.25),
+        "weakSystematicsLeakage": 0,
+        "equation": spec["equation"],
+    }
+    return metric, case_rows, shape_rows
+
+
+def v19_motion_field_kernel_null_controls(best_spec: dict, candidate_metric: dict, seeds: list[int] | None = None) -> list[dict]:
+    if seeds is None:
+        seeds = [19601, 19603, 19609, 19621, 19633, 19639, 19651, 19661, 19681, 19687, 19697]
+    _metric, case_rows, _shape = v19_motion_field_kernel_score_spec(best_spec)
+    active = [row["galaxy"] for row in case_rows if row["set"] != "weak-systematics-excluded" and parse_float(row.get("addActivation"), 0.0) >= 0.05]
+    eligible = [
+        row["galaxy"]
+        for row in case_rows
+        if row["set"] != "weak-systematics-excluded"
+        and row["lockedRoute"] == "low-load"
+        and parse_float(row.get("sourceBoundary"), 0.0) >= 0.05
+        and parse_float(row.get("nPoints"), 0.0) >= 8
+    ]
+    active_values = [(parse_float(row.get("addActivation"), 0.0), parse_float(row.get("sinkActivation"), 0.0)) for row in case_rows if row["galaxy"] in eligible]
+    active_count = len(active)
+    rows: list[dict] = []
+    for null_type in ["same-active-random-admissible-lowload", "shuffled-kernel-strength"]:
+        for seed in seeds:
+            rng = random.Random(seed)
+            if null_type == "same-active-random-admissible-lowload":
+                chosen = set(rng.sample(eligible, min(active_count, len(eligible))))
+                overrides = {name: ((1.0, 0.0) if name in chosen else (0.0, 0.0)) for name in eligible}
+            else:
+                shuffled = active_values[:]
+                rng.shuffle(shuffled)
+                overrides = dict(zip(eligible, shuffled))
+            metric, _cases, _shape = v19_motion_field_kernel_score_spec(best_spec, overrides)
+            rows.append(
+                {
+                    "nullType": null_type,
+                    "seed": seed,
+                    "activeCount": active_count,
+                    "eligibleCount": len(eligible),
+                    "targetGainKmS": metric["targetMeanGainOverHierarchyKmS"],
+                    "additiveTargetRecall": metric["additiveTargetRecall"],
+                    "protectedFalseReleaseCount": metric["protectedFalseReleaseCount"],
+                    "protectedActiveMaxRegressionKmS": metric["protectedActiveMaxRegressionKmS"],
+                    "targetSupportDeltaRmseVsV18": metric["targetSupportDeltaRmseVsV18"],
+                    "beatsOrTiesCandidateTargetGain": parse_float(metric["targetMeanGainOverHierarchyKmS"], -math.inf) >= parse_float(candidate_metric["targetMeanGainOverHierarchyKmS"], math.inf),
+                    "protectedUnsafe": parse_float(metric["protectedActiveMaxRegressionKmS"], 0.0) > 1.0 or int(metric["protectedFalseReleaseCount"]) > 1,
+                }
+            )
+    return rows
+
+
+def write_v19_motion_field_kernel_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_motion_field_kernel"
+    score_rows: list[dict] = []
+    case_rows_all: list[dict] = []
+    shape_rows_all: list[dict] = []
+    for spec in v19_motion_field_kernel_specs():
+        metric, case_rows, shape_rows = v19_motion_field_kernel_score_spec(spec)
+        score_rows.append(metric)
+        case_rows_all.extend(case_rows)
+        shape_rows_all.extend(shape_rows)
+    candidate_rows = [row for row in score_rows if row["kernelFamily"] != "control"]
+    best = max(
+        candidate_rows,
+        key=lambda row: (
+            int(row["protectedFalseReleaseCount"]) == 0,
+            -parse_float(row["protectedActiveMaxRegressionKmS"], math.inf),
+            parse_float(row["additiveTargetRecall"], 0.0),
+            parse_float(row["targetMeanGainOverHierarchyKmS"], -math.inf),
+            -parse_float(row["targetSupportDeltaRmseVsV18"], math.inf),
+        ),
+    )
+    best_spec = next(item for item in v19_motion_field_kernel_specs() if item["kernelId"] == best["kernelId"])
+    null_rows = v19_motion_field_kernel_null_controls(best_spec, best)
+    safe_null = [row for row in null_rows if not parse_bool(row.get("protectedUnsafe"))]
+    null_p95 = v19_quantile([parse_float(row.get("targetGainKmS"), math.nan) for row in safe_null], 0.95)
+    null_margin = parse_float(best.get("targetMeanGainOverHierarchyKmS"), 0.0) - null_p95
+    if (
+        best["kernelFamily"] == "motion-source-flux"
+        and parse_float(best.get("additiveTargetRecall"), 0.0) >= 1.0
+        and int(best.get("protectedFalseReleaseCount", 999)) == 0
+        and parse_float(best.get("protectedActiveMaxRegressionKmS"), math.inf) <= 0.25
+        and null_margin >= 1.0
+    ):
+        verdict = "motion-field source kernel candidate for hardening"
+    elif best["kernelFamily"] == "motion-source-flux" and int(best.get("protectedFalseReleaseCount", 999)) == 0:
+        verdict = "motion-field kernel plausible but null margin narrow"
+    elif best["kernelFamily"] == "threshold-anatomy-reference":
+        verdict = "hard threshold still beats physical kernel"
+    else:
+        verdict = "missing physical source variable"
+    formula = {
+        "candidateId": "mts-v19-motion-field-kernel-v1",
+        "status": verdict,
+        "bestKernel": best,
+        "physicalPremise": "Disk baryons source a nonlocal motion field. The gas-boundary Xi term is tested as a circular-orbit source/sink flux in the mid/outer disk.",
+        "fieldEquationSketch": "Delta S_Xi(r) = [beta_add*A_source - beta_sink*A_sink] * S_canonical(r) * G_midouter(r)",
+        "admissibilitySeparation": "N_RC sampling floor is external data admissibility and is not part of the physical source field.",
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    report = [
+        "# MTS v19 Motion-Field Source Kernel",
+        "",
+        "This mode tests whether the gas-boundary `Xi` behaviour can be written as a physics-facing motion/source kernel. The sampled-curve admissibility gate is kept outside the kernel as validation discipline.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Best Kernel",
+        "",
+        f"- Kernel: `{best['kernelId']}`.",
+        f"- Family: `{best['kernelFamily']}`.",
+        f"- Additive target recall: `{fmt(best['additiveTargetRecall'])}`.",
+        f"- Target gain over hierarchy: `{fmt(best['targetMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Additive target gain: `{fmt(best['additiveTargetMeanGainKmS'])}` km/s.",
+        f"- Protected false releases: `{best['protectedFalseReleaseCount']}`.",
+        f"- Protected active regression: `{fmt(best['protectedActiveMaxRegressionKmS'])}` km/s.",
+        f"- Target support-delta RMSE vs v18: `{fmt(best['targetSupportDeltaRmseVsV18'])}`.",
+        f"- Safe-null p95 target gain: `{fmt(null_p95)}` km/s.",
+        f"- Safe-null margin: `{fmt(null_margin)}` km/s.",
+        "",
+        "## Kernel Equations",
+        "",
+        "`Delta S_Xi(r) = [beta_add*A_source - beta_sink*A_sink] S_canonical(r) G_midouter(r)`",
+        "",
+        "`A_source` is built from gas-boundary loading, memory/load structure, disk/gas coupling, and the external admissibility mask when present. The `N_RC` mask is not a physical source variable.",
+        "",
+        "## Score Table",
+        "",
+        "| kernel | family | add recall | target gain | protected false | protected active reg | target delta RMSE |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['kernelId']} | {row['kernelFamily']} | {fmt(row['additiveTargetRecall'])} | {fmt(row['targetMeanGainOverHierarchyKmS'])} | {row['protectedFalseReleaseCount']} | {fmt(row['protectedActiveMaxRegressionKmS'])} | {fmt(row['targetSupportDeltaRmseVsV18'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "A genuine physics kernel must survive without turning the sampling floor into physics. If the best admissible source-flux kernel is safe but only narrowly above null, it is a plausible disk-limit form to harden, not a canonical field equation yet.",
+            "",
+            "## Guardrails",
+            "",
+            "- Locked v18/browser behavior is unchanged.",
+            "- No weak/systematics cases are used as fitting evidence.",
+            "- No names, residuals, raw RMSE, NFW, or MOND parameters enter the kernel.",
+            "",
+            verdict,
+        ]
+    )
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows_all)
+    write_csv(out_dir / f"{prefix}_support_shape.csv", shape_rows_all)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-motion-field-kernel-v1",
+        "verdict": verdict,
+        "bestKernel": best,
+        "safeNullTargetGainP95": null_p95,
+        "safeNullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_support_shape.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -119706,6 +120163,27 @@ def cmd_v19sourceadmissibilitygate(args: argparse.Namespace) -> None:
     print(f"Wrote source-admissibility gate audit to {out_dir.resolve()}")
 
 
+def cmd_v19motionfieldkernel(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_MOTION_FIELD_KERNEL_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_motion_field_kernel_artifacts(out_dir)
+    best = capsule["bestKernel"]
+    print("MTS v19 motion-field source kernel")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['kernelId']}",
+                f"family={best['kernelFamily']}",
+                f"add_recall={fmt(best['additiveTargetRecall'])}",
+                f"target_gain={fmt(best['targetMeanGainOverHierarchyKmS'])}",
+                f"protected_false={best['protectedFalseReleaseCount']}",
+                f"null_margin={fmt(capsule['safeNullMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote motion-field source kernel audit to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -120033,6 +120511,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19pgc51017blocker",
             "v19sourceadmissibilitygate",
             "observedstatev19sourceadmissibilitygate",
+            "v19motionfieldkernel",
+            "observedstatev19motionfieldkernel",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -120536,6 +121016,8 @@ def main() -> None:
         cmd_v19pgc51017blocker(args)
     elif args.mode in {"v19sourceadmissibilitygate", "observedstatev19sourceadmissibilitygate"}:
         cmd_v19sourceadmissibilitygate(args)
+    elif args.mode in {"v19motionfieldkernel", "observedstatev19motionfieldkernel"}:
+        cmd_v19motionfieldkernel(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
