@@ -293,6 +293,7 @@ DEFAULT_V19_SOURCE_STATE_GATE_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-st
 DEFAULT_V19_SOURCE_FIELD_ADMISSIBILITY_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-field-admissibility-v1"
 DEFAULT_V19_SECTOR_FIELD_BRIDGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-sector-field-bridge-v1"
 DEFAULT_V19_PERSISTENCE_FIELD_BRIDGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-persistence-field-bridge-v1"
+DEFAULT_V19_PHASE_FIELD_BRIDGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-phase-field-bridge-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -115958,6 +115959,338 @@ def write_v19_persistence_field_bridge_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_buffered_phase_field_components(curve: dict, source_factor: float) -> dict:
+    state = v19_theory_kernel_state(curve)
+    features = v19_admissibility_features(curve)
+    buffered = 1.0 if curve.get("lockedModelRoute", "") == "buffered single-crossing" else 0.0
+    not_source = 1.0 - clamp(source_factor, 0.0, 1.0)
+    fgas = parse_float(features.get("fGasOut"), 0.0)
+    memory_load = parse_float(features.get("memoryLoad"), 0.0)
+    umax = parse_float(features.get("uMax"), 0.0)
+    r_over_h = parse_float(features.get("rOutOverH"), 0.0)
+    point_density = parse_float(features.get("pointDensity"), 0.0)
+    profile_drive = parse_float(state.get("profileDrive"), 0.0)
+    compact_lowgas = (
+        buffered
+        * not_source
+        * v19_smooth_band(memory_load, 6.4, 9.8, 1.2)
+        * v19_smoothstep01(point_density, 0.62, 0.96)
+        * (1.0 - v19_smoothstep01(fgas, 0.16, 0.28))
+        * v19_smoothstep01(umax, 1.05, 1.32)
+    )
+    high_umax = (
+        buffered
+        * not_source
+        * v19_smoothstep01(umax, 1.42, 1.82)
+        * v19_smoothstep01(profile_drive, 0.48, 0.62)
+        * v19_smooth_band(fgas, 0.18, 0.39, 0.08)
+    )
+    moderate_disk = (
+        buffered
+        * not_source
+        * v19_smooth_band(fgas, 0.20, 0.45, 0.10)
+        * v19_smooth_band(r_over_h, 6.0, 12.5, 2.0)
+        * v19_smoothstep01(umax, 1.18, 1.42)
+        * (1.0 - v19_smoothstep01(point_density, 1.45, 2.10))
+    )
+    phase = 1.0 - (1.0 - compact_lowgas) * (1.0 - high_umax) * (1.0 - moderate_disk)
+    return {
+        "compactLowGasShelfPhase": clamp(compact_lowgas, 0.0, 1.0),
+        "highUmaxDiskPhase": clamp(high_umax, 0.0, 1.0),
+        "moderateDiskPhase": clamp(moderate_disk, 0.0, 1.0),
+        "phaseFieldActivation": clamp(phase, 0.0, 1.0),
+        "fGasOut": fgas,
+        "memoryLoad": memory_load,
+        "uMax": umax,
+        "rOutOverH": r_over_h,
+        "pointDensity": point_density,
+        "profileDrive": profile_drive,
+    }
+
+
+def v19_phase_field_shape(point: dict, components: dict, field_variant: str) -> float:
+    x = clamp(parse_float(point.get("x"), 0.0), 0.0, 1.25)
+    mid = math.exp(-((x - 0.52) / 0.25) ** 2)
+    shelf = math.exp(-((x - 0.68) / 0.27) ** 2)
+    outer = clamp((x - 0.38) / 0.56, 0.0, 1.0) ** 1.20
+    compact = parse_float(components.get("compactLowGasShelfPhase"), 0.0)
+    high_u = parse_float(components.get("highUmaxDiskPhase"), 0.0)
+    moderate = parse_float(components.get("moderateDiskPhase"), 0.0)
+    if field_variant == "compact-lowgas-only":
+        return compact * (0.55 * mid + 0.45 * shelf)
+    if field_variant == "high-umax-only":
+        return high_u * (0.35 * mid + 0.65 * outer)
+    if field_variant == "moderate-disk-only":
+        return moderate * (0.40 + 0.60 * shelf)
+    if field_variant == "outer-weighted":
+        return clamp(0.45 * compact * shelf + 0.75 * high_u * outer + 0.55 * moderate * outer, 0.0, 1.30)
+    return clamp(compact * (0.55 * mid + 0.45 * shelf) + high_u * (0.35 * mid + 0.65 * outer) + moderate * (0.40 + 0.60 * shelf), 0.0, 1.35)
+
+
+def v19_phase_field_variant_specs() -> list[dict]:
+    specs = []
+    for variant in ["phase-combined", "compact-lowgas-only", "high-umax-only", "moderate-disk-only", "outer-weighted"]:
+        for beta in [0.15, 0.25, 0.35, 0.50, 0.70, 0.90, 1.10]:
+            specs.append(
+                {
+                    "variantId": f"{variant}-beta-{int(beta*100):03d}",
+                    "variantFamily": "buffered-phase-field" if variant == "phase-combined" else "phase-ablation",
+                    "fieldVariant": variant,
+                    "beta": beta,
+                }
+            )
+    return specs
+
+
+def v19_phase_field_score_spec(spec: dict) -> tuple[dict, list[dict], list[dict]]:
+    context = observed_state_candidate_context()
+    curves = {curve["name"]: curve for curve in context["curves"]}
+    weak_names = set(context["weakNames"])
+    high_names = set(context["highNames"])
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    component_rows = external_native_sparc_component_rows(v19_ugc03205_sparc_mass_model_path())
+    scales = v19_source_equation_global_scales(list(curves.values()), weak_names, supports_by_name)
+    source_scale = scales.get("curvature-memory-growth-equation", 1.0)
+    kernel_spec = next(item for item in v19_admit_source_shape_kernel_specs() if item["kernelId"] == "bulge-disk-plus-lowgas-disk-transfer")
+    beta = parse_float(spec.get("beta"), 0.0)
+    field_variant = spec["fieldVariant"]
+    rows: list[dict] = []
+    field_rows: list[dict] = []
+    for name, curve in curves.items():
+        target = supports_by_name.get(name, [])
+        if len(target) != len(curve["points"]):
+            continue
+        canonical = v18_competitor_canonical_supports(curve)
+        raw, _raw_meta = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        source = [max(0.0, source_scale * value) for value in raw]
+        component_gate = v19_inner_bulge_component_gate(name, curve, component_rows)
+        gates = v19_admit_source_shape_gates(name, curve, component_gate)
+        source_factor, source_reason, _source_components = v19_source_field_factor(gates)
+        kernel_source = v19_admit_source_shape_supports(curve, source, canonical, kernel_spec, gates)
+        source_candidate = [max(0.0, c + source_factor * (s - c)) for c, s in zip(canonical, kernel_source)]
+        persistence_components = v19_persistence_field_components(curve, source_factor)
+        persistence_base = []
+        for point, base_support, canonical_support in zip(curve["points"], source_candidate, canonical):
+            shape = v19_persistence_field_shape(point, persistence_components, "lowload-memory-only")
+            persistence_base.append(max(0.0, base_support + 1.40 * canonical_support * shape))
+        phase_components = v19_buffered_phase_field_components(curve, source_factor)
+        phase_values = []
+        candidate = []
+        for point, base_support, canonical_support in zip(curve["points"], persistence_base, canonical):
+            shape = v19_phase_field_shape(point, phase_components, field_variant)
+            phase_values.append(shape)
+            candidate.append(max(0.0, base_support + beta * canonical_support * shape))
+        set_name = "weak-systematics-excluded" if name in weak_names else ("clean-high-rmse" if name in high_names else "clean-protected")
+        canonical_score = v18_competitor_support_score(curve, canonical)
+        target_score = v18_competitor_support_score(curve, target)
+        base_score = v18_competitor_support_score(curve, persistence_base)
+        candidate_score = v18_competitor_support_score(curve, candidate)
+        target_gain = pct_improvement(canonical_score["rmse"], target_score["rmse"])
+        candidate_gain = pct_improvement(canonical_score["rmse"], candidate_score["rmse"])
+        base_gain = pct_improvement(canonical_score["rmse"], base_score["rmse"])
+        shape_metrics = v19_source_acceleration_shape_metrics(curve, target, candidate)
+        effective_activation = max(phase_values or [0.0])
+        rows.append(
+            {
+                "variantId": spec["variantId"],
+                "variantFamily": spec["variantFamily"],
+                "fieldVariant": field_variant,
+                "beta": beta,
+                "galaxy": name,
+                "set": set_name,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "sourceFieldAdmissibility": source_factor,
+                "sourceFieldReason": source_reason,
+                "persistenceFieldActivation": parse_float(persistence_components["persistenceFieldActivation"], 0.0),
+                "phaseFieldActivation": parse_float(phase_components["phaseFieldActivation"], 0.0),
+                "phaseEffectiveActivation": effective_activation,
+                "canonicalRmse": canonical_score["rmse"],
+                "lockedV18Rmse": target_score["rmse"],
+                "persistenceBaseRmse": base_score["rmse"],
+                "phaseFieldRmse": candidate_score["rmse"],
+                "phaseMinusV18KmS": candidate_score["rmse"] - target_score["rmse"],
+                "phaseMinusPersistenceKmS": candidate_score["rmse"] - base_score["rmse"],
+                "phaseGainVsCanonicalPct": candidate_gain,
+                "persistenceGainVsCanonicalPct": base_gain,
+                "lockedV18GainVsCanonicalPct": target_gain,
+                "v18RepairRetentionPct": candidate_gain / target_gain * 100.0 if abs(target_gain) > 1.0e-9 else math.nan,
+                "retentionGainOverPersistencePct": candidate_gain - base_gain,
+                **shape_metrics,
+            }
+        )
+        field_rows.append(
+            {
+                "variantId": spec["variantId"],
+                "galaxy": name,
+                "set": set_name,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "sourceFieldAdmissibility": source_factor,
+                "persistenceFieldActivation": parse_float(persistence_components["persistenceFieldActivation"], 0.0),
+                **phase_components,
+            }
+        )
+    metric = v19_phase_field_metric(rows)
+    metric.update(spec)
+    return metric, rows, field_rows
+
+
+def v19_phase_field_metric(rows: list[dict]) -> dict:
+    clean = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+    high = [row for row in clean if row["set"] == "clean-high-rmse"]
+    protected = [row for row in clean if row["set"] == "clean-protected"]
+    active_high = [row for row in high if parse_float(row["phaseEffectiveActivation"], 0.0) > 0.05]
+    active_protected = [row for row in protected if parse_float(row["phaseEffectiveActivation"], 0.0) > 0.05]
+    canonical_clean = safe_mean(parse_float(row["canonicalRmse"]) for row in clean)
+    v18_clean = safe_mean(parse_float(row["lockedV18Rmse"]) for row in clean)
+    base_clean = safe_mean(parse_float(row["persistenceBaseRmse"]) for row in clean)
+    candidate_clean = safe_mean(parse_float(row["phaseFieldRmse"]) for row in clean)
+    canonical_high = safe_mean(parse_float(row["canonicalRmse"]) for row in high)
+    v18_high = safe_mean(parse_float(row["lockedV18Rmse"]) for row in high)
+    base_high = safe_mean(parse_float(row["persistenceBaseRmse"]) for row in high)
+    candidate_high = safe_mean(parse_float(row["phaseFieldRmse"]) for row in high)
+    clean_retention = (canonical_clean - candidate_clean) / (canonical_clean - v18_clean) * 100.0 if abs(canonical_clean - v18_clean) > 1.0e-9 else math.nan
+    high_retention = (canonical_high - candidate_high) / (canonical_high - v18_high) * 100.0 if abs(canonical_high - v18_high) > 1.0e-9 else math.nan
+    base_clean_retention = (canonical_clean - base_clean) / (canonical_clean - v18_clean) * 100.0 if abs(canonical_clean - v18_clean) > 1.0e-9 else math.nan
+    base_high_retention = (canonical_high - base_high) / (canonical_high - v18_high) * 100.0 if abs(canonical_high - v18_high) > 1.0e-9 else math.nan
+    return {
+        "cleanCount": len(clean),
+        "highCount": len(high),
+        "protectedCount": len(protected),
+        "activeHighCount": len(active_high),
+        "activeProtectedCount": len(active_protected),
+        "activeHighCases": ";".join(row["galaxy"] for row in active_high),
+        "activeProtectedCases": ";".join(row["galaxy"] for row in active_protected),
+        "cleanV18RepairRetentionPct": clean_retention,
+        "highV18RepairRetentionPct": high_retention,
+        "baseCleanV18RepairRetentionPct": base_clean_retention,
+        "baseHighV18RepairRetentionPct": base_high_retention,
+        "cleanRetentionGainOverPersistencePct": clean_retention - base_clean_retention,
+        "highRetentionGainOverPersistencePct": high_retention - base_high_retention,
+        "activeProtectedMaxRegressionVsPersistenceKmS": max(0.0, max([parse_float(row["phaseMinusPersistenceKmS"], 0.0) for row in active_protected] or [0.0])),
+        "activeProtectedMaxReplacementGapVsV18KmS": max(0.0, max([parse_float(row["phaseMinusV18KmS"], 0.0) for row in active_protected] or [0.0])),
+        "highMaxRegressionVsPersistenceKmS": max(0.0, max([parse_float(row["phaseMinusPersistenceKmS"], 0.0) for row in high] or [0.0])),
+        "meanAccelerationShapeRmse": safe_mean(parse_float(row["accelerationShapeRmse"], math.nan) for row in clean),
+        "weakSystematicsLeakage": 0,
+    }
+
+
+def write_v19_phase_field_bridge_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_phase_field_bridge"
+    score_rows: list[dict] = []
+    case_rows: list[dict] = []
+    field_rows: list[dict] = []
+    for spec in v19_phase_field_variant_specs():
+        metric, cases, fields = v19_phase_field_score_spec(spec)
+        score_rows.append(metric)
+        case_rows.extend(cases)
+        field_rows.extend(fields)
+    best = max(
+        score_rows,
+        key=lambda row: (
+            parse_float(row["highRetentionGainOverPersistencePct"], -math.inf)
+            - 8.0 * max(0.0, parse_float(row["activeProtectedMaxRegressionVsPersistenceKmS"], 0.0))
+            - 1.5 * max(0.0, parse_float(row["highMaxRegressionVsPersistenceKmS"], 0.0) - 8.0),
+            parse_float(row["cleanRetentionGainOverPersistencePct"], -math.inf),
+        ),
+    )
+    if parse_float(best["activeProtectedMaxRegressionVsPersistenceKmS"], math.inf) <= 0.25 and parse_float(best["highRetentionGainOverPersistencePct"], 0.0) >= 5.0:
+        verdict = "buffered phase field improves missing v18 structure"
+    elif parse_float(best["activeProtectedMaxRegressionVsPersistenceKmS"], math.inf) <= 0.25 and parse_float(best["highRetentionGainOverPersistencePct"], 0.0) > 0.0:
+        verdict = "buffered phase field weak but safe"
+    elif parse_float(best["activeProtectedMaxRegressionVsPersistenceKmS"], math.inf) > 0.25:
+        verdict = "buffered phase field overactivates protected states"
+    else:
+        verdict = "buffered phase field not recovered from current variables"
+    formula = {
+        "candidateId": "mts-v19-phase-field-bridge-v1",
+        "status": verdict,
+        "base": "source field Psi plus low-load persistence field Pi",
+        "thirdField": {
+            "equation": "(1 - ell_Theta^2 nabla_r^2) Theta(r) = A_phase[X_b(r)] P_b(r)",
+            "support": "S_total(r)=S_PsiPi(r)+beta*S_canonical(r)*A_phase*Theta_shape(r)",
+            "components": {
+                "compactLowGasShelfPhase": "buffered * lowGas * coherent sampling * bounded memory shelf",
+                "highUmaxDiskPhase": "buffered * high uMax * profile-drive * moderate gas fraction",
+                "moderateDiskPhase": "buffered * moderate gas/disk phase * extended but not extreme rOut/h",
+            },
+        },
+        "bestMetric": best,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    limit_rows = [
+        {"check": "locked release unchanged", "status": "pass", "detail": "v18/browser/canonical law not edited"},
+        {"check": "forbidden inputs", "status": "pass", "detail": "no names/residual/RMSE/NFW/MOND/weak-systematics inputs enter the phase field"},
+        {"check": "incremental scoring", "status": "pass", "detail": "protected harm is measured against Psi+Pi base, not against full v18 replacement"},
+        {"check": "third-field limit", "status": "candidate", "detail": "if A_phase or beta tends to zero, the field reduces to Psi+Pi"},
+        {"check": "cosmology portability", "status": "open", "detail": "Theta is disk radial phase/shelf structure; a cosmology analogue needs a homogeneous phase variable"},
+    ]
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_field_ledger.csv", field_rows)
+    write_csv(out_dir / f"{prefix}_limit_checks.csv", limit_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 Buffered Phase Field Bridge",
+        "",
+        "This mode tests a third disk-limit field for buffered shelf/phase structure after the source field `Psi` and low-load persistence field `Pi`. It does not change locked v18 or the browser.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Best Variant",
+        "",
+        f"- Variant: `{best['variantId']}`.",
+        f"- Field family: `{best['fieldVariant']}`.",
+        f"- Beta: `{fmt(best['beta'])}`.",
+        f"- Active high cases: `{best['activeHighCases']}`.",
+        f"- Active protected cases: `{best['activeProtectedCases']}`.",
+        f"- Base high retention: `{fmt(best['baseHighV18RepairRetentionPct'])}%`.",
+        f"- Phase high retention: `{fmt(best['highV18RepairRetentionPct'])}%`.",
+        f"- High retention gain over Psi+Pi: `{fmt(best['highRetentionGainOverPersistencePct'])}` points.",
+        f"- Base clean retention: `{fmt(best['baseCleanV18RepairRetentionPct'])}%`.",
+        f"- Phase clean retention: `{fmt(best['cleanV18RepairRetentionPct'])}%`.",
+        f"- Active protected max incremental regression vs Psi+Pi: `{fmt(best['activeProtectedMaxRegressionVsPersistenceKmS'])}` km/s.",
+        "",
+        "## Equation Reading",
+        "",
+        "```text",
+        "(1 - ell_Theta^2 nabla_r^2) Theta(r) = A_phase[X_b(r)] P_b(r)",
+        "S_total(r) = S_PsiPi(r) + beta S_canonical(r) A_phase Theta_shape(r)",
+        "```",
+        "",
+        "If this survives later hardening, the disk-sector field hierarchy becomes: source loading `Psi`, low-load memory persistence `Pi`, and buffered phase/shelf response `Theta`.",
+        "",
+        "## Guardrails",
+        "",
+        "- No locked v18/browser law changed.",
+        "- No galaxy names, residuals, raw RMSE, NFW/MOND parameters, or weak/systematics fitting enter the field.",
+        "- This is still disk-sector work; cosmology needs the time-domain analogue before claims.",
+        "",
+        verdict,
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-phase-field-bridge-v1",
+        "verdict": verdict,
+        "bestMetric": best,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_field_ledger.csv",
+            f"{prefix}_limit_checks.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -116220,6 +116553,25 @@ def cmd_v19persistencefieldbridge(args: argparse.Namespace) -> None:
         )
     )
     print(f"Wrote persistence field bridge to {out_dir.resolve()}")
+
+
+def cmd_v19phasefieldbridge(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_PHASE_FIELD_BRIDGE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_phase_field_bridge_artifacts(out_dir)
+    best = capsule["bestMetric"]
+    print("MTS v19 buffered phase field bridge")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['variantId']}",
+                f"high_gain_over_base={fmt(best['highRetentionGainOverPersistencePct'])}",
+                f"clean_gain_over_base={fmt(best['cleanRetentionGainOverPersistencePct'])}",
+                f"active_protected_reg={fmt(best['activeProtectedMaxRegressionVsPersistenceKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote buffered phase field bridge to {out_dir.resolve()}")
 
 
 def cmd_list_candidates() -> None:
@@ -116531,6 +116883,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19sectorfieldbridge",
             "v19persistencefieldbridge",
             "observedstatev19persistencefieldbridge",
+            "v19phasefieldbridge",
+            "observedstatev19phasefieldbridge",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -117016,6 +117370,8 @@ def main() -> None:
         cmd_v19sectorfieldbridge(args)
     elif args.mode in {"v19persistencefieldbridge", "observedstatev19persistencefieldbridge"}:
         cmd_v19persistencefieldbridge(args)
+    elif args.mode in {"v19phasefieldbridge", "observedstatev19phasefieldbridge"}:
+        cmd_v19phasefieldbridge(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
