@@ -297,6 +297,7 @@ DEFAULT_V19_PHASE_FIELD_BRIDGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-phase-field-bri
 DEFAULT_V19_FIELD_HIERARCHY_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-v19-field-hierarchy-audit-v1"
 DEFAULT_V19_GAS_BOUNDARY_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-field-v1"
 DEFAULT_V19_GAS_BOUNDARY_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-discriminator-v1"
+DEFAULT_V19_GAS_BOUNDARY_GATED_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-gated-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -117673,6 +117674,377 @@ def write_v19_gas_boundary_discriminator_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_gas_boundary_gated_candidate_specs() -> list[dict]:
+    return [
+        {
+            "candidateId": "xi-add-discriminator-hard",
+            "candidateFamily": "additive-xi-state-gate",
+            "description": "Additive Xi allowed by the two-variable discriminator; suppression side unchanged.",
+            "betaAdd": 1.50,
+            "betaSuppress": 2.00,
+            "shape": "midouter",
+            "gateMode": "hard-two-state",
+            "uMaxMax": 0.8428907339912761,
+            "pointDensityMax": 1.6421069661467111,
+            "memoryLoadMax": "",
+        },
+        {
+            "candidateId": "xi-add-discriminator-memory-cap",
+            "candidateFamily": "additive-xi-state-gate",
+            "description": "Two-variable discriminator plus memory-load cap that blocks the UGC06930 lookalike state.",
+            "betaAdd": 1.50,
+            "betaSuppress": 2.00,
+            "shape": "midouter",
+            "gateMode": "hard-three-state",
+            "uMaxMax": 0.8428907339912761,
+            "pointDensityMax": 1.6421069661467111,
+            "memoryLoadMax": 2.50,
+        },
+        {
+            "candidateId": "xi-add-discriminator-soft-memory-cap",
+            "candidateFamily": "additive-xi-state-gate",
+            "description": "Continuous version of the two-state discriminator plus a soft memory-load safety cap.",
+            "betaAdd": 1.50,
+            "betaSuppress": 2.00,
+            "shape": "midouter",
+            "gateMode": "soft-three-state",
+            "uMaxMax": 0.8428907339912761,
+            "pointDensityMax": 1.6421069661467111,
+            "memoryLoadMax": 2.50,
+        },
+        {
+            "candidateId": "xi-add-low-beta-memory-cap",
+            "candidateFamily": "additive-xi-state-gate",
+            "description": "Same memory-capped gate with a conservative additive strength.",
+            "betaAdd": 1.00,
+            "betaSuppress": 2.00,
+            "shape": "midouter",
+            "gateMode": "hard-three-state",
+            "uMaxMax": 0.8428907339912761,
+            "pointDensityMax": 1.6421069661467111,
+            "memoryLoadMax": 2.50,
+        },
+        {
+            "candidateId": "xi-suppress-only-reference",
+            "candidateFamily": "safe-sign-reference",
+            "description": "Protected-safe suppress-only reference from the previous field attack.",
+            "betaAdd": 0.00,
+            "betaSuppress": 2.00,
+            "shape": "midouter",
+            "gateMode": "no-add",
+            "uMaxMax": "",
+            "pointDensityMax": "",
+            "memoryLoadMax": "",
+        },
+    ]
+
+
+def v19_gas_boundary_add_gate(components: dict, spec: dict) -> float:
+    mode = str(spec.get("gateMode", ""))
+    if mode == "no-add":
+        return 0.0
+    umax = parse_float(components.get("uMax"), math.nan)
+    point_density = parse_float(components.get("pointDensity"), math.nan)
+    memory_load = parse_float(components.get("memoryLoad"), math.nan)
+    umax_max = parse_float(spec.get("uMaxMax"), math.nan)
+    pd_max = parse_float(spec.get("pointDensityMax"), math.nan)
+    memory_max = parse_float(spec.get("memoryLoadMax"), math.nan)
+    if not math.isfinite(umax) or not math.isfinite(point_density):
+        return 0.0
+    if mode.startswith("hard"):
+        if not (umax <= umax_max and point_density <= pd_max):
+            return 0.0
+        if math.isfinite(memory_max) and not (math.isfinite(memory_load) and memory_load <= memory_max):
+            return 0.0
+        return 1.0
+    # A narrow continuous gate is used only as a robustness companion, not as
+    # the preferred law, so hard gates remain directly auditable.
+    u_gate = 1.0 - v19_smoothstep01(umax, umax_max - 0.035, umax_max + 0.035)
+    pd_gate = 1.0 - v19_smoothstep01(point_density, pd_max - 0.25, pd_max + 0.25)
+    mem_gate = 1.0
+    if math.isfinite(memory_max):
+        mem_gate = 1.0 - v19_smoothstep01(memory_load, memory_max - 0.12, memory_max + 0.12)
+    return clamp(u_gate * pd_gate * mem_gate, 0.0, 1.0)
+
+
+def v19_gas_boundary_gated_score_spec(spec: dict, add_gate_overrides: dict[str, float] | None = None) -> tuple[dict, list[dict]]:
+    hierarchy_rows, _field_rows, _metadata = v19_field_hierarchy_case_rows()
+    target_names = v19_gas_boundary_target_names(hierarchy_rows)
+    curves, canonical_by_name, target_by_name, hierarchy_by_name, components_by_name, _meta = v19_gas_boundary_hierarchy_pack()
+    context = observed_state_candidate_context()
+    weak_names = set(context["weakNames"])
+    high_names = set(context["highNames"])
+    field_spec = {
+        "fieldId": spec["candidateId"],
+        "fieldFamily": spec["candidateFamily"],
+        "betaAdd": spec["betaAdd"],
+        "betaSuppress": spec["betaSuppress"],
+        "shape": spec["shape"],
+    }
+    case_rows: list[dict] = []
+    for name, curve in curves.items():
+        if name not in target_by_name:
+            continue
+        canonical = canonical_by_name[name]
+        target = target_by_name[name]
+        hierarchy = hierarchy_by_name[name]
+        components = components_by_name[name]
+        add_gate = add_gate_overrides.get(name, 0.0) if add_gate_overrides is not None else v19_gas_boundary_add_gate(components, spec)
+        add_activation = parse_float(components.get("xiAddActivation"), 0.0) * add_gate
+        suppress_activation = parse_float(components.get("xiSuppressActivation"), 0.0)
+        supports = v19_gas_boundary_field_supports(curve, canonical, hierarchy, components, field_spec, (add_activation, suppress_activation))
+        set_name = "weak-systematics-excluded" if name in weak_names else ("clean-high-rmse" if name in high_names else "clean-protected")
+        canonical_score = v18_competitor_support_score(curve, canonical)
+        target_score = v18_competitor_support_score(curve, target)
+        hierarchy_score = v18_competitor_support_score(curve, hierarchy)
+        candidate_score = v18_competitor_support_score(curve, supports)
+        shape = v19_source_acceleration_shape_metrics(curve, target, supports)
+        row = {
+            "candidateId": spec["candidateId"],
+            "candidateFamily": spec["candidateFamily"],
+            "galaxy": name,
+            "set": set_name,
+            "lockedRoute": curve.get("lockedModelRoute", ""),
+            "isGasBoundaryTarget": name in target_names,
+            "canonicalRmse": canonical_score["rmse"],
+            "lockedV18Rmse": target_score["rmse"],
+            "hierarchyRmse": hierarchy_score["rmse"],
+            "candidateRmse": candidate_score["rmse"],
+            "candidateGainOverHierarchyKmS": hierarchy_score["rmse"] - candidate_score["rmse"],
+            "candidateMinusHierarchyKmS": candidate_score["rmse"] - hierarchy_score["rmse"],
+            "candidateMinusV18KmS": candidate_score["rmse"] - target_score["rmse"],
+            "addGate": add_gate,
+            "xiAddActivationRaw": parse_float(components.get("xiAddActivation"), 0.0),
+            "xiAddActivationGated": add_activation,
+            "xiSuppressActivation": suppress_activation,
+            "xiBoundary": parse_float(components.get("xiBoundary"), 0.0),
+            "memoryLoad": components.get("memoryLoad", math.nan),
+            "fGasOut": components.get("fGasOut", math.nan),
+            "u075": components.get("u075", math.nan),
+            "uOut": components.get("uOut", math.nan),
+            "uMax": components.get("uMax", math.nan),
+            "outerDiskShare": components.get("outerDiskShare", math.nan),
+            "pointDensity": components.get("pointDensity", math.nan),
+            "rOutOverH": components.get("rOutOverH", math.nan),
+            **shape,
+        }
+        case_rows.append(row)
+    clean = [row for row in case_rows if row["set"] != "weak-systematics-excluded"]
+    high = [row for row in clean if row["set"] == "clean-high-rmse"]
+    protected = [row for row in clean if row["set"] == "clean-protected"]
+    targets = [row for row in clean if parse_bool(row.get("isGasBoundaryTarget"))]
+    active_add_high = [row for row in high if parse_float(row["xiAddActivationGated"], 0.0) >= 0.05]
+    active_add_protected = [row for row in protected if parse_float(row["xiAddActivationGated"], 0.0) >= 0.05]
+
+    def mean_gain(group: list[dict]) -> float:
+        return safe_mean(parse_float(row.get("candidateGainOverHierarchyKmS"), math.nan) for row in group)
+
+    metric = {
+        "candidateId": spec["candidateId"],
+        "candidateFamily": spec["candidateFamily"],
+        "gateMode": spec["gateMode"],
+        "betaAdd": spec["betaAdd"],
+        "betaSuppress": spec["betaSuppress"],
+        "uMaxMax": spec.get("uMaxMax", ""),
+        "pointDensityMax": spec.get("pointDensityMax", ""),
+        "memoryLoadMax": spec.get("memoryLoadMax", ""),
+        "cleanCount": len(clean),
+        "highCount": len(high),
+        "protectedCount": len(protected),
+        "targetCount": len(targets),
+        "activeAddHighCount": len(active_add_high),
+        "activeAddProtectedCount": len(active_add_protected),
+        "cleanMeanGainOverHierarchyKmS": mean_gain(clean),
+        "highMeanGainOverHierarchyKmS": mean_gain(high),
+        "targetMeanGainOverHierarchyKmS": mean_gain(targets),
+        "activeAddHighMeanGainOverHierarchyKmS": mean_gain(active_add_high),
+        "protectedMaxRegressionOverHierarchyKmS": max(0.0, max([parse_float(row["candidateMinusHierarchyKmS"], 0.0) for row in protected] or [0.0])),
+        "protectedAddHitMaxRegressionKmS": max(0.0, max([parse_float(row["candidateMinusHierarchyKmS"], 0.0) for row in active_add_protected] or [0.0])),
+        "protectedAddFalseReleaseCount": sum(1 for row in active_add_protected if parse_float(row["candidateMinusHierarchyKmS"], 0.0) > 0.25),
+        "highMaxRegressionOverHierarchyKmS": max(0.0, max([parse_float(row["candidateMinusHierarchyKmS"], 0.0) for row in high] or [0.0])),
+        "targetImprovedCases": ";".join(row["galaxy"] for row in targets if parse_float(row["candidateGainOverHierarchyKmS"], 0.0) > 0.25),
+        "targetWorsenedCases": ";".join(row["galaxy"] for row in targets if parse_float(row["candidateMinusHierarchyKmS"], 0.0) > 0.25),
+        "activeAddHighCases": ";".join(row["galaxy"] for row in active_add_high),
+        "activeAddProtectedCases": ";".join(row["galaxy"] for row in active_add_protected),
+        "protectedRegressedCases": ";".join(row["galaxy"] for row in protected if parse_float(row["candidateMinusHierarchyKmS"], 0.0) > 0.25),
+        "weakSystematicsLeakage": 0,
+    }
+    return metric, case_rows
+
+
+def v19_gas_boundary_gated_null_controls(best_spec: dict, candidate_metric: dict, seeds: list[int] | None = None) -> list[dict]:
+    if seeds is None:
+        seeds = [19101, 19107, 19113, 19121, 19127, 19139, 19141, 19157, 19163, 19181, 19183]
+    _metric, case_rows = v19_gas_boundary_gated_score_spec(best_spec)
+    active_names = [row["galaxy"] for row in case_rows if parse_float(row["addGate"], 0.0) >= 0.50 and parse_float(row["xiAddActivationRaw"], 0.0) >= 0.05]
+    eligible = [
+        row["galaxy"]
+        for row in case_rows
+        if row["set"] != "weak-systematics-excluded"
+        and row["lockedRoute"] == "low-load"
+        and parse_float(row["xiAddActivationRaw"], 0.0) >= 0.05
+    ]
+    active_count = len(active_names)
+    rows: list[dict] = []
+    for seed in seeds:
+        rng = random.Random(seed)
+        chosen = set(rng.sample(eligible, min(active_count, len(eligible))))
+        overrides = {name: (1.0 if name in chosen else 0.0) for name in eligible}
+        metric, _cases = v19_gas_boundary_gated_score_spec(best_spec, overrides)
+        rows.append(
+            {
+                "nullType": "same-active-count-random-additive-gate",
+                "seed": seed,
+                "activeCount": active_count,
+                "targetGainKmS": metric["targetMeanGainOverHierarchyKmS"],
+                "highGainKmS": metric["highMeanGainOverHierarchyKmS"],
+                "protectedMaxRegressionKmS": metric["protectedMaxRegressionOverHierarchyKmS"],
+                "protectedAddFalseReleaseCount": metric["protectedAddFalseReleaseCount"],
+                "beatsOrTiesCandidateTargetGain": parse_float(metric["targetMeanGainOverHierarchyKmS"], -math.inf) >= parse_float(candidate_metric["targetMeanGainOverHierarchyKmS"], math.inf),
+                "protectedUnsafe": parse_float(metric["protectedAddHitMaxRegressionKmS"], 0.0) > 1.0 or int(metric["protectedAddFalseReleaseCount"]) > 1,
+            }
+        )
+    return rows
+
+
+def write_v19_gas_boundary_gated_candidate_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_gas_boundary_gated_candidate"
+    score_rows: list[dict] = []
+    case_rows_all: list[dict] = []
+    for spec in v19_gas_boundary_gated_candidate_specs():
+        metric, case_rows = v19_gas_boundary_gated_score_spec(spec)
+        score_rows.append(metric)
+        case_rows_all.extend(case_rows)
+    candidate_rows = [row for row in score_rows if row["candidateFamily"] == "additive-xi-state-gate"]
+    best = max(
+        candidate_rows,
+        key=lambda row: (
+            parse_float(row["protectedAddHitMaxRegressionKmS"], math.inf) <= 1.0,
+            -int(row["protectedAddFalseReleaseCount"]),
+            parse_float(row["targetMeanGainOverHierarchyKmS"], -math.inf),
+            parse_float(row["highMeanGainOverHierarchyKmS"], -math.inf),
+        ),
+    )
+    best_spec = next(item for item in v19_gas_boundary_gated_candidate_specs() if item["candidateId"] == best["candidateId"])
+    null_rows = v19_gas_boundary_gated_null_controls(best_spec, best)
+    null_target_p95 = v19_quantile([parse_float(row["targetGainKmS"], math.nan) for row in null_rows], 0.95)
+    null_unsafe_fraction = safe_mean(1.0 if parse_bool(row["protectedUnsafe"]) else 0.0 for row in null_rows)
+    target_gain = parse_float(best["targetMeanGainOverHierarchyKmS"], 0.0)
+    protected_add_reg = parse_float(best["protectedAddHitMaxRegressionKmS"], math.inf)
+    protected_false_count = int(best["protectedAddFalseReleaseCount"])
+    if target_gain >= 3.0 and protected_false_count == 0 and protected_add_reg <= 1.0 and target_gain >= null_target_p95 + 1.0:
+        verdict = "additive gas-boundary candidate for hardening"
+    elif target_gain >= 2.0 and protected_false_count <= 1 and target_gain >= null_target_p95:
+        verdict = "promising but null margin narrow"
+    elif target_gain >= 2.0:
+        verdict = "additive gas-boundary signal remains protected-limited"
+    else:
+        verdict = "additive gas-boundary candidate not above guardrails"
+    target_rows = [row for row in case_rows_all if row["candidateId"] == best["candidateId"] and parse_bool(row.get("isGasBoundaryTarget"))]
+    protected_rows = [
+        row
+        for row in case_rows_all
+        if row["candidateId"] == best["candidateId"] and row["set"] == "clean-protected" and (parse_float(row["xiAddActivationGated"], 0.0) >= 0.05 or parse_float(row["candidateMinusHierarchyKmS"], 0.0) > 0.25)
+    ]
+    formula = {
+        "candidateId": "mts-v19-gas-boundary-gated-candidate-v1",
+        "status": verdict,
+        "bestCandidate": best,
+        "equation": "S_candidate(r)=S_hierarchy(r)+[beta_add*A_add*G_add-beta_suppress*A_suppress]*S_canonical(r)*G_midouter(r)",
+        "bestAddGate": {
+            "uMaxMax": best.get("uMaxMax", ""),
+            "pointDensityMax": best.get("pointDensityMax", ""),
+            "memoryLoadMax": best.get("memoryLoadMax", ""),
+            "gateMode": best.get("gateMode", ""),
+        },
+        "nullTargetGainP95KmS": null_target_p95,
+        "nullProtectedUnsafeFraction": null_unsafe_fraction,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows_all)
+    write_csv(out_dir / f"{prefix}_target_ledger.csv", target_rows)
+    write_csv(out_dir / f"{prefix}_protected_ledger.csv", protected_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 Gas-Boundary Gated Candidate",
+        "",
+        "This is a direct candidate-law test for the additive side of the gas-boundary `Xi` field. It uses the current-vector discriminator from the previous audit and tests whether the additive branch can be made safe without changing locked v18 or the browser.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Best Candidate",
+        "",
+        f"- Candidate: `{best['candidateId']}`.",
+        f"- Target gain over hierarchy: `{fmt(best['targetMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- High-RMSE gain over hierarchy: `{fmt(best['highMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Clean gain over hierarchy: `{fmt(best['cleanMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Additive high hits: `{best['activeAddHighCases']}`.",
+        f"- Additive protected hits: `{best['activeAddProtectedCases']}`.",
+        f"- Protected additive false-release count: `{best['protectedAddFalseReleaseCount']}`.",
+        f"- Protected additive-hit max regression: `{fmt(best['protectedAddHitMaxRegressionKmS'])}` km/s.",
+        f"- Protected max regression overall: `{fmt(best['protectedMaxRegressionOverHierarchyKmS'])}` km/s.",
+        f"- Target improved: `{best['targetImprovedCases']}`.",
+        f"- Target worsened: `{best['targetWorsenedCases']}`.",
+        "",
+        "## Candidate Table",
+        "",
+        "| candidate | target gain | high gain | clean gain | add high hits | add protected hits | protected false count | protected add reg |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['candidateId']} | {fmt(row['targetMeanGainOverHierarchyKmS'])} | {fmt(row['highMeanGainOverHierarchyKmS'])} | {fmt(row['cleanMeanGainOverHierarchyKmS'])} | {row['activeAddHighCount']} | {row['activeAddProtectedCount']} | {row['protectedAddFalseReleaseCount']} | {fmt(row['protectedAddHitMaxRegressionKmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Null Context",
+            "",
+            f"- Same-active random additive-gate target-gain p95: `{fmt(null_target_p95)}` km/s.",
+            f"- Protected-unsafe null fraction: `{fmt(null_unsafe_fraction)}`.",
+            "",
+            "## Interpretation",
+            "",
+            "The key physics move is the memory-load cap: the two-variable additive discriminator finds the useful target region, but the protected lookalike UGC06930 sits just outside the target memory-load envelope. If the memory-capped candidate wins, the next test is hardening this as a boundary-source admissibility condition. If it does not, additive `Xi` remains anatomy only.",
+            "",
+            "## Guardrails",
+            "",
+            "- No locked v18/browser law changed.",
+            "- No galaxy name, raw residual, raw RMSE, NFW/MOND parameter, or weak/systematics fitting enters the formula.",
+            "- UGC06930 is used only as a reported safety blocker, not as a formula input.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-gas-boundary-gated-candidate-v1",
+        "verdict": verdict,
+        "bestCandidate": best,
+        "nullTargetGainP95KmS": null_target_p95,
+        "nullProtectedUnsafeFraction": null_unsafe_fraction,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_target_ledger.csv",
+            f"{prefix}_protected_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -118014,6 +118386,26 @@ def cmd_v19gasboundarydiscriminator(args: argparse.Namespace) -> None:
     print(f"Wrote gas-boundary discriminator to {out_dir.resolve()}")
 
 
+def cmd_v19gasboundarygatedcandidate(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_GAS_BOUNDARY_GATED_CANDIDATE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_gas_boundary_gated_candidate_artifacts(out_dir)
+    best = capsule["bestCandidate"]
+    print("MTS v19 gas-boundary gated candidate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['candidateId']}",
+                f"target_gain={fmt(best['targetMeanGainOverHierarchyKmS'])}",
+                f"high_gain={fmt(best['highMeanGainOverHierarchyKmS'])}",
+                f"protected_false={best['protectedAddFalseReleaseCount']}",
+                f"protected_add_reg={fmt(best['protectedAddHitMaxRegressionKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote gas-boundary gated candidate to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -118331,6 +118723,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19gasboundaryfield",
             "v19gasboundarydiscriminator",
             "observedstatev19gasboundarydiscriminator",
+            "v19gasboundarygatedcandidate",
+            "observedstatev19gasboundarygatedcandidate",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -118824,6 +119218,8 @@ def main() -> None:
         cmd_v19gasboundaryfield(args)
     elif args.mode in {"v19gasboundarydiscriminator", "observedstatev19gasboundarydiscriminator"}:
         cmd_v19gasboundarydiscriminator(args)
+    elif args.mode in {"v19gasboundarygatedcandidate", "observedstatev19gasboundarygatedcandidate"}:
+        cmd_v19gasboundarygatedcandidate(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
