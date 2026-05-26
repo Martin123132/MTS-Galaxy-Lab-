@@ -308,6 +308,7 @@ DEFAULT_V19_MOTION_FIELD_NORMALIZATION_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-
 DEFAULT_V19_MOTION_FIELD_NORMALIZATION_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-normalization-hardening-v1"
 DEFAULT_V19_MEMORY_DENSITY_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-memory-density-field-v1"
 DEFAULT_V19_SOURCE_RESIDUAL_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-residual-field-v1"
+DEFAULT_V19_SOURCE_BOUNDARY_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-hardening-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -121254,6 +121255,291 @@ def write_v19_source_residual_field_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_source_boundary_hardening_specs() -> list[dict]:
+    specs: list[dict] = []
+    for alpha in [1.35, 1.50, 1.65]:
+        for eta in [0.00, 0.25, 0.40]:
+            for boundary_weight in [0.00, 0.025, 0.05, 0.075, 0.10, 0.15]:
+                for sink_boundary_weight in [0.00, 0.10, 0.25, 0.40]:
+                    family = "memory-density-core" if boundary_weight == 0.0 and sink_boundary_weight == 0.0 else "physical-boundary-hardening"
+                    specs.append(
+                        v19_source_residual_field_spec(
+                            f"boundary-harden-a{alpha:.2f}-e{eta:.2f}-b{boundary_weight:.3f}-sb{sink_boundary_weight:.2f}",
+                            family,
+                            alpha=alpha,
+                            eta=eta,
+                            boundary_weight=boundary_weight,
+                            sink_boundary_weight=sink_boundary_weight,
+                        )
+                    )
+    for weight in [0.05, 0.10, 0.20]:
+        specs.append(
+            v19_source_residual_field_spec(
+                f"provenance-density-control-w{weight:.2f}",
+                "provenance-density-control",
+                alpha=1.50,
+                eta=0.25,
+                density_weight=weight,
+            )
+        )
+        specs.append(
+            v19_source_residual_field_spec(
+                f"provenance-admissibility-control-w{weight:.2f}",
+                "provenance-admissibility-control",
+                alpha=1.50,
+                eta=0.25,
+                admissibility_weight=weight,
+            )
+        )
+    return specs
+
+
+def write_v19_source_boundary_hardening_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_source_boundary_hardening"
+    scored: list[tuple[dict, dict, list[dict]]] = []
+    shape_by_id: dict[str, list[dict]] = {}
+    for spec in v19_source_boundary_hardening_specs():
+        metric, cases, shape_rows = v19_motion_field_normalization_score_spec(spec)
+        for field in ["memoryDensityAddWeight", "memoryBandSinkWeight", "boundaryResidualWeight", "gasDiskResidualWeight", "densityResidualWeight", "admissibilityResidualWeight", "sinkBoundaryWeight"]:
+            metric[field] = spec.get(field, "")
+        scored.append((spec, metric, cases))
+        shape_by_id[spec["normalizationId"]] = shape_rows
+    physical_rows = [item for item in scored if item[0]["normalizationFamily"].startswith("physical-boundary")]
+    core_rows = [
+        item for item in scored
+        if parse_float(item[0].get("boundaryResidualWeight"), 0.0) == 0.0
+        and parse_float(item[0].get("sinkBoundaryWeight"), 0.0) == 0.0
+        and item[0]["normalizationFamily"] == "memory-density-core"
+    ]
+    provenance_rows = [item for item in scored if item[0]["normalizationFamily"].startswith("provenance")]
+    best_spec, best_metric, best_cases = max(
+        physical_rows,
+        key=lambda item: (
+            int(item[1]["protectedFalseReleaseCount"]) == 0,
+            -parse_float(item[1]["protectedActiveMaxRegressionKmS"], math.inf),
+            parse_float(item[1]["additiveTargetRecall"], 0.0),
+            parse_float(item[1]["targetMeanGainOverHierarchyKmS"], -math.inf),
+            -abs(parse_float(item[0].get("boundaryResidualWeight"), 0.0) - 0.05),
+        ),
+    )
+    best_core_spec, best_core_metric, _best_core_cases = max(
+        core_rows,
+        key=lambda item: (
+            int(item[1]["protectedFalseReleaseCount"]) == 0,
+            -parse_float(item[1]["protectedActiveMaxRegressionKmS"], math.inf),
+            parse_float(item[1]["additiveTargetRecall"], 0.0),
+            parse_float(item[1]["targetMeanGainOverHierarchyKmS"], -math.inf),
+        ),
+    )
+    best_provenance_spec, best_provenance_metric, _best_provenance_cases = max(
+        provenance_rows,
+        key=lambda item: (
+            int(item[1]["protectedFalseReleaseCount"]) == 0,
+            -parse_float(item[1]["protectedActiveMaxRegressionKmS"], math.inf),
+            parse_float(item[1]["additiveTargetRecall"], 0.0),
+            parse_float(item[1]["targetMeanGainOverHierarchyKmS"], -math.inf),
+        ),
+    )
+    combined_spec = next(spec for spec in v19_motion_field_normalization_specs() if spec["normalizationId"] == "combined-source-strength")
+    combined_metric, _combined_cases, _combined_shape = v19_motion_field_normalization_score_spec(combined_spec)
+    loo_rows = v19_source_residual_field_leave_one_out(scored)
+    null_rows = v19_motion_field_normalization_null_controls(best_spec, best_metric)
+    safe_null_rows = [row for row in null_rows if not parse_bool(row.get("protectedUnsafe"))]
+    null_p95 = v19_quantile([parse_float(row.get("targetGainKmS"), math.nan) for row in safe_null_rows], 0.95)
+    null_margin = parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0) - null_p95
+    loo_hit_fraction = safe_mean(1.0 if parse_bool(row.get("heldoutHit")) else 0.0 for row in loo_rows)
+    loo_positive_fraction = safe_mean(1.0 if parse_float(row.get("heldoutGainKmS"), -math.inf) > 0.0 else 0.0 for row in loo_rows)
+    loo_min_gain = min([parse_float(row.get("heldoutGainKmS"), math.inf) for row in loo_rows] or [math.nan])
+    loo_additive_boundary_positive_fraction = safe_mean(
+        1.0 if "boundary-harden" in str(row.get("selectedNormalization", "")) and "-b0.000-" not in str(row.get("selectedNormalization", "")) else 0.0
+        for row in loo_rows
+    )
+    loo_sink_boundary_positive_fraction = safe_mean(
+        1.0 if "boundary-harden" in str(row.get("selectedNormalization", "")) and "-sb0.00" not in str(row.get("selectedNormalization", "")) else 0.0
+        for row in loo_rows
+    )
+    loo_boundary_response_positive_fraction = safe_mean(
+        1.0
+        if "boundary-harden" in str(row.get("selectedNormalization", ""))
+        and ("-b0.000-" not in str(row.get("selectedNormalization", "")) or "-sb0.00" not in str(row.get("selectedNormalization", "")))
+        else 0.0
+        for row in loo_rows
+    )
+    selected_counts: dict[str, int] = {}
+    for row in loo_rows:
+        name = str(row.get("selectedNormalization", ""))
+        selected_counts[name] = selected_counts.get(name, 0) + 1
+    boundary_gain_over_core = parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0) - parse_float(best_core_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+    boundary_gain_over_provenance = parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0) - parse_float(best_provenance_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+    boundary_minus_combined = parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0) - parse_float(combined_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+    selected_boundary_weight = parse_float(best_spec.get("boundaryResidualWeight"), 0.0)
+    if (
+        selected_boundary_weight > 0.0
+        and int(best_metric["protectedFalseReleaseCount"]) == 0
+        and parse_float(best_metric["protectedActiveMaxRegressionKmS"], math.inf) <= 0.25
+        and boundary_gain_over_core >= 0.20
+        and boundary_gain_over_provenance >= 0.20
+        and loo_additive_boundary_positive_fraction >= 0.75
+        and loo_positive_fraction >= 1.0
+        and null_margin >= 1.0
+    ):
+        verdict = "boundary residual hardens for source field"
+    elif (
+        selected_boundary_weight > 0.0
+        and int(best_metric["protectedFalseReleaseCount"]) == 0
+        and boundary_gain_over_core > 0.0
+        and loo_boundary_response_positive_fraction >= 1.0
+        and loo_positive_fraction >= 1.0
+    ):
+        verdict = "boundary response hardens; additive coefficient not closed"
+    elif (
+        selected_boundary_weight > 0.0
+        and int(best_metric["protectedFalseReleaseCount"]) == 0
+        and boundary_gain_over_core > 0.0
+        and loo_positive_fraction >= 1.0
+    ):
+        verdict = "boundary residual useful but coefficient not closed"
+    elif parse_float(best_core_metric["targetMeanGainOverHierarchyKmS"], 0.0) >= parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0) - 0.05:
+        verdict = "memory-density core sufficient"
+    else:
+        verdict = "boundary residual not stable"
+    score_rows = []
+    for spec, metric, _cases in scored:
+        row = dict(metric)
+        row["gainOverBestCoreKmS"] = parse_float(metric["targetMeanGainOverHierarchyKmS"], 0.0) - parse_float(best_core_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+        row["isPositiveBoundary"] = parse_float(spec.get("boundaryResidualWeight"), 0.0) > 0.0
+        score_rows.append(row)
+    comparison_rows = [
+        {"role": "best-memory-density-core", "normalizationId": best_core_spec["normalizationId"], **best_core_metric},
+        {"role": "best-boundary", "normalizationId": best_spec["normalizationId"], **best_metric},
+        {"role": "best-provenance", "normalizationId": best_provenance_spec["normalizationId"], **best_provenance_metric},
+        {"role": "previous-blended", "normalizationId": combined_spec["normalizationId"], **combined_metric},
+    ]
+    formula = {
+        "candidateId": "mts-v19-source-boundary-hardening-v1",
+        "status": verdict,
+        "fieldEquationSketch": "Delta S_Xi(r) = [(1 + alpha*M_density + epsilon*B_gas) A_source - (1 + eta*memoryBand + kappa*B_gas) A_sink] S0 G_midouter",
+        "bestSpec": best_spec,
+        "bestMetric": best_metric,
+        "bestCoreMetric": best_core_metric,
+        "bestProvenanceMetric": best_provenance_metric,
+        "previousBlendedMetric": combined_metric,
+        "boundaryGainOverCoreKmS": boundary_gain_over_core,
+        "boundaryGainOverProvenanceKmS": boundary_gain_over_provenance,
+        "boundaryMinusPreviousBlendedKmS": boundary_minus_combined,
+        "leaveOneOut": {
+            "hitFraction": loo_hit_fraction,
+            "positiveGainFraction": loo_positive_fraction,
+            "minGainKmS": loo_min_gain,
+            "positiveBoundaryResponseSelectedFraction": loo_boundary_response_positive_fraction,
+            "positiveAdditiveBoundarySelectedFraction": loo_additive_boundary_positive_fraction,
+            "positiveSinkBoundarySelectedFraction": loo_sink_boundary_positive_fraction,
+            "selectedCounts": selected_counts,
+        },
+        "safeNullTargetGainP95": null_p95,
+        "safeNullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    report = [
+        "# MTS v19 Source Boundary Hardening",
+        "",
+        "This mode hardens the exact residual found after the memory-density source term: a small physical boundary-loading term. It does not change locked v18 or the browser.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Candidate",
+        "",
+        f"- Best: `{best_spec['normalizationId']}`.",
+        f"- alpha: `{fmt(best_spec['memoryDensityAddWeight'])}`.",
+        f"- eta: `{fmt(best_spec['memoryBandSinkWeight'])}`.",
+        f"- epsilon boundary: `{fmt(best_spec['boundaryResidualWeight'])}`.",
+        f"- kappa sink-boundary: `{fmt(best_spec['sinkBoundaryWeight'])}`.",
+        f"- Target gain: `{fmt(best_metric['targetMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Gain over best memory-density core: `{fmt(boundary_gain_over_core)}` km/s.",
+        f"- Gain over best provenance control: `{fmt(boundary_gain_over_provenance)}` km/s.",
+        f"- Boundary minus previous blended: `{fmt(boundary_minus_combined)}` km/s.",
+        f"- Protected false releases: `{best_metric['protectedFalseReleaseCount']}`.",
+        f"- Protected active regression: `{fmt(best_metric['protectedActiveMaxRegressionKmS'])}` km/s.",
+        f"- Safe-null margin: `{fmt(null_margin)}` km/s.",
+        "",
+        "## Leave-One-Out",
+        "",
+        f"- Held-out hit fraction: `{fmt(loo_hit_fraction)}`.",
+        f"- Held-out positive-gain fraction: `{fmt(loo_positive_fraction)}`.",
+        f"- Worst held-out gain: `{fmt(loo_min_gain)}` km/s.",
+        f"- Positive boundary-response selected fraction: `{fmt(loo_boundary_response_positive_fraction)}`.",
+        f"- Positive additive-boundary selected fraction: `{fmt(loo_additive_boundary_positive_fraction)}`.",
+        f"- Positive sink-boundary selected fraction: `{fmt(loo_sink_boundary_positive_fraction)}`.",
+        f"- Selected counts: `{json.dumps(selected_counts, sort_keys=True)}`.",
+        "",
+        "## Comparison",
+        "",
+        "| role | normalization | target gain | protected false | active reg |",
+        "| --- | --- | ---: | ---: | ---: |",
+        f"| best core | {best_core_spec['normalizationId']} | {fmt(best_core_metric['targetMeanGainOverHierarchyKmS'])} | {best_core_metric['protectedFalseReleaseCount']} | {fmt(best_core_metric['protectedActiveMaxRegressionKmS'])} |",
+        f"| best boundary | {best_spec['normalizationId']} | {fmt(best_metric['targetMeanGainOverHierarchyKmS'])} | {best_metric['protectedFalseReleaseCount']} | {fmt(best_metric['protectedActiveMaxRegressionKmS'])} |",
+        f"| best provenance | {best_provenance_spec['normalizationId']} | {fmt(best_provenance_metric['targetMeanGainOverHierarchyKmS'])} | {best_provenance_metric['protectedFalseReleaseCount']} | {fmt(best_provenance_metric['protectedActiveMaxRegressionKmS'])} |",
+        f"| previous blended | {combined_spec['normalizationId']} | {fmt(combined_metric['targetMeanGainOverHierarchyKmS'])} | {combined_metric['protectedFalseReleaseCount']} | {fmt(combined_metric['protectedActiveMaxRegressionKmS'])} |",
+        "",
+        "## Physical Reading",
+        "",
+        "A positive result means the field response is not just memory-density. It needs a small boundary-loading correction. In the motion-field reading, memory-density sets the main admissible source strength, while the boundary response measures how close the galaxy sits to the outer memory-loading surface. If leave-one-out selects sink-boundary more strongly than additive-boundary, the boundary term should be interpreted as response/cap anatomy until the additive source coefficient is separately closed.",
+        "",
+        "## Guardrails",
+        "",
+        "- No locked v18/browser law changed.",
+        "- No galaxy names, residuals, raw RMSE, NFW/MOND parameters, or weak/systematics fitting enter the formula.",
+        "",
+        verdict,
+    ]
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", best_cases)
+    write_csv(out_dir / f"{prefix}_comparison.csv", comparison_rows)
+    write_csv(out_dir / f"{prefix}_support_shape.csv", shape_by_id[best_spec["normalizationId"]])
+    write_csv(out_dir / f"{prefix}_leave_one_out.csv", loo_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-source-boundary-hardening-v1",
+        "verdict": verdict,
+        "bestSpec": best_spec,
+        "bestMetric": best_metric,
+        "bestCoreMetric": best_core_metric,
+        "bestProvenanceMetric": best_provenance_metric,
+        "previousBlendedMetric": combined_metric,
+        "boundaryGainOverCoreKmS": boundary_gain_over_core,
+        "boundaryGainOverProvenanceKmS": boundary_gain_over_provenance,
+        "boundaryMinusPreviousBlendedKmS": boundary_minus_combined,
+        "leaveOneOutHitFraction": loo_hit_fraction,
+        "leaveOneOutPositiveGainFraction": loo_positive_fraction,
+        "leaveOneOutMinGainKmS": loo_min_gain,
+        "leaveOneOutPositiveBoundaryResponseSelectedFraction": loo_boundary_response_positive_fraction,
+        "leaveOneOutPositiveAdditiveBoundarySelectedFraction": loo_additive_boundary_positive_fraction,
+        "leaveOneOutPositiveSinkBoundarySelectedFraction": loo_sink_boundary_positive_fraction,
+        "safeNullTargetGainP95": null_p95,
+        "safeNullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_comparison.csv",
+            f"{prefix}_support_shape.csv",
+            f"{prefix}_leave_one_out.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -121832,6 +122118,29 @@ def cmd_v19sourceresidualfield(args: argparse.Namespace) -> None:
     print(f"Wrote source residual field audit to {out_dir.resolve()}")
 
 
+def cmd_v19sourceboundaryharden(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SOURCE_BOUNDARY_HARDENING_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_source_boundary_hardening_artifacts(out_dir)
+    metric = capsule["bestMetric"]
+    spec = capsule["bestSpec"]
+    print("MTS v19 source boundary hardening")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={spec['normalizationId']}",
+                f"target_gain={fmt(metric['targetMeanGainOverHierarchyKmS'])}",
+                f"boundary_gain={fmt(capsule['boundaryGainOverCoreKmS'])}",
+                f"prov_margin={fmt(capsule['boundaryGainOverProvenanceKmS'])}",
+                f"loo_boundary={fmt(capsule['leaveOneOutPositiveBoundaryResponseSelectedFraction'])}",
+                f"protected_false={metric['protectedFalseReleaseCount']}",
+                f"null_margin={fmt(capsule['safeNullMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote source boundary hardening to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -122171,6 +122480,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19memorydensityfield",
             "v19sourceresidualfield",
             "observedstatev19sourceresidualfield",
+            "v19sourceboundaryharden",
+            "observedstatev19sourceboundaryharden",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -122686,6 +122997,8 @@ def main() -> None:
         cmd_v19memorydensityfield(args)
     elif args.mode in {"v19sourceresidualfield", "observedstatev19sourceresidualfield"}:
         cmd_v19sourceresidualfield(args)
+    elif args.mode in {"v19sourceboundaryharden", "observedstatev19sourceboundaryharden"}:
+        cmd_v19sourceboundaryharden(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
