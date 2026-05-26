@@ -285,6 +285,7 @@ DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-ugc0525
 DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ugc05253-radial-provenance-v1")
 DEFAULT_V19_SOURCE_ADMISSIBILITY_BLOCKER_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-admissibility-blocker-v1"
 DEFAULT_V19_BLOCKER_GATED_SOURCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-blocker-gated-source-candidate-v1"
+DEFAULT_V19_SOURCE_OPERATOR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-operator-shape-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -113126,6 +113127,345 @@ def cmd_v19blockergatedsource(args: argparse.Namespace) -> None:
     print(f"Wrote v19 blocker-gated source candidate to {out_dir.resolve()}")
 
 
+def v19_source_operator_shape_specs() -> list[dict]:
+    specs: list[dict] = [
+        {
+            "operatorId": "current-curvature-source",
+            "operatorFamily": "control",
+            "beta": 0.0,
+            "description": "Current curvature-memory source equation with no additional outer persistence operator.",
+            "formula": "S_op = S_source",
+        }
+    ]
+    for beta in [0.15, 0.25, 0.35, 0.45, 0.60]:
+        specs.append(
+            {
+                "operatorId": f"outer-memory-boost-{int(beta*100):03d}",
+                "operatorFamily": "outer-memory-boost",
+                "beta": beta,
+                "description": "Boost the source field in the outer disk when the existing memory load is high.",
+                "formula": "S_op = S_source * (1 + beta * memoryGate * outerShape)",
+            }
+        )
+        specs.append(
+            {
+                "operatorId": f"disk-shelf-boost-{int(beta*100):03d}",
+                "operatorFamily": "disk-shelf-boost",
+                "beta": beta,
+                "description": "Boost mid/outer source support when the outer baryonic profile is disk dominated.",
+                "formula": "S_op = S_source * (1 + beta * sqrt(outerDiskShare) * (0.45*midShape + outerShape))",
+            }
+        )
+    for beta in [0.25, 0.40, 0.55, 0.70, 0.90, 1.10]:
+        specs.append(
+            {
+                "operatorId": f"baryon-envelope-completion-{int(beta*100):03d}",
+                "operatorFamily": "baryon-envelope-completion",
+                "beta": beta,
+                "description": "Add a baryonic-envelope persistence term to the source field in the mid/outer disk.",
+                "formula": "S_op = S_source + beta * S_canonical * (0.5 + sqrt(outerDiskShare)) * outerShape",
+            }
+        )
+    for beta in [0.25, 0.40, 0.55, 0.70]:
+        specs.append(
+            {
+                "operatorId": f"two-scale-persistence-{int(beta*100):03d}",
+                "operatorFamily": "two-scale-persistence",
+                "beta": beta,
+                "description": "Combine a memory-loaded outer mode with a disk-shelf mid-radius mode.",
+                "formula": "S_op = S_source * (1 + beta*(0.55*memoryGate*outerShape + 0.45*sqrt(outerDiskShare)*midShape)) + 0.25*beta*S_canonical*outerShape",
+            }
+        )
+    return specs
+
+
+def v19_source_operator_shape_supports(curve: dict, source: list[float], canonical: list[float], spec: dict) -> list[float]:
+    if spec["operatorFamily"] == "control":
+        return [max(0.0, value) for value in source]
+    features = v19_admissibility_features(curve)
+    memory_gate = clamp((parse_float(features.get("memoryLoad"), 0.0) - 4.0) / 6.0, 0.0, 1.0)
+    disk_gate = math.sqrt(clamp(parse_float(features.get("outerDiskShare"), 0.0), 0.0, 1.0))
+    beta = parse_float(spec.get("beta"), 0.0)
+    out: list[float] = []
+    for point, source_value, canonical_value in zip(curve["points"], source, canonical):
+        x = clamp(parse_float(point.get("x"), parse_float(point.get("r"), 0.0) / max(1.0e-9, parse_float(curve.get("rOut"), 1.0))), 0.0, 1.25)
+        outer_shape = clamp((x - 0.35) / 0.65, 0.0, 1.0)
+        mid_shape = math.exp(-((x - 0.58) / 0.24) ** 2)
+        if spec["operatorFamily"] == "outer-memory-boost":
+            candidate = source_value * (1.0 + beta * memory_gate * outer_shape)
+        elif spec["operatorFamily"] == "disk-shelf-boost":
+            candidate = source_value * (1.0 + beta * disk_gate * (0.45 * mid_shape + outer_shape))
+        elif spec["operatorFamily"] == "baryon-envelope-completion":
+            candidate = source_value + beta * canonical_value * (0.5 + disk_gate) * outer_shape
+        elif spec["operatorFamily"] == "two-scale-persistence":
+            candidate = source_value * (1.0 + beta * (0.55 * memory_gate * outer_shape + 0.45 * disk_gate * mid_shape)) + 0.25 * beta * canonical_value * outer_shape
+        else:
+            candidate = source_value
+        out.append(max(0.0, candidate))
+    return out
+
+
+def v19_source_operator_shape_score_spec(
+    spec: dict,
+    curves: dict[str, dict],
+    source_supports: dict[str, list[float]],
+    canonical_supports: dict[str, list[float]],
+    v18_supports: dict[str, list[float]],
+    blocker_decisions: dict[str, dict],
+) -> tuple[dict, list[dict]]:
+    variant = next(item for item in v19_blocker_gated_source_variant_specs(list(blocker_decisions.values())) if item["variantId"] == "blocker-plus-prior-admits")
+    case_rows: list[dict] = []
+    factors = variant["factors"]
+    held_out = set(variant["heldOut"])
+    for name, role in V19_SOURCE_BOUNDARY_TARGET_ROLES.items():
+        curve = curves.get(name)
+        source = source_supports.get(name, [])
+        canonical = canonical_supports.get(name, [])
+        target = v18_supports.get(name, [])
+        if not curve or len(source) != len(curve["points"]) or len(target) != len(curve["points"]):
+            continue
+        factor = parse_float(factors.get(name, 0.0), 0.0)
+        operator_source = v19_source_operator_shape_supports(curve, source, canonical, spec)
+        candidate_supports = [
+            max(0.0, c + factor * (s - c))
+            for c, s in zip(canonical, operator_source)
+        ]
+        source_score = v18_competitor_support_score(curve, source)
+        operator_score = v18_competitor_support_score(curve, operator_source)
+        candidate_score = v18_competitor_support_score(curve, candidate_supports)
+        canonical_score = v18_competitor_support_score(curve, canonical)
+        v18_score = v18_competitor_support_score(curve, target)
+        target_gain = pct_improvement(canonical_score["rmse"], v18_score["rmse"])
+        candidate_gain = pct_improvement(canonical_score["rmse"], candidate_score["rmse"])
+        shape = v19_source_acceleration_shape_metrics(curve, target, candidate_supports)
+        case_rows.append(
+            {
+                "operatorId": spec["operatorId"],
+                "operatorFamily": spec["operatorFamily"],
+                "beta": spec["beta"],
+                "galaxy": name,
+                "targetRole": role,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "sourceBoundaryFactor": factor,
+                "heldOutFromSourceTraining": name in held_out,
+                "utilityEligible": name not in held_out,
+                "candidateDecision": blocker_decisions.get(name, {}).get("candidateDecision", ""),
+                "canonicalRmse": canonical_score["rmse"],
+                "lockedV18Rmse": v18_score["rmse"],
+                "unsafeFullSourceRmse": source_score["rmse"],
+                "operatorSourceRmse": operator_score["rmse"],
+                "candidateRmse": candidate_score["rmse"],
+                "candidateMinusV18KmS": candidate_score["rmse"] - v18_score["rmse"],
+                "candidateGainVsCanonicalPct": candidate_gain,
+                "lockedV18GainVsCanonicalPct": target_gain,
+                "v18RepairRetentionPct": candidate_gain / target_gain * 100.0 if abs(target_gain) > 1.0e-9 else math.nan,
+                "protectedCase": "protected" in role,
+                "admitControlCase": "admit high/source-load" in role,
+                **shape,
+            }
+        )
+    eligible = [row for row in case_rows if parse_bool(row["utilityEligible"])]
+    protected = [row for row in eligible if parse_bool(row["protectedCase"])]
+    admit = [row for row in eligible if parse_bool(row["admitControlCase"])]
+    ngc2403 = next((row for row in case_rows if row["galaxy"] == "NGC2403"), {})
+    ngc3521 = next((row for row in case_rows if row["galaxy"] == "NGC3521"), {})
+    ngc7331 = next((row for row in case_rows if row["galaxy"] == "NGC7331"), {})
+    ugc03205 = next((row for row in case_rows if row["galaxy"] == "UGC03205"), {})
+    ugc05253 = next((row for row in case_rows if row["galaxy"] == "UGC05253"), {})
+    protected_reg = max([parse_float(row["candidateMinusV18KmS"], -math.inf) for row in protected] or [0.0])
+    admit_retention = safe_mean(parse_float(row["v18RepairRetentionPct"], math.nan) for row in admit)
+    admit_regression = safe_mean(max(0.0, parse_float(row["candidateMinusV18KmS"], 0.0)) for row in admit)
+    metric = {
+        **spec,
+        "eligibleCaseCount": len(eligible),
+        "protectedCaseCount": len(protected),
+        "admitControlCount": len(admit),
+        "protectedMaxRegressionVsV18KmS": protected_reg,
+        "admitMeanV18RepairRetentionPct": admit_retention,
+        "admitMeanRegressionVsV18KmS": admit_regression,
+        "meanAccelerationShapeRmse": safe_mean(parse_float(row["accelerationShapeRmse"], math.nan) for row in eligible),
+        "ngc2403RetentionPct": parse_float(ngc2403.get("v18RepairRetentionPct"), math.nan),
+        "ngc3521RetentionPct": parse_float(ngc3521.get("v18RepairRetentionPct"), math.nan),
+        "ngc7331RetentionPct": parse_float(ngc7331.get("v18RepairRetentionPct"), math.nan),
+        "ugc03205RetentionPct": parse_float(ugc03205.get("v18RepairRetentionPct"), math.nan),
+        "ugc03205CandidateMinusV18KmS": parse_float(ugc03205.get("candidateMinusV18KmS"), math.nan),
+        "ugc05253HeldOut": bool(ugc05253.get("heldOutFromSourceTraining", False)),
+        "ugc05253CandidateMinusV18KmS": parse_float(ugc05253.get("candidateMinusV18KmS"), math.nan),
+        "sourceOperatorUtility": admit_retention - 4.0 * max(0.0, protected_reg) - 2.0 * admit_regression - 30.0 * max(0.0, 70.0 - parse_float(ugc03205.get("v18RepairRetentionPct"), 0.0)) / 70.0,
+    }
+    return metric, case_rows
+
+
+def v19_source_operator_shape_nulls(best: dict, score_rows: list[dict], seed: int = 20260526, draws: int = 1000) -> tuple[list[dict], dict]:
+    rng = random.Random(seed)
+    families = sorted({row["operatorFamily"] for row in score_rows})
+    beta_by_family: dict[str, list[float]] = {}
+    for row in score_rows:
+        beta_by_family.setdefault(row["operatorFamily"], []).append(parse_float(row["beta"], 0.0))
+    rows = []
+    for draw in range(draws):
+        family = rng.choice(families)
+        beta = rng.choice(beta_by_family[family])
+        matched = next(row for row in score_rows if row["operatorFamily"] == family and abs(parse_float(row["beta"], 0.0) - beta) < 1.0e-12)
+        rows.append(
+            {
+                "nullType": "operator-family-random-choice",
+                "draw": draw,
+                "operatorFamily": family,
+                "beta": beta,
+                "sourceOperatorUtility": matched["sourceOperatorUtility"],
+                "admitMeanV18RepairRetentionPct": matched["admitMeanV18RepairRetentionPct"],
+                "protectedMaxRegressionVsV18KmS": matched["protectedMaxRegressionVsV18KmS"],
+                "ugc03205RetentionPct": matched["ugc03205RetentionPct"],
+                "beatsOrTiesBest": matched["sourceOperatorUtility"] >= best["sourceOperatorUtility"],
+            }
+        )
+    utilities = [parse_float(row["sourceOperatorUtility"], math.nan) for row in rows]
+    summary = {
+        "nullDraws": draws,
+        "nullSeed": seed,
+        "nullUtilityMedian": safe_median(utilities),
+        "nullUtilityP95": v19_quantile(utilities, 0.95),
+        "nullBeatOrTieBestFraction": safe_mean(1.0 if parse_bool(row["beatsOrTiesBest"]) else 0.0 for row in rows),
+    }
+    return rows, summary
+
+
+def write_v19_source_operator_shape_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_source_operator_shape"
+    curves, source_supports, canonical_supports, v18_supports, _context = v19_source_boundary_case_base()
+    _feature_rows, decision_rows = v19_source_admissibility_blocker_feature_matrix()
+    blocker_decisions = {row["galaxy"]: row for row in decision_rows}
+    score_rows: list[dict] = []
+    case_rows: list[dict] = []
+    operator_rows: list[dict] = []
+    for spec in v19_source_operator_shape_specs():
+        metric, cases = v19_source_operator_shape_score_spec(
+            spec,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            blocker_decisions,
+        )
+        score_rows.append(metric)
+        case_rows.extend(cases)
+        operator_rows.append(spec)
+    best = max(
+        score_rows,
+        key=lambda row: (
+            parse_float(row["sourceOperatorUtility"], -math.inf),
+            parse_float(row["admitMeanV18RepairRetentionPct"], -math.inf),
+            -parse_float(row["protectedMaxRegressionVsV18KmS"], math.inf),
+        ),
+    )
+    null_rows, null_summary = v19_source_operator_shape_nulls(best, score_rows)
+    if parse_float(best["protectedMaxRegressionVsV18KmS"], math.inf) <= 0.25 and parse_float(best["admitMeanV18RepairRetentionPct"], 0.0) >= 80.0 and parse_float(best["ugc03205RetentionPct"], 0.0) >= 70.0:
+        verdict = "source operator candidate survives first pass"
+    elif parse_float(best["protectedMaxRegressionVsV18KmS"], math.inf) <= 0.25 and parse_float(best["admitMeanV18RepairRetentionPct"], 0.0) > 61.44:
+        verdict = "source operator improves admits but not enough"
+    else:
+        verdict = "source operator still missing"
+    formula = {
+        "candidateId": "v19-source-operator-shape-v1",
+        "status": verdict,
+        "bestOperator": best,
+        "blockerGuard": "UGC05253 held out, UGC07089 capped, UGC03205 admitted under v19 source-admissibility blocker",
+        "browserChanged": False,
+        "lockedV18Changed": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw RMSE", "residual lookup", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_operator_ledger.csv", operator_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 Source-Operator Shape Test",
+        "",
+        "This mode keeps the source-admissibility blocker fixed and tests whether the source equation needs an outer persistence/amplitude operator. It does not change locked v18 or the browser.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Best operator: `{best['operatorId']}`.",
+        "",
+        "## Best Operator Metrics",
+        "",
+        f"- Protected max regression vs v18: `{fmt(best['protectedMaxRegressionVsV18KmS'])}` km/s.",
+        f"- Admit-control v18 repair retention: `{fmt(best['admitMeanV18RepairRetentionPct'])}%`.",
+        f"- UGC03205 retention: `{fmt(best['ugc03205RetentionPct'])}%`.",
+        f"- NGC3521 retention: `{fmt(best['ngc3521RetentionPct'])}%`.",
+        f"- NGC7331 retention: `{fmt(best['ngc7331RetentionPct'])}%`.",
+        f"- Null beat/tie fraction: `{fmt(null_summary['nullBeatOrTieBestFraction'])}`.",
+        "",
+        "## Operator Scores",
+        "",
+        "| Operator | family | beta | protected reg | admit retention | UGC03205 retention | utility |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in sorted(score_rows, key=lambda item: parse_float(item["sourceOperatorUtility"], -math.inf), reverse=True)[:15]:
+        report.append(
+            f"| {row['operatorId']} | {row['operatorFamily']} | {fmt(row['beta'])} | {fmt(row['protectedMaxRegressionVsV18KmS'])} | {fmt(row['admitMeanV18RepairRetentionPct'])}% | {fmt(row['ugc03205RetentionPct'])}% | {fmt(row['sourceOperatorUtility'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Physical Reading",
+            "",
+            "The previous source equation was too low in the outer disk for the admitted source-load controls. If the best operator improves UGC03205/NGC3521/NGC7331 without protected regression, the next derivation should explain an outer baryonic-envelope persistence term. If it still underfits, the missing source operator is not a simple memory/disk-shelf amplitude.",
+            "",
+            "## Guardrails",
+            "",
+            "- The blocker guard is unchanged.",
+            "- UGC05253 remains held out from smooth source-load training.",
+            "- No locked v18/browser formula changed.",
+            "- No raw residual/RMSE, NFW/MOND parameter, galaxy-name formula input, or weak/systematics training is used.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-source-operator-shape-v1",
+        "verdict": verdict,
+        "bestOperator": best,
+        "nullSummary": null_summary,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "weakSystematicsTrainingUsed": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_operator_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19sourceoperatorshape(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SOURCE_OPERATOR_SHAPE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_source_operator_shape_artifacts(out_dir)
+    best = capsule["bestOperator"]
+    print("MTS v19 source-operator shape test")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['operatorId']}",
+                f"protected_reg={fmt(best['protectedMaxRegressionVsV18KmS'])}",
+                f"admit_retention={fmt(best['admitMeanV18RepairRetentionPct'])}%",
+                f"UGC03205={fmt(best['ugc03205RetentionPct'])}%",
+            ]
+        )
+    )
+    print(f"Wrote v19 source-operator shape test to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -113419,6 +113759,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19sourceadmissibilityblocker",
             "v19blockergatedsource",
             "observedstatev19blockergatedsource",
+            "v19sourceoperatorshape",
+            "observedstatev19sourceoperatorshape",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -113888,6 +114230,8 @@ def main() -> None:
         cmd_v19sourceadmissibilityblocker(args)
     elif args.mode in {"v19blockergatedsource", "observedstatev19blockergatedsource"}:
         cmd_v19blockergatedsource(args)
+    elif args.mode in {"v19sourceoperatorshape", "observedstatev19sourceoperatorshape"}:
+        cmd_v19sourceoperatorshape(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
