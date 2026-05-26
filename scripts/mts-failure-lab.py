@@ -298,6 +298,7 @@ DEFAULT_V19_FIELD_HIERARCHY_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-v19-field-hierar
 DEFAULT_V19_GAS_BOUNDARY_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-field-v1"
 DEFAULT_V19_GAS_BOUNDARY_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-discriminator-v1"
 DEFAULT_V19_GAS_BOUNDARY_GATED_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-gated-candidate-v1"
+DEFAULT_V19_GAS_BOUNDARY_GATE_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-gate-hardening-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -118045,6 +118046,263 @@ def write_v19_gas_boundary_gated_candidate_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_gas_boundary_memory_cap_spec(**overrides) -> dict:
+    spec = next(item.copy() for item in v19_gas_boundary_gated_candidate_specs() if item["candidateId"] == "xi-add-discriminator-memory-cap")
+    spec.update(overrides)
+    return spec
+
+
+def v19_gas_boundary_hardening_additive_target_names(case_rows: list[dict]) -> list[str]:
+    return sorted(
+        row["galaxy"]
+        for row in case_rows
+        if row["set"] == "clean-high-rmse"
+        and parse_bool(row.get("isGasBoundaryTarget"))
+        and parse_float(row.get("xiAddActivationRaw"), 0.0) >= 0.05
+    )
+
+
+def v19_gas_boundary_hardening_metric(metric: dict, case_rows: list[dict]) -> dict:
+    additive_targets = [row for row in case_rows if row["set"] == "clean-high-rmse" and parse_bool(row.get("isGasBoundaryTarget")) and parse_float(row.get("xiAddActivationRaw"), 0.0) >= 0.05]
+    additive_target_hits = [row for row in additive_targets if parse_float(row.get("xiAddActivationGated"), 0.0) >= 0.05]
+    protected_add_hits = [row for row in case_rows if row["set"] == "clean-protected" and parse_float(row.get("xiAddActivationGated"), 0.0) >= 0.05]
+    return {
+        **metric,
+        "additiveTargetCount": len(additive_targets),
+        "additiveTargetHitCount": len(additive_target_hits),
+        "additiveTargetRecall": len(additive_target_hits) / len(additive_targets) if additive_targets else 0.0,
+        "additiveTargetMeanGainKmS": safe_mean(parse_float(row.get("candidateGainOverHierarchyKmS"), math.nan) for row in additive_targets),
+        "additiveTargetHitMeanGainKmS": safe_mean(parse_float(row.get("candidateGainOverHierarchyKmS"), math.nan) for row in additive_target_hits),
+        "additiveTargetHitCases": ";".join(row["galaxy"] for row in additive_target_hits),
+        "protectedAddHitCases": ";".join(row["galaxy"] for row in protected_add_hits),
+    }
+
+
+def v19_gas_boundary_train_envelope_spec(train_rows: list[dict], heldout_name: str) -> dict:
+    base = v19_gas_boundary_memory_cap_spec()
+    # The tolerance is fixed before replay. It tests whether the same compact
+    # envelope can be recovered from three targets without depending on the
+    # held-out galaxy itself.
+    u_limit = min(parse_float(base["uMaxMax"]), max(parse_float(row["uMax"]) for row in train_rows) + 0.045)
+    pd_limit = min(parse_float(base["pointDensityMax"]), max(parse_float(row["pointDensity"]) for row in train_rows) + 0.25)
+    mem_limit = min(parse_float(base["memoryLoadMax"]), max(parse_float(row["memoryLoad"]) for row in train_rows) + 0.15)
+    return v19_gas_boundary_memory_cap_spec(
+        candidateId=f"xi-add-memory-cap-loo-train-{heldout_name}",
+        uMaxMax=u_limit,
+        pointDensityMax=pd_limit,
+        memoryLoadMax=mem_limit,
+    )
+
+
+def v19_gas_boundary_gate_leave_one_out_rows(base_case_rows: list[dict]) -> list[dict]:
+    target_names = v19_gas_boundary_hardening_additive_target_names(base_case_rows)
+    target_by_name = {row["galaxy"]: row for row in base_case_rows if row["galaxy"] in target_names}
+    rows: list[dict] = []
+    for heldout in target_names:
+        train_rows = [target_by_name[name] for name in target_names if name != heldout]
+        spec = v19_gas_boundary_train_envelope_spec(train_rows, heldout)
+        metric, case_rows = v19_gas_boundary_gated_score_spec(spec)
+        hard_metric = v19_gas_boundary_hardening_metric(metric, case_rows)
+        heldout_row = next(row for row in case_rows if row["galaxy"] == heldout)
+        rows.append(
+            {
+                "heldOutTarget": heldout,
+                "trainedUmaxMax": spec["uMaxMax"],
+                "trainedPointDensityMax": spec["pointDensityMax"],
+                "trainedMemoryLoadMax": spec["memoryLoadMax"],
+                "heldOutAddGate": heldout_row["addGate"],
+                "heldOutGainKmS": heldout_row["candidateGainOverHierarchyKmS"],
+                "heldOutHit": parse_float(heldout_row["xiAddActivationGated"], 0.0) >= 0.05,
+                "additiveTargetRecall": hard_metric["additiveTargetRecall"],
+                "additiveTargetMeanGainKmS": hard_metric["additiveTargetMeanGainKmS"],
+                "targetMeanGainOverHierarchyKmS": hard_metric["targetMeanGainOverHierarchyKmS"],
+                "protectedAddFalseReleaseCount": hard_metric["protectedAddFalseReleaseCount"],
+                "protectedAddHitMaxRegressionKmS": hard_metric["protectedAddHitMaxRegressionKmS"],
+                "protectedMaxRegressionOverHierarchyKmS": hard_metric["protectedMaxRegressionOverHierarchyKmS"],
+                "activeAddProtectedCases": hard_metric["activeAddProtectedCases"],
+            }
+        )
+    return rows
+
+
+def v19_gas_boundary_threshold_stability_rows() -> list[dict]:
+    base = v19_gas_boundary_memory_cap_spec()
+    rows: list[dict] = []
+    for du in [-0.02, -0.01, 0.0, 0.01, 0.02]:
+        for dp in [-0.20, -0.10, 0.0, 0.10, 0.20]:
+            for dm in [-0.20, -0.10, 0.0, 0.10, 0.20]:
+                spec = v19_gas_boundary_memory_cap_spec(
+                    candidateId=f"xi-add-memory-cap-stability-u{du:+.2f}-p{dp:+.2f}-m{dm:+.2f}",
+                    uMaxMax=parse_float(base["uMaxMax"]) + du,
+                    pointDensityMax=max(0.0, parse_float(base["pointDensityMax"]) + dp),
+                    memoryLoadMax=max(0.0, parse_float(base["memoryLoadMax"]) + dm),
+                )
+                metric, case_rows = v19_gas_boundary_gated_score_spec(spec)
+                hard_metric = v19_gas_boundary_hardening_metric(metric, case_rows)
+                pass_row = (
+                    parse_float(hard_metric["additiveTargetRecall"], 0.0) >= 0.75
+                    and parse_float(hard_metric["additiveTargetMeanGainKmS"], 0.0) >= 4.0
+                    and int(hard_metric["protectedAddFalseReleaseCount"]) == 0
+                    and parse_float(hard_metric["protectedAddHitMaxRegressionKmS"], 0.0) <= 1.0
+                )
+                rows.append(
+                    {
+                        "variantId": spec["candidateId"],
+                        "uMaxDelta": du,
+                        "pointDensityDelta": dp,
+                        "memoryLoadDelta": dm,
+                        "uMaxMax": spec["uMaxMax"],
+                        "pointDensityMax": spec["pointDensityMax"],
+                        "memoryLoadMax": spec["memoryLoadMax"],
+                        "additiveTargetRecall": hard_metric["additiveTargetRecall"],
+                        "additiveTargetMeanGainKmS": hard_metric["additiveTargetMeanGainKmS"],
+                        "targetMeanGainOverHierarchyKmS": hard_metric["targetMeanGainOverHierarchyKmS"],
+                        "highMeanGainOverHierarchyKmS": hard_metric["highMeanGainOverHierarchyKmS"],
+                        "protectedAddFalseReleaseCount": hard_metric["protectedAddFalseReleaseCount"],
+                        "protectedAddHitMaxRegressionKmS": hard_metric["protectedAddHitMaxRegressionKmS"],
+                        "protectedMaxRegressionOverHierarchyKmS": hard_metric["protectedMaxRegressionOverHierarchyKmS"],
+                        "additiveTargetHitCases": hard_metric["additiveTargetHitCases"],
+                        "protectedAddHitCases": hard_metric["protectedAddHitCases"],
+                        "passesHardeningGuard": pass_row,
+                    }
+                )
+    return rows
+
+
+def write_v19_gas_boundary_gate_hardening_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_gas_boundary_gate_hardening"
+    base_spec = v19_gas_boundary_memory_cap_spec()
+    base_metric, base_case_rows = v19_gas_boundary_gated_score_spec(base_spec)
+    base_hard_metric = v19_gas_boundary_hardening_metric(base_metric, base_case_rows)
+    loo_rows = v19_gas_boundary_gate_leave_one_out_rows(base_case_rows)
+    stability_rows = v19_gas_boundary_threshold_stability_rows()
+    null_rows = v19_gas_boundary_gated_null_controls(base_spec, base_hard_metric, [19201, 19207, 19211, 19213, 19219, 19231, 19237, 19249, 19259, 19267, 19273, 19289, 19301, 19309, 19319, 19333, 19373])
+    null_p95 = v19_quantile([parse_float(row["targetGainKmS"], math.nan) for row in null_rows], 0.95)
+    stability_pass_fraction = safe_mean(1.0 if parse_bool(row["passesHardeningGuard"]) else 0.0 for row in stability_rows)
+    loo_hit_fraction = safe_mean(1.0 if parse_bool(row["heldOutHit"]) else 0.0 for row in loo_rows)
+    min_loo_target_gain = min([parse_float(row["additiveTargetMeanGainKmS"], math.inf) for row in loo_rows] or [math.nan])
+    null_margin = parse_float(base_hard_metric["targetMeanGainOverHierarchyKmS"], 0.0) - null_p95
+    if (
+        parse_float(base_hard_metric["additiveTargetRecall"], 0.0) >= 1.0
+        and int(base_hard_metric["protectedAddFalseReleaseCount"]) == 0
+        and loo_hit_fraction >= 1.0
+        and stability_pass_fraction >= 0.50
+        and null_margin >= 1.0
+    ):
+        verdict = "memory-capped additive Xi gate survives hardening"
+    elif (
+        parse_float(base_hard_metric["additiveTargetRecall"], 0.0) >= 1.0
+        and int(base_hard_metric["protectedAddFalseReleaseCount"]) == 0
+        and loo_hit_fraction >= 1.0
+        and null_margin > 0.0
+    ):
+        verdict = "safe but threshold-fragile additive Xi anatomy"
+    else:
+        verdict = "memory-capped additive Xi gate not hardened"
+    formula = {
+        "candidateId": "mts-v19-gas-boundary-gate-hardening-v1",
+        "status": verdict,
+        "baseGate": {
+            "uMaxMax": base_spec["uMaxMax"],
+            "pointDensityMax": base_spec["pointDensityMax"],
+            "memoryLoadMax": base_spec["memoryLoadMax"],
+            "gateMode": base_spec["gateMode"],
+        },
+        "baseMetric": base_hard_metric,
+        "stabilityPassFraction": stability_pass_fraction,
+        "leaveOneOutHitFraction": loo_hit_fraction,
+        "nullTargetGainP95KmS": null_p95,
+        "nullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", [base_hard_metric])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", base_case_rows)
+    write_csv(out_dir / f"{prefix}_leave_one_out.csv", loo_rows)
+    write_csv(out_dir / f"{prefix}_threshold_stability.csv", stability_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 Gas-Boundary Gate Hardening",
+        "",
+        "This mode hardens the exact memory-capped additive `Xi` gate. It does not add a new branch, does not change locked v18, and does not touch the browser.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Base Gate",
+        "",
+        f"- `uMax <= {fmt(base_spec['uMaxMax'])}`.",
+        f"- `pointDensity <= {fmt(base_spec['pointDensityMax'])}`.",
+        f"- `memoryLoad <= {fmt(base_spec['memoryLoadMax'])}`.",
+        f"- Additive target recall: `{fmt(base_hard_metric['additiveTargetRecall'])}`.",
+        f"- Additive target mean gain: `{fmt(base_hard_metric['additiveTargetMeanGainKmS'])}` km/s.",
+        f"- All gas-boundary target mean gain: `{fmt(base_hard_metric['targetMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- High-RMSE mean gain: `{fmt(base_hard_metric['highMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Protected additive false releases: `{base_hard_metric['protectedAddFalseReleaseCount']}`.",
+        f"- Protected additive-hit max regression: `{fmt(base_hard_metric['protectedAddHitMaxRegressionKmS'])}` km/s.",
+        f"- Protected max regression overall: `{fmt(base_hard_metric['protectedMaxRegressionOverHierarchyKmS'])}` km/s.",
+        "",
+        "## Hardening Summary",
+        "",
+        f"- Leave-one-target-out held-out hit fraction: `{fmt(loo_hit_fraction)}`.",
+        f"- Minimum leave-one-out additive-target mean gain: `{fmt(min_loo_target_gain)}` km/s.",
+        f"- Threshold stability pass fraction: `{fmt(stability_pass_fraction)}`.",
+        f"- Same-active random null target-gain p95: `{fmt(null_p95)}` km/s.",
+        f"- Null margin: `{fmt(null_margin)}` km/s.",
+        "",
+        "## Leave-One-Target-Out",
+        "",
+        "| held out | held-out hit | held-out gain | trained uMax | trained pointDensity | trained memoryLoad | protected false releases |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in loo_rows:
+        report.append(
+            f"| {row['heldOutTarget']} | {row['heldOutHit']} | {fmt(row['heldOutGainKmS'])} | {fmt(row['trainedUmaxMax'])} | {fmt(row['trainedPointDensityMax'])} | {fmt(row['trainedMemoryLoadMax'])} | {row['protectedAddFalseReleaseCount']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "The gate is tested as a narrow source-admissibility condition, not as a release replacement. A release-hard result would need clear null margin as well as safety. If the gate is stable and safe but the null margin is narrow, it is useful physical anatomy: the additive gas-boundary field exists in the current state vector, but needs stronger evidence before it becomes canonical.",
+            "",
+            "## Guardrails",
+            "",
+            "- No locked v18/browser law changed.",
+            "- No galaxy name, raw residual, raw RMSE, NFW/MOND parameter, or weak/systematics fitting enters the formula.",
+            "- Target names are used only for leave-one-out evaluation rows.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-gas-boundary-gate-hardening-v1",
+        "verdict": verdict,
+        "baseMetric": base_hard_metric,
+        "stabilityPassFraction": stability_pass_fraction,
+        "leaveOneOutHitFraction": loo_hit_fraction,
+        "nullTargetGainP95KmS": null_p95,
+        "nullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_leave_one_out.csv",
+            f"{prefix}_threshold_stability.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -118406,6 +118664,26 @@ def cmd_v19gasboundarygatedcandidate(args: argparse.Namespace) -> None:
     print(f"Wrote gas-boundary gated candidate to {out_dir.resolve()}")
 
 
+def cmd_v19gasboundarygateharden(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_GAS_BOUNDARY_GATE_HARDENING_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_gas_boundary_gate_hardening_artifacts(out_dir)
+    metric = capsule["baseMetric"]
+    print("MTS v19 gas-boundary gate hardening")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"additive_recall={fmt(metric['additiveTargetRecall'])}",
+                f"additive_gain={fmt(metric['additiveTargetMeanGainKmS'])}",
+                f"protected_false={metric['protectedAddFalseReleaseCount']}",
+                f"stability={fmt(capsule['stabilityPassFraction'])}",
+                f"null_margin={fmt(capsule['nullMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote gas-boundary gate hardening to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -118725,6 +119003,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19gasboundarydiscriminator",
             "v19gasboundarygatedcandidate",
             "observedstatev19gasboundarygatedcandidate",
+            "v19gasboundarygateharden",
+            "observedstatev19gasboundarygateharden",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -119220,6 +119500,8 @@ def main() -> None:
         cmd_v19gasboundarydiscriminator(args)
     elif args.mode in {"v19gasboundarygatedcandidate", "observedstatev19gasboundarygatedcandidate"}:
         cmd_v19gasboundarygatedcandidate(args)
+    elif args.mode in {"v19gasboundarygateharden", "observedstatev19gasboundarygateharden"}:
+        cmd_v19gasboundarygateharden(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
