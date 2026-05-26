@@ -290,6 +290,7 @@ DEFAULT_V19_UGC03205_SOURCE_ANATOMY_OUT = OUTPUT_PACK_ROOT / "mts-v19-ugc03205-s
 DEFAULT_V19_INNER_BULGE_SOURCE_KERNEL_OUT = OUTPUT_PACK_ROOT / "mts-v19-inner-bulge-source-kernel-v1"
 DEFAULT_V19_ADMIT_SOURCE_SHAPE_KERNEL_OUT = OUTPUT_PACK_ROOT / "mts-v19-admit-source-shape-kernel-v1"
 DEFAULT_V19_SOURCE_STATE_GATE_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-state-gate-hardening-v1"
+DEFAULT_V19_SOURCE_FIELD_ADMISSIBILITY_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-field-admissibility-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -114940,6 +114941,311 @@ def v19_source_state_gate_null_controls(
     return rows, summary
 
 
+def v19_smoothstep01(value: float, lo: float, hi: float) -> float:
+    if hi <= lo:
+        return 1.0 if value >= hi else 0.0
+    t = clamp((value - lo) / (hi - lo), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def v19_smooth_band(value: float, lo: float, hi: float, edge: float) -> float:
+    if edge <= 0.0:
+        return 1.0 if lo <= value <= hi else 0.0
+    return v19_smoothstep01(value, lo, lo + edge) * (1.0 - v19_smoothstep01(value, hi - edge, hi))
+
+
+def v19_source_field_admissibility_components(gates: dict) -> dict:
+    route = gates.get("lockedRoute", "")
+    fgas = parse_float(gates.get("fGasOut"), 0.0)
+    point_density = parse_float(gates.get("pointDensity"), 0.0)
+    memory_load = parse_float(gates.get("memoryLoad"), 0.0)
+    high_bulge = parse_float(gates.get("highBulgeShoulderGate"), 0.0)
+    disk_envelope = parse_float(gates.get("diskEnvelopeGate"), 0.0)
+    lowload_transfer = parse_float(gates.get("lowLoadTransferGate"), 0.0)
+    buffered = 1.0 if route == "buffered single-crossing" else 0.0
+    lowload = 1.0 if route == "low-load" else 0.0
+    gas_rich_dense = (
+        buffered
+        * v19_smoothstep01(fgas, 0.54, 0.60)
+        * v19_smoothstep01(point_density, 1.75, 2.50)
+        * v19_smooth_band(memory_load, 4.50, 7.00, 0.55)
+    )
+    bulge_shoulder = v19_smoothstep01(high_bulge, 0.60, 0.85)
+    low_gas_disk = v19_smoothstep01(disk_envelope, 0.45, 0.65)
+    lowload_transfer_window = lowload * v19_smooth_band(lowload_transfer, 0.30, 0.55, 0.09)
+    saturating_sum = 1.0 - (
+        (1.0 - gas_rich_dense)
+        * (1.0 - bulge_shoulder)
+        * (1.0 - low_gas_disk)
+        * (1.0 - lowload_transfer_window)
+    )
+    return {
+        "gasRichDenseBufferedField": clamp(gas_rich_dense, 0.0, 1.0),
+        "highBulgeShoulderField": clamp(bulge_shoulder, 0.0, 1.0),
+        "lowGasDiskEnvelopeField": clamp(low_gas_disk, 0.0, 1.0),
+        "lowLoadTransferWindowField": clamp(lowload_transfer_window, 0.0, 1.0),
+        "sourceFieldAdmissibility": clamp(saturating_sum, 0.0, 1.0),
+    }
+
+
+def v19_source_field_factor(gates: dict, field_variant: str = "smooth-source-field") -> tuple[float, str, dict]:
+    components = v19_source_field_admissibility_components(gates)
+    active = [
+        name
+        for name, key in [
+            ("gas-rich-dense-buffered-field", "gasRichDenseBufferedField"),
+            ("high-bulge-shoulder-field", "highBulgeShoulderField"),
+            ("low-gas-disk-envelope-field", "lowGasDiskEnvelopeField"),
+            ("low-load-transfer-window-field", "lowLoadTransferWindowField"),
+        ]
+        if parse_float(components.get(key), 0.0) >= 0.05
+    ]
+    factor = parse_float(components["sourceFieldAdmissibility"], 0.0)
+    if field_variant == "smooth-source-field-conservative":
+        factor *= 0.92
+    elif field_variant == "smooth-source-field-no-lowload-transfer":
+        factor = 1.0 - (
+            (1.0 - parse_float(components["gasRichDenseBufferedField"], 0.0))
+            * (1.0 - parse_float(components["highBulgeShoulderField"], 0.0))
+            * (1.0 - parse_float(components["lowGasDiskEnvelopeField"], 0.0))
+        )
+        active = [item for item in active if item != "low-load-transfer-window-field"]
+    elif field_variant == "smooth-source-field-no-bulge-shoulder":
+        factor = 1.0 - (
+            (1.0 - parse_float(components["gasRichDenseBufferedField"], 0.0))
+            * (1.0 - parse_float(components["lowGasDiskEnvelopeField"], 0.0))
+            * (1.0 - parse_float(components["lowLoadTransferWindowField"], 0.0))
+        )
+        active = [item for item in active if item != "high-bulge-shoulder-field"]
+    elif field_variant == "smooth-source-field-no-disk-envelope":
+        factor = 1.0 - (
+            (1.0 - parse_float(components["gasRichDenseBufferedField"], 0.0))
+            * (1.0 - parse_float(components["highBulgeShoulderField"], 0.0))
+            * (1.0 - parse_float(components["lowLoadTransferWindowField"], 0.0))
+        )
+        active = [item for item in active if item != "low-gas-disk-envelope-field"]
+    elif field_variant == "smooth-source-field-no-gas-rich-buffered":
+        factor = 1.0 - (
+            (1.0 - parse_float(components["highBulgeShoulderField"], 0.0))
+            * (1.0 - parse_float(components["lowGasDiskEnvelopeField"], 0.0))
+            * (1.0 - parse_float(components["lowLoadTransferWindowField"], 0.0))
+        )
+        active = [item for item in active if item != "gas-rich-dense-buffered-field"]
+    factor = clamp(factor, 0.0, 1.0)
+    if factor < 1.0e-9:
+        active = []
+    return factor, ";".join(active), components
+
+
+def write_v19_source_field_admissibility_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_source_field_admissibility"
+    curves, source_supports, canonical_supports, v18_supports, _context = v19_source_boundary_case_base()
+    component_rows = external_native_sparc_component_rows(v19_ugc03205_sparc_mass_model_path())
+    component_gates = {
+        name: v19_inner_bulge_component_gate(name, curves[name], component_rows)
+        for name in sorted(V19_SOURCE_BOUNDARY_TARGET_ROLES)
+        if name in curves
+    }
+    gate_rows = [
+        v19_admit_source_shape_gates(name, curves[name], component_gates[name])
+        for name in sorted(component_gates)
+    ]
+    gates_by_name = {row["galaxy"]: row for row in gate_rows}
+    kernel_spec = next(item for item in v19_admit_source_shape_kernel_specs() if item["kernelId"] == "bulge-disk-plus-lowgas-disk-transfer")
+    metric_rows: list[dict] = []
+    case_rows: list[dict] = []
+    field_rows: list[dict] = []
+    variant_ids = [
+        "hard-state-gate-control",
+        "smooth-source-field",
+        "smooth-source-field-conservative",
+        "smooth-source-field-no-gas-rich-buffered",
+        "smooth-source-field-no-bulge-shoulder",
+        "smooth-source-field-no-disk-envelope",
+        "smooth-source-field-no-lowload-transfer",
+    ]
+    best_metric: dict | None = None
+    best_factor_by_name: dict[str, float] = {}
+    best_reason_by_name: dict[str, str] = {}
+    for variant_id in variant_ids:
+        factor_by_name: dict[str, float] = {}
+        reason_by_name: dict[str, str] = {}
+        component_by_name: dict[str, dict] = {}
+        for name, gates in gates_by_name.items():
+            if variant_id == "hard-state-gate-control":
+                factor, reason = v19_source_state_gate_factor(gates)
+                components = v19_source_field_admissibility_components(gates)
+            else:
+                factor, reason, components = v19_source_field_factor(gates, variant_id)
+            factor_by_name[name] = factor
+            reason_by_name[name] = reason
+            component_by_name[name] = components
+        metric, cases = v19_source_state_gate_score(
+            kernel_spec,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            gates_by_name,
+            factor_by_name,
+            reason_by_name,
+            variant_id,
+            "field" if variant_id != "hard-state-gate-control" else "control",
+        )
+        metric_rows.append(metric)
+        case_rows.extend(cases)
+        for name, gates in gates_by_name.items():
+            field_rows.append(
+                {
+                    "variantId": variant_id,
+                    "galaxy": name,
+                    "lockedRoute": gates.get("lockedRoute", ""),
+                    "sourceBoundaryFactor": factor_by_name.get(name, 0.0),
+                    "sourceFieldReason": reason_by_name.get(name, ""),
+                    **component_by_name[name],
+                    "fGasOut": gates.get("fGasOut", math.nan),
+                    "pointDensity": gates.get("pointDensity", math.nan),
+                    "memoryLoad": gates.get("memoryLoad", math.nan),
+                    "highBulgeShoulderGate": gates.get("highBulgeShoulderGate", math.nan),
+                    "diskEnvelopeGate": gates.get("diskEnvelopeGate", math.nan),
+                    "lowLoadTransferGate": gates.get("lowLoadTransferGate", math.nan),
+                }
+            )
+        if variant_id == "smooth-source-field":
+            best_metric = metric
+            best_factor_by_name = factor_by_name
+            best_reason_by_name = reason_by_name
+    assert best_metric is not None
+    null_rows, null_summary = v19_source_state_gate_null_controls(
+        kernel_spec,
+        curves,
+        source_supports,
+        canonical_supports,
+        v18_supports,
+        gates_by_name,
+        best_factor_by_name,
+        best_reason_by_name,
+        best_metric,
+    )
+    seed_rows = v19_source_state_gate_seed_replay(case_rows)
+    null_best = max(
+        parse_float(null_summary.get("shuffled-state-gatesBeatOrTieCandidateFraction"), 1.0),
+        parse_float(null_summary.get("same-active-count-randomBeatOrTieCandidateFraction"), 1.0),
+    )
+    protected_reg = parse_float(best_metric["protectedMaxRegressionVsV18KmS"], math.inf)
+    mean_retention = parse_float(best_metric["admitMeanV18RepairRetentionPct"], 0.0)
+    min_retention = parse_float(best_metric["admitMinV18RepairRetentionPct"], 0.0)
+    if protected_reg <= 0.25 and mean_retention >= 90.0 and min_retention >= 75.0 and null_best <= 0.10:
+        verdict = "smooth source-admissibility field survives first hardening"
+    elif protected_reg <= 0.25 and mean_retention >= 80.0:
+        verdict = "source field plausible but under-recovers v18 structure"
+    else:
+        verdict = "field admissibility incomplete"
+    formula = {
+        "candidateId": "v19-source-field-admissibility-v1",
+        "status": verdict,
+        "kernel": kernel_spec,
+        "sourceAdmissibilityField": {
+            "gasRichDenseBufferedField": "B_buffered * smooth(f_gas_out;0.54,0.60) * smooth(pointDensity;1.75,2.50) * band(memoryLoad;4.50,7.00,edge=0.55)",
+            "highBulgeShoulderField": "smooth(highBulgeShoulderGate;0.60,0.85)",
+            "lowGasDiskEnvelopeField": "smooth(diskEnvelopeGate;0.45,0.65)",
+            "lowLoadTransferWindowField": "B_lowload * band(lowLoadTransferGate;0.30,0.55,edge=0.09)",
+            "sourceFieldAdmissibility": "1 - product_i(1 - field_i)",
+            "candidateSupport": "S_candidate(r)=S_canonical(r)+A_source*(S_shape_kernel(r)-S_canonical(r))",
+        },
+        "candidateMetric": best_metric,
+        "nullSummary": null_summary,
+        "browserChanged": False,
+        "lockedV18Changed": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw RMSE", "residual lookup", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", metric_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_field_ledger.csv", field_rows)
+    write_csv(out_dir / f"{prefix}_seed_replay.csv", seed_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 Source-Field Admissibility",
+        "",
+        "This mode asks whether the successful v19 state-gate result can be replaced by a smooth source-admissibility field. It does not change locked v18 or the browser.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Candidate Field",
+        "",
+        "- `A_gas = B_buffered * smooth(f_gas_out) * smooth(pointDensity) * band(memoryLoad)`. This admits dense gas-rich buffered source loading such as NGC2403 while suppressing sparse lookalikes such as NGC3198.",
+        "- `A_bulge = smooth(highBulgeShoulderGate)`. This admits the UGC03205 inner shoulder without admitting the weaker UGC05253 shoulder.",
+        "- `A_disk = smooth(diskEnvelopeGate)`. This admits the NGC3521 low-gas disk-envelope completion.",
+        "- `A_lowload = B_lowload * band(lowLoadTransferGate)`. This admits the NGC7331 transfer window while rejecting stronger low-load lookalikes such as NGC4100.",
+        "- `A_source = 1 - product(1 - A_i)`.",
+        "",
+        "## Metrics",
+        "",
+        f"- Active cases: `{best_metric['activeCases']}`.",
+        f"- Protected max regression vs v18: `{fmt(best_metric['protectedMaxRegressionVsV18KmS'])}` km/s.",
+        f"- Admit-control mean v18 repair retention: `{fmt(best_metric['admitMeanV18RepairRetentionPct'])}%`.",
+        f"- Admit-control worst retention: `{fmt(best_metric['admitMinV18RepairRetentionPct'])}%`.",
+        f"- NGC2403 retention: `{fmt(best_metric['ngc2403RetentionPct'])}%`.",
+        f"- NGC3521 retention: `{fmt(best_metric['ngc3521RetentionPct'])}%`.",
+        f"- NGC7331 retention: `{fmt(best_metric['ngc7331RetentionPct'])}%`.",
+        f"- UGC03205 retention: `{fmt(best_metric['ugc03205RetentionPct'])}%`.",
+        f"- UGC05253 source factor: `{fmt(best_metric['ugc05253Factor'])}`.",
+        f"- NGC4100 source factor: `{fmt(best_metric['ngc4100Factor'])}`.",
+        f"- NGC4157 source factor: `{fmt(best_metric['ngc4157Factor'])}`.",
+        f"- Shuffled-field null beat/tie fraction: `{fmt(null_summary['shuffled-state-gatesBeatOrTieCandidateFraction'])}`.",
+        f"- Same-active-count random null beat/tie fraction: `{fmt(null_summary['same-active-count-randomBeatOrTieCandidateFraction'])}`.",
+        "",
+        "## Variant / Ablation Table",
+        "",
+        "| Variant | active cases | mean retention | worst retention | protected reg | utility |",
+        "| --- | --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in metric_rows:
+        report.append(
+            f"| {row['variantId']} | {row['activeCases']} | {fmt(row['admitMeanV18RepairRetentionPct'])}% | {fmt(row['admitMinV18RepairRetentionPct'])}% | {fmt(row['protectedMaxRegressionVsV18KmS'])} | {fmt(row['sourceStateGateUtility'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Physical Reading",
+            "",
+            "This is a more physics-facing object than the hard gate because the source response is now a continuous admissibility field over profile/state variables. The field still has separate source modes, but the final factor is not a named case lookup and not a residual/RMSE oracle.",
+            "",
+            "## Guardrails",
+            "",
+            "- No locked v18/browser formula changed.",
+            "- No raw residual/RMSE, NFW/MOND parameter, or weak/systematics fitting is used.",
+            "- Galaxy names are used only in output/evaluation rows.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-source-field-admissibility-v1",
+        "verdict": verdict,
+        "candidateMetric": best_metric,
+        "nullSummary": null_summary,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "weakSystematicsTrainingUsed": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_field_ledger.csv",
+            f"{prefix}_seed_replay.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -115144,6 +115450,25 @@ def cmd_v19sourcestategateharden(args: argparse.Namespace) -> None:
         )
     )
     print(f"Wrote source state-gate hardening to {out_dir.resolve()}")
+
+
+def cmd_v19sourcefieldadmissibility(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SOURCE_FIELD_ADMISSIBILITY_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_source_field_admissibility_artifacts(out_dir)
+    metric = capsule["candidateMetric"]
+    print("MTS v19 source-field admissibility")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"active={metric['activeCases']}",
+                f"protected_reg={fmt(metric['protectedMaxRegressionVsV18KmS'])}",
+                f"mean_retention={fmt(metric['admitMeanV18RepairRetentionPct'])}%",
+                f"worst_retention={fmt(metric['admitMinV18RepairRetentionPct'])}%",
+            ]
+        )
+    )
+    print(f"Wrote source-field admissibility to {out_dir.resolve()}")
 
 
 def cmd_list_candidates() -> None:
@@ -115449,6 +115774,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19admitsourceshapekernel",
             "v19sourcestategateharden",
             "observedstatev19sourcestategateharden",
+            "v19sourcefieldadmissibility",
+            "observedstatev19sourcefieldadmissibility",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -115928,6 +116255,8 @@ def main() -> None:
         cmd_v19admitsourceshapekernel(args)
     elif args.mode in {"v19sourcestategateharden", "observedstatev19sourcestategateharden"}:
         cmd_v19sourcestategateharden(args)
+    elif args.mode in {"v19sourcefieldadmissibility", "observedstatev19sourcefieldadmissibility"}:
+        cmd_v19sourcefieldadmissibility(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
