@@ -303,6 +303,7 @@ DEFAULT_V19_GAS_BOUNDARY_SMOOTH_SOURCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-bou
 DEFAULT_V19_PGC51017_BLOCKER_OUT = OUTPUT_PACK_ROOT / "mts-v19-pgc51017-blocker-v1"
 DEFAULT_V19_SOURCE_ADMISSIBILITY_GATE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-admissibility-gate-v1"
 DEFAULT_V19_MOTION_FIELD_KERNEL_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-kernel-v1"
+DEFAULT_V19_MOTION_FIELD_KERNEL_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-kernel-hardening-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -119719,6 +119720,216 @@ def write_v19_motion_field_kernel_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_motion_field_base_kernel_spec(**overrides) -> dict:
+    spec = next(item.copy() for item in v19_motion_field_kernel_specs() if item["kernelId"] == "boundary-flux-admissible-n8")
+    spec.update(overrides)
+    return spec
+
+
+def v19_motion_field_kernel_additive_target_names(case_rows: list[dict]) -> list[str]:
+    return sorted(
+        row["galaxy"]
+        for row in case_rows
+        if row["set"] == "clean-high-rmse"
+        and parse_bool(row.get("isGasBoundaryTarget"))
+        and parse_float(row.get("xiAddActivationRaw"), 0.0) >= 0.05
+    )
+
+
+def v19_motion_field_kernel_leave_one_out_rows(base_spec: dict) -> list[dict]:
+    base_metric, base_cases, _shape_rows = v19_motion_field_kernel_score_spec(base_spec)
+    additive_targets = v19_motion_field_kernel_additive_target_names(base_cases)
+    beta_grid = [0.75, 1.0, 1.25, 1.5]
+    rows: list[dict] = []
+    for held_out in additive_targets:
+        train_targets = [name for name in additive_targets if name != held_out]
+        scored: list[tuple[float, dict, list[dict]]] = []
+        for beta in beta_grid:
+            spec = {**base_spec, "kernelId": f"boundary-flux-admissible-n8-loo-{held_out}-beta-{beta:.2f}", "betaAdd": beta}
+            metric, cases, _shape = v19_motion_field_kernel_score_spec(spec)
+            train_rows = [row for row in cases if row["galaxy"] in train_targets]
+            train_gain = safe_mean(parse_float(row.get("candidateGainOverHierarchyKmS"), math.nan) for row in train_rows)
+            utility = (
+                train_gain
+                - 8.0 * int(metric["protectedFalseReleaseCount"])
+                - 3.0 * max(0.0, parse_float(metric["protectedActiveMaxRegressionKmS"], 0.0))
+                - 2.0 * max(0.0, parse_float(metric["highMaxRegressionOverHierarchyKmS"], 0.0))
+            )
+            scored.append((utility, metric, cases))
+        utility, selected_metric, selected_cases = max(scored, key=lambda item: item[0])
+        held_row = next(row for row in selected_cases if row["galaxy"] == held_out)
+        rows.append(
+            {
+                "heldOutTarget": held_out,
+                "trainTargets": ";".join(train_targets),
+                "selectedBetaAdd": selected_metric["betaAdd"],
+                "selectedBetaSink": selected_metric["betaSink"],
+                "trainUtility": utility,
+                "heldOutHit": parse_float(held_row.get("addActivation"), 0.0) >= 0.05,
+                "heldOutGainKmS": held_row["candidateGainOverHierarchyKmS"],
+                "heldOutMinusHierarchyKmS": held_row["candidateMinusHierarchyKmS"],
+                "heldOutSupportDeltaRmseVsV18": held_row["supportDeltaRmseVsV18"],
+                "allTargetGainKmS": selected_metric["targetMeanGainOverHierarchyKmS"],
+                "additiveTargetRecall": selected_metric["additiveTargetRecall"],
+                "protectedFalseReleaseCount": selected_metric["protectedFalseReleaseCount"],
+                "protectedActiveMaxRegressionKmS": selected_metric["protectedActiveMaxRegressionKmS"],
+                "highMaxRegressionOverHierarchyKmS": selected_metric["highMaxRegressionOverHierarchyKmS"],
+            }
+        )
+    return rows
+
+
+def v19_motion_field_kernel_coefficient_shape_rows(base_spec: dict) -> list[dict]:
+    rows: list[dict] = []
+    for beta_add in [0.75, 1.0, 1.25, 1.5]:
+        for beta_sink in [1.5, 2.0, 2.5]:
+            for shape in ["midouter", "outer"]:
+                spec = {
+                    **base_spec,
+                    "kernelId": f"boundary-flux-admissible-n8-beta{beta_add:.2f}-sink{beta_sink:.2f}-{shape}",
+                    "betaAdd": beta_add,
+                    "betaSink": beta_sink,
+                    "shape": shape,
+                }
+                metric, _cases, _shape_rows = v19_motion_field_kernel_score_spec(spec)
+                rows.append(
+                    {
+                        **metric,
+                        "stabilityPass": parse_float(metric["additiveTargetRecall"], 0.0) >= 1.0
+                        and int(metric["protectedFalseReleaseCount"]) == 0
+                        and parse_float(metric["protectedActiveMaxRegressionKmS"], math.inf) <= 0.25
+                        and parse_float(metric["targetMeanGainOverHierarchyKmS"], -math.inf) > 0.0,
+                    }
+                )
+    return rows
+
+
+def write_v19_motion_field_kernel_hardening_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_motion_field_kernel_hardening"
+    base_spec = v19_motion_field_base_kernel_spec()
+    base_metric, base_cases, base_shape_rows = v19_motion_field_kernel_score_spec(base_spec)
+    loo_rows = v19_motion_field_kernel_leave_one_out_rows(base_spec)
+    stability_rows = v19_motion_field_kernel_coefficient_shape_rows(base_spec)
+    null_rows = v19_motion_field_kernel_null_controls(base_spec, base_metric)
+    safe_null_rows = [row for row in null_rows if not parse_bool(row.get("protectedUnsafe"))]
+    null_p95 = v19_quantile([parse_float(row.get("targetGainKmS"), math.nan) for row in safe_null_rows], 0.95)
+    null_margin = parse_float(base_metric.get("targetMeanGainOverHierarchyKmS"), 0.0) - null_p95
+    loo_hit_fraction = safe_mean(1.0 if parse_bool(row.get("heldOutHit")) else 0.0 for row in loo_rows)
+    loo_positive_fraction = safe_mean(1.0 if parse_float(row.get("heldOutGainKmS"), 0.0) > 0.25 else 0.0 for row in loo_rows)
+    loo_min_gain = min([parse_float(row.get("heldOutGainKmS"), math.inf) for row in loo_rows] or [math.nan])
+    stability_pass_fraction = safe_mean(1.0 if parse_bool(row.get("stabilityPass")) else 0.0 for row in stability_rows)
+    stable_positive_rows = [
+        row
+        for row in stability_rows
+        if parse_bool(row.get("stabilityPass"))
+        and parse_float(row.get("targetMeanGainOverHierarchyKmS"), -math.inf) >= parse_float(base_metric.get("targetMeanGainOverHierarchyKmS"), 0.0) - 0.75
+    ]
+    if (
+        loo_hit_fraction >= 1.0
+        and loo_positive_fraction >= 1.0
+        and stability_pass_fraction >= 0.50
+        and null_margin >= 1.0
+        and int(base_metric["protectedFalseReleaseCount"]) == 0
+    ):
+        verdict = "motion-field kernel survives hardening"
+    elif (
+        loo_hit_fraction >= 1.0
+        and loo_positive_fraction >= 1.0
+        and int(base_metric["protectedFalseReleaseCount"]) == 0
+        and null_margin >= 0.50
+    ):
+        verdict = "motion-field kernel stable but null-fragile"
+    elif int(base_metric["protectedFalseReleaseCount"]) == 0:
+        verdict = "motion-field kernel safe but not hardened"
+    else:
+        verdict = "motion-field kernel not safe"
+    formula = {
+        "candidateId": "mts-v19-motion-field-kernel-hardening-v1",
+        "status": verdict,
+        "baseKernel": base_metric,
+        "fieldEquationSketch": "Delta S_Xi(r) = [beta_add*A_source - beta_sink*A_sink] * S_canonical(r) * G_midouter(r)",
+        "baseSource": "A_source = B_gas * u_cap * band(memoryLoad) * band(pointDensity) * band(outerDiskShare) * A_obs(N_RC>=8)",
+        "admissibilitySeparation": "A_obs is external source-quality/admissibility discipline, not a physical transport variable.",
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    report = [
+        "# MTS v19 Motion-Field Kernel Hardening",
+        "",
+        "This mode hardens the exact `boundary-flux-admissible-n8` source kernel. It does not add a new branch and does not change locked v18 or the browser.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Base Kernel",
+        "",
+        f"- Target gain: `{fmt(base_metric['targetMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Additive target recall: `{fmt(base_metric['additiveTargetRecall'])}`.",
+        f"- Additive target gain: `{fmt(base_metric['additiveTargetMeanGainKmS'])}` km/s.",
+        f"- Protected false releases: `{base_metric['protectedFalseReleaseCount']}`.",
+        f"- Protected active regression: `{fmt(base_metric['protectedActiveMaxRegressionKmS'])}` km/s.",
+        f"- Safe-null p95 target gain: `{fmt(null_p95)}` km/s.",
+        f"- Safe-null margin: `{fmt(null_margin)}` km/s.",
+        "",
+        "## Hardening",
+        "",
+        f"- Leave-one-target-out hit fraction: `{fmt(loo_hit_fraction)}`.",
+        f"- Leave-one-target-out positive-gain fraction: `{fmt(loo_positive_fraction)}`.",
+        f"- Leave-one-target-out minimum gain: `{fmt(loo_min_gain)}` km/s.",
+        f"- Coefficient/shape stability pass fraction: `{fmt(stability_pass_fraction)}`.",
+        f"- Stable near-base variants: `{len(stable_positive_rows)}` / `{len(stability_rows)}`.",
+        "",
+        "## Interpretation",
+        "",
+        "The kernel is a plausible disk-limit source form if it keeps the four additive gas-boundary targets, stays protected-safe, and remains positive under coefficient/shape replay. A narrow null margin means it is not yet a standalone field equation.",
+        "",
+        "## Guardrails",
+        "",
+        "- `N_RC` remains outside the physical kernel as source admissibility.",
+        "- No names, residuals, raw RMSE, NFW, MOND, or weak/systematics inputs enter the kernel.",
+        "- Locked v18/browser behavior is unchanged.",
+        "",
+        verdict,
+    ]
+    write_csv(out_dir / f"{prefix}_scores.csv", [base_metric])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", base_cases)
+    write_csv(out_dir / f"{prefix}_support_shape.csv", base_shape_rows)
+    write_csv(out_dir / f"{prefix}_leave_one_out.csv", loo_rows)
+    write_csv(out_dir / f"{prefix}_coefficient_shape_stability.csv", stability_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-motion-field-kernel-hardening-v1",
+        "verdict": verdict,
+        "baseKernel": base_metric,
+        "leaveOneOutHitFraction": loo_hit_fraction,
+        "leaveOneOutPositiveGainFraction": loo_positive_fraction,
+        "leaveOneOutMinGainKmS": loo_min_gain,
+        "stabilityPassFraction": stability_pass_fraction,
+        "stableNearBaseVariantCount": len(stable_positive_rows),
+        "stableVariantCount": len(stability_rows),
+        "safeNullTargetGainP95": null_p95,
+        "safeNullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_support_shape.csv",
+            f"{prefix}_leave_one_out.csv",
+            f"{prefix}_coefficient_shape_stability.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -120184,6 +120395,27 @@ def cmd_v19motionfieldkernel(args: argparse.Namespace) -> None:
     print(f"Wrote motion-field source kernel audit to {out_dir.resolve()}")
 
 
+def cmd_v19motionfieldkernelharden(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_MOTION_FIELD_KERNEL_HARDENING_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_motion_field_kernel_hardening_artifacts(out_dir)
+    base = capsule["baseKernel"]
+    print("MTS v19 motion-field kernel hardening")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"target_gain={fmt(base['targetMeanGainOverHierarchyKmS'])}",
+                f"add_recall={fmt(base['additiveTargetRecall'])}",
+                f"protected_false={base['protectedFalseReleaseCount']}",
+                f"loo_hit={fmt(capsule['leaveOneOutHitFraction'])}",
+                f"stability={fmt(capsule['stabilityPassFraction'])}",
+                f"null_margin={fmt(capsule['safeNullMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote motion-field kernel hardening to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -120513,6 +120745,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19sourceadmissibilitygate",
             "v19motionfieldkernel",
             "observedstatev19motionfieldkernel",
+            "v19motionfieldkernelharden",
+            "observedstatev19motionfieldkernelharden",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -121018,6 +121252,8 @@ def main() -> None:
         cmd_v19sourceadmissibilitygate(args)
     elif args.mode in {"v19motionfieldkernel", "observedstatev19motionfieldkernel"}:
         cmd_v19motionfieldkernel(args)
+    elif args.mode in {"v19motionfieldkernelharden", "observedstatev19motionfieldkernelharden"}:
+        cmd_v19motionfieldkernelharden(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
