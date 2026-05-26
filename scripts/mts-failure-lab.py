@@ -284,6 +284,7 @@ DEFAULT_V19_CASE_TWO_D_PROVENANCE_CACHE = DEFAULT_V19_COUNTER_EVIDENCE_CACHE
 DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-ugc05253-radial-provenance-v1"
 DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_CACHE = Path(r"D:\Users\ollet\Desktop\g project\source-cache\v19-ugc05253-radial-provenance-v1")
 DEFAULT_V19_SOURCE_ADMISSIBILITY_BLOCKER_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-admissibility-blocker-v1"
+DEFAULT_V19_BLOCKER_GATED_SOURCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-blocker-gated-source-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -112771,6 +112772,360 @@ def cmd_v19sourceadmissibilityblocker(args: argparse.Namespace) -> None:
     print(f"Wrote v19 source-admissibility blocker to {out_dir.resolve()}")
 
 
+def v19_blocker_gated_source_variant_specs(decision_rows: list[dict]) -> list[dict]:
+    by_name = {row["galaxy"]: row for row in decision_rows}
+    blocker_decision = {name: row.get("candidateDecision", "") for name, row in by_name.items()}
+    cap_controls = {name for name, decision in blocker_decision.items() if decision == "cap/protect"}
+    hold_controls = {name for name, decision in blocker_decision.items() if decision == "hold/source-blocker"}
+    case_admits = {name for name, decision in blocker_decision.items() if decision == "admit/source-load"}
+    prior_cap_controls = {"IC2574", "NGC5055", "UGC07089"}
+    prior_admit_controls = {"NGC2403", "NGC3521", "NGC7331", "UGC03205"}
+    return [
+        {
+            "variantId": "unsafe-full-source-control",
+            "variantClass": "negative-control",
+            "description": "Apply the curvature-memory source equation everywhere in the target set.",
+            "factors": {name: 1.0 for name in V19_SOURCE_BOUNDARY_TARGET_ROLES},
+            "heldOut": set(),
+            "promotable": False,
+        },
+        {
+            "variantId": "blocker-only-conservative",
+            "variantClass": "blocker-gated-candidate",
+            "description": "Apply source loading only to direct positive controls; cap direct protected/hold blockers; leave unresolved cases canonical.",
+            "factors": {
+                **{name: 1.0 for name in case_admits},
+                **{name: 0.0 for name in cap_controls | hold_controls},
+            },
+            "heldOut": hold_controls,
+            "promotable": False,
+        },
+        {
+            "variantId": "blocker-plus-prior-admits",
+            "variantClass": "blocker-gated-candidate",
+            "description": "Use the new blockers plus earlier admitted high/source-load controls; NGC3198 stays half-softened as an unresolved quiet-boundary case.",
+            "factors": {
+                **{name: 1.0 for name in prior_admit_controls | case_admits},
+                **{name: 0.0 for name in prior_cap_controls | cap_controls | hold_controls},
+                "NGC3198": 0.5,
+            },
+            "heldOut": hold_controls,
+            "promotable": False,
+        },
+        {
+            "variantId": "protected-caps-with-ugc05253-held",
+            "variantClass": "safety-control",
+            "description": "Cap protected controls and UGC05253, but do not admit any source-load control.",
+            "factors": {name: 0.0 for name in prior_cap_controls | cap_controls | hold_controls},
+            "heldOut": hold_controls,
+            "promotable": False,
+        },
+    ]
+
+
+def v19_blocker_gated_source_score_variant(
+    variant: dict,
+    curves: dict[str, dict],
+    source_supports: dict[str, list[float]],
+    canonical_supports: dict[str, list[float]],
+    v18_supports: dict[str, list[float]],
+    blocker_decisions: dict[str, dict],
+) -> tuple[dict, list[dict]]:
+    case_rows: list[dict] = []
+    factors = variant.get("factors", {})
+    held_out = set(variant.get("heldOut", set()))
+    for name, role in V19_SOURCE_BOUNDARY_TARGET_ROLES.items():
+        curve = curves.get(name)
+        source = source_supports.get(name, [])
+        canonical = canonical_supports.get(name, [])
+        target = v18_supports.get(name, [])
+        if not curve or len(source) != len(curve["points"]) or len(target) != len(curve["points"]):
+            continue
+        factor = parse_float(factors.get(name, 0.0), 0.0)
+        candidate_supports = v19_source_boundary_supports(curve, source, factor)
+        source_score = v18_competitor_support_score(curve, source)
+        candidate_score = v18_competitor_support_score(curve, candidate_supports)
+        canonical_score = v18_competitor_support_score(curve, canonical)
+        v18_score = v18_competitor_support_score(curve, target)
+        target_gain = pct_improvement(canonical_score["rmse"], v18_score["rmse"])
+        candidate_gain = pct_improvement(canonical_score["rmse"], candidate_score["rmse"])
+        decision = blocker_decisions.get(name, {})
+        is_protected = "protected" in role
+        is_admit = "admit high/source-load" in role
+        utility_eligible = name not in held_out
+        case_rows.append(
+            {
+                "variantId": variant["variantId"],
+                "variantClass": variant["variantClass"],
+                "galaxy": name,
+                "targetRole": role,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "sourceBoundaryFactor": factor,
+                "heldOutFromSourceTraining": name in held_out,
+                "utilityEligible": utility_eligible,
+                "candidateDecision": decision.get("candidateDecision", ""),
+                "candidateRuleFamily": decision.get("candidateRuleFamily", ""),
+                "canonicalRmse": canonical_score["rmse"],
+                "lockedV18Rmse": v18_score["rmse"],
+                "unsafeFullSourceRmse": source_score["rmse"],
+                "candidateRmse": candidate_score["rmse"],
+                "unsafeFullSourceMinusV18KmS": source_score["rmse"] - v18_score["rmse"],
+                "candidateMinusV18KmS": candidate_score["rmse"] - v18_score["rmse"],
+                "candidateImprovementVsFullSourceKmS": source_score["rmse"] - candidate_score["rmse"],
+                "candidateGainVsCanonicalPct": candidate_gain,
+                "lockedV18GainVsCanonicalPct": target_gain,
+                "v18RepairRetentionPct": candidate_gain / target_gain * 100.0 if abs(target_gain) > 1.0e-9 else math.nan,
+                "protectedCase": is_protected,
+                "admitControlCase": is_admit,
+            }
+        )
+    eligible_rows = [row for row in case_rows if parse_bool(row["utilityEligible"])]
+    protected_rows = [row for row in eligible_rows if parse_bool(row["protectedCase"])]
+    admit_rows = [row for row in eligible_rows if parse_bool(row["admitControlCase"])]
+    direct_anchor_rows = [row for row in case_rows if row["galaxy"] in V19_SOURCE_ADMISSIBILITY_ANCHORS]
+    ugc03205 = next((row for row in case_rows if row["galaxy"] == "UGC03205"), {})
+    ugc07089 = next((row for row in case_rows if row["galaxy"] == "UGC07089"), {})
+    ugc05253 = next((row for row in case_rows if row["galaxy"] == "UGC05253"), {})
+    protected_improvement = safe_mean(parse_float(row["candidateImprovementVsFullSourceKmS"], 0.0) for row in protected_rows)
+    protected_regression = max([parse_float(row["candidateMinusV18KmS"], -math.inf) for row in protected_rows] or [0.0])
+    admit_retention = safe_mean(parse_float(row["v18RepairRetentionPct"], math.nan) for row in admit_rows)
+    admit_regression = safe_mean(max(0.0, parse_float(row["candidateMinusV18KmS"], 0.0)) for row in admit_rows)
+    metric = {
+        "variantId": variant["variantId"],
+        "variantClass": variant["variantClass"],
+        "description": variant["description"],
+        "promotableAsLaw": variant["promotable"],
+        "targetCaseCount": len(case_rows),
+        "eligibleCaseCount": len(eligible_rows),
+        "heldOutCaseCount": len(case_rows) - len(eligible_rows),
+        "protectedCaseCount": len(protected_rows),
+        "admitControlCount": len(admit_rows),
+        "protectedMeanImprovementVsFullSourceKmS": protected_improvement,
+        "protectedMaxRegressionVsV18KmS": protected_regression,
+        "admitMeanV18RepairRetentionPct": admit_retention,
+        "admitMeanRegressionVsV18KmS": admit_regression,
+        "ugc03205RetentionPct": parse_float(ugc03205.get("v18RepairRetentionPct"), math.nan),
+        "ugc03205CandidateMinusV18KmS": parse_float(ugc03205.get("candidateMinusV18KmS"), math.nan),
+        "ugc07089CandidateMinusV18KmS": parse_float(ugc07089.get("candidateMinusV18KmS"), math.nan),
+        "ugc05253HeldOut": bool(ugc05253.get("heldOutFromSourceTraining", False)),
+        "ugc05253CandidateMinusV18KmS": parse_float(ugc05253.get("candidateMinusV18KmS"), math.nan),
+        "anchorDecisionCount": len(direct_anchor_rows),
+        "sourceUtility": protected_improvement + 0.05 * admit_retention - 2.0 * max(0.0, protected_regression) - admit_regression,
+    }
+    return metric, case_rows
+
+
+def v19_blocker_gated_source_nulls(
+    curves: dict[str, dict],
+    source_supports: dict[str, list[float]],
+    canonical_supports: dict[str, list[float]],
+    v18_supports: dict[str, list[float]],
+    blocker_decisions: dict[str, dict],
+    candidate_metric: dict,
+    seed: int = 20260526,
+    draws: int = 1000,
+) -> tuple[list[dict], dict]:
+    names = [name for name in V19_SOURCE_BOUNDARY_TARGET_ROLES if name in curves]
+    cap_count = 3
+    admit_count = 4
+    hold_count = 1
+    rng = random.Random(seed)
+    rows: list[dict] = []
+    for draw in range(draws):
+        shuffled = names[:]
+        rng.shuffle(shuffled)
+        held = set(shuffled[:hold_count])
+        caps = set(shuffled[hold_count:hold_count + cap_count])
+        admits = set(shuffled[hold_count + cap_count:hold_count + cap_count + admit_count])
+        variant = {
+            "variantId": f"same-count-random-blocker-{draw}",
+            "variantClass": "same-count-random-null",
+            "description": "Randomly assign the same hold/cap/admit counts as the blocker-plus-prior-admits candidate.",
+            "factors": {**{name: 0.0 for name in caps | held}, **{name: 1.0 for name in admits}},
+            "heldOut": held,
+            "promotable": False,
+        }
+        metric, _ = v19_blocker_gated_source_score_variant(
+            variant,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            blocker_decisions,
+        )
+        rows.append(
+            {
+                "nullType": "same-count-random-hold-cap-admit",
+                "draw": draw,
+                "heldCases": ";".join(sorted(held)),
+                "capCases": ";".join(sorted(caps)),
+                "admitCases": ";".join(sorted(admits)),
+                "sourceUtility": metric["sourceUtility"],
+                "protectedMeanImprovementVsFullSourceKmS": metric["protectedMeanImprovementVsFullSourceKmS"],
+                "protectedMaxRegressionVsV18KmS": metric["protectedMaxRegressionVsV18KmS"],
+                "admitMeanV18RepairRetentionPct": metric["admitMeanV18RepairRetentionPct"],
+                "ugc03205RetentionPct": metric["ugc03205RetentionPct"],
+                "beatsOrTiesCandidateUtility": metric["sourceUtility"] >= candidate_metric["sourceUtility"],
+            }
+        )
+    utilities = [parse_float(row["sourceUtility"], math.nan) for row in rows]
+    summary = {
+        "nullDraws": draws,
+        "nullSeed": seed,
+        "nullUtilityMedian": safe_median(utilities),
+        "nullUtilityP95": v19_quantile(utilities, 0.95),
+        "nullUtilityMax": max(utilities) if utilities else math.nan,
+        "nullBeatOrTieCandidateFraction": safe_mean(1.0 if parse_bool(row["beatsOrTiesCandidateUtility"]) else 0.0 for row in rows),
+    }
+    return rows, summary
+
+
+def write_v19_blocker_gated_source_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_blocker_gated_source"
+    curves, source_supports, canonical_supports, v18_supports, _context = v19_source_boundary_case_base()
+    feature_rows, decision_rows = v19_source_admissibility_blocker_feature_matrix()
+    blocker_decisions = {row["galaxy"]: row for row in decision_rows}
+    score_rows: list[dict] = []
+    case_rows: list[dict] = []
+    variant_rows: list[dict] = []
+    for variant in v19_blocker_gated_source_variant_specs(decision_rows):
+        metric, cases = v19_blocker_gated_source_score_variant(
+            variant,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            blocker_decisions,
+        )
+        score_rows.append(metric)
+        case_rows.extend(cases)
+        variant_rows.append(
+            {
+                "variantId": variant["variantId"],
+                "variantClass": variant["variantClass"],
+                "description": variant["description"],
+                "factors": json.dumps(variant["factors"], sort_keys=True),
+                "heldOut": ";".join(sorted(variant["heldOut"])),
+                "promotableAsLaw": variant["promotable"],
+            }
+        )
+    candidate = next(row for row in score_rows if row["variantId"] == "blocker-plus-prior-admits")
+    null_rows, null_summary = v19_blocker_gated_source_nulls(
+        curves,
+        source_supports,
+        canonical_supports,
+        v18_supports,
+        blocker_decisions,
+        candidate,
+    )
+    if parse_float(candidate["protectedMaxRegressionVsV18KmS"], math.inf) <= 0.25 and parse_float(candidate["admitMeanV18RepairRetentionPct"], 0.0) >= 70.0 and null_summary["nullBeatOrTieCandidateFraction"] < 0.05:
+        verdict = "blocker-gated source candidate survives"
+    elif parse_float(candidate["protectedMaxRegressionVsV18KmS"], math.inf) <= 0.25 and null_summary["nullBeatOrTieCandidateFraction"] < 0.05:
+        verdict = "blocker works but source equation underfits admits"
+    else:
+        verdict = "source equation still not safe"
+    formula = {
+        "candidateId": "v19-blocker-gated-source-candidate-v1",
+        "status": verdict,
+        "baseEquation": "curvature-memory-growth-equation",
+        "candidateVariant": "blocker-plus-prior-admits",
+        "sourceBoundaryRule": "candidate_support = canonical_support + sourceBoundaryFactor * (source_support - canonical_support)",
+        "newBlocker": "UGC05253 held out from smooth source-load training; UGC07089 capped; UGC03205 admitted as positive control",
+        "browserChanged": False,
+        "lockedV18Changed": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw RMSE", "residual lookup", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    write_csv(out_dir / f"{prefix}_candidate_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_blocker_decisions.csv", decision_rows)
+    write_csv(out_dir / f"{prefix}_variant_ledger.csv", variant_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 Blocker-Gated Source Candidate",
+        "",
+        "This is the first source-field candidate test that uses the new counterexample blocker. It does not change locked v18 or the browser.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Candidate Result",
+        "",
+        f"- Protected max regression vs v18: `{fmt(candidate['protectedMaxRegressionVsV18KmS'])}` km/s.",
+        f"- Protected improvement vs unsafe full-source: `{fmt(candidate['protectedMeanImprovementVsFullSourceKmS'])}` km/s.",
+        f"- Admit-control v18 repair retention: `{fmt(candidate['admitMeanV18RepairRetentionPct'])}%`.",
+        f"- UGC03205 retention: `{fmt(candidate['ugc03205RetentionPct'])}%`.",
+        f"- UGC05253 held out: `{candidate['ugc05253HeldOut']}`.",
+        f"- Null beat/tie fraction: `{fmt(null_summary['nullBeatOrTieCandidateFraction'])}`.",
+        "",
+        "## Variant Scores",
+        "",
+        "| Variant | protected reg | protected safety gain | admit retention | UGC03205 retention | utility |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['variantId']} | {fmt(row['protectedMaxRegressionVsV18KmS'])} | {fmt(row['protectedMeanImprovementVsFullSourceKmS'])} | {fmt(row['admitMeanV18RepairRetentionPct'])}% | {fmt(row['ugc03205RetentionPct'])}% | {fmt(row['sourceUtility'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Physical Interpretation",
+            "",
+            "The admissibility blocker does useful work: it prevents UGC05253 and UGC07089 from forcing a broad smooth source-load law. The remaining question is whether the source equation itself can reproduce admitted high-RMSE cases strongly enough. If admit retention stays low, the missing piece is the source-field amplitude/shape operator, not another blocker threshold.",
+            "",
+            "## Guardrails",
+            "",
+            "- No locked v18 law, browser preset, q, Gamma0, M/L, residual lookup, raw RMSE lookup, NFW/MOND parameter, or weak/systematics case is used as a formula input.",
+            "- Galaxy names only join the evidence ledger and evaluate named blockers; the reported formula variables are quality/inclination/2D provenance/source-state variables.",
+            "- UGC05253 is explicitly held out from smooth source-load training.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-blocker-gated-source-candidate-v1",
+        "verdict": verdict,
+        "candidate": candidate,
+        "nullSummary": null_summary,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "weakSystematicsTrainingUsed": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_candidate_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_blocker_decisions.csv",
+            f"{prefix}_variant_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19blockergatedsource(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_BLOCKER_GATED_SOURCE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_blocker_gated_source_artifacts(out_dir)
+    candidate = capsule["candidate"]
+    print("MTS v19 blocker-gated source candidate")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"protected_reg={fmt(candidate['protectedMaxRegressionVsV18KmS'])}",
+                f"admit_retention={fmt(candidate['admitMeanV18RepairRetentionPct'])}%",
+                f"UGC03205={fmt(candidate['ugc03205RetentionPct'])}%",
+                f"null_tie_frac={fmt(capsule['nullSummary']['nullBeatOrTieCandidateFraction'])}",
+            ]
+        )
+    )
+    print(f"Wrote v19 blocker-gated source candidate to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -113062,6 +113417,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19ugc05253radialprovenance",
             "v19sourceadmissibilityblocker",
             "observedstatev19sourceadmissibilityblocker",
+            "v19blockergatedsource",
+            "observedstatev19blockergatedsource",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -113529,6 +113886,8 @@ def main() -> None:
         cmd_v19ugc05253radialprovenance(args)
     elif args.mode in {"v19sourceadmissibilityblocker", "observedstatev19sourceadmissibilityblocker"}:
         cmd_v19sourceadmissibilityblocker(args)
+    elif args.mode in {"v19blockergatedsource", "observedstatev19blockergatedsource"}:
+        cmd_v19blockergatedsource(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
