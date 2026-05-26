@@ -300,6 +300,7 @@ DEFAULT_V19_GAS_BOUNDARY_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-bou
 DEFAULT_V19_GAS_BOUNDARY_GATED_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-gated-candidate-v1"
 DEFAULT_V19_GAS_BOUNDARY_GATE_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-gate-hardening-v1"
 DEFAULT_V19_GAS_BOUNDARY_SMOOTH_SOURCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-smooth-source-v1"
+DEFAULT_V19_PGC51017_BLOCKER_OUT = OUTPUT_PACK_ROOT / "mts-v19-pgc51017-blocker-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -118656,6 +118657,244 @@ def write_v19_gas_boundary_smooth_source_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_pgc51017_blocker_specs() -> list[dict]:
+    return [
+        {
+            "blockerId": "smooth-source-reference",
+            "blockerFamily": "none",
+            "description": "Best smooth source field with no extra blocker.",
+            "blockerType": "none",
+        },
+        {
+            "blockerId": "sampling-floor-n8",
+            "blockerFamily": "observational-sampling",
+            "description": "Require enough sampled rotation-curve points before additive Xi is admitted.",
+            "blockerType": "sampling-floor",
+            "nPointsMin": 8,
+        },
+        {
+            "blockerId": "outer-disk-floor",
+            "blockerFamily": "profile-state",
+            "description": "Require a minimal outer-disk share so gas-rich protected lookalikes do not receive additive Xi.",
+            "blockerType": "outer-disk-floor",
+            "outerDiskShareMin": 0.39,
+        },
+        {
+            "blockerId": "uMax-shoulder-cap",
+            "blockerFamily": "state-boundary",
+            "description": "Reintroduce only the uMax safety shoulder that separates PGC51017 from the target envelope.",
+            "blockerType": "uMax-cap",
+            "uMaxMax": 0.8428907339912761,
+        },
+        {
+            "blockerId": "sampling-plus-outer-disk",
+            "blockerFamily": "sampling-profile",
+            "description": "Sampling floor plus outer-disk share floor.",
+            "blockerType": "sampling-plus-outer-disk",
+            "nPointsMin": 8,
+            "outerDiskShareMin": 0.39,
+        },
+    ]
+
+
+def v19_pgc51017_blocker_factor(curve: dict, components: dict, spec: dict) -> float:
+    blocker_type = spec["blockerType"]
+    if blocker_type == "none":
+        return 1.0
+    n_points = len(curve.get("points", []))
+    outer_disk = parse_float(components.get("outerDiskShare"), math.nan)
+    umax = parse_float(components.get("uMax"), math.nan)
+    sampling = v19_smoothstep01(n_points, parse_float(spec.get("nPointsMin", 8)) - 1.5, parse_float(spec.get("nPointsMin", 8)))
+    outer = v19_smoothstep01(outer_disk, parse_float(spec.get("outerDiskShareMin", 0.39)) - 0.02, parse_float(spec.get("outerDiskShareMin", 0.39)) + 0.02)
+    ucap = 1.0 - v19_smoothstep01(umax, parse_float(spec.get("uMaxMax", 0.8428907339912761)) - 0.02, parse_float(spec.get("uMaxMax", 0.8428907339912761)) + 0.02)
+    if blocker_type == "sampling-floor":
+        return clamp(sampling, 0.0, 1.0)
+    if blocker_type == "outer-disk-floor":
+        return clamp(outer, 0.0, 1.0)
+    if blocker_type == "uMax-cap":
+        return clamp(ucap, 0.0, 1.0)
+    if blocker_type == "sampling-plus-outer-disk":
+        return clamp(sampling * outer, 0.0, 1.0)
+    return 1.0
+
+
+def v19_pgc51017_score_blocker(spec: dict) -> tuple[dict, list[dict]]:
+    smooth_spec = next(item for item in v19_gas_boundary_smooth_source_specs() if item["candidateId"] == "xi-smooth-conservative-band")
+    curves, _canonical, _target, _hierarchy, components_by_name, _meta = v19_gas_boundary_hierarchy_pack()
+    gate_overrides = {}
+    blocker_factor_by_name = {}
+    for name, curve in curves.items():
+        if name not in components_by_name:
+            continue
+        smooth_gate = v19_gas_boundary_smooth_source_gate(components_by_name[name], smooth_spec)
+        blocker_factor = v19_pgc51017_blocker_factor(curve, components_by_name[name], spec)
+        blocker_factor_by_name[name] = blocker_factor
+        gate_overrides[name] = smooth_gate * blocker_factor
+    base_spec = v19_gas_boundary_memory_cap_spec(
+        candidateId=spec["blockerId"],
+        candidateFamily=spec["blockerFamily"],
+        description=spec["description"],
+        betaAdd=smooth_spec["betaAdd"],
+        betaSuppress=smooth_spec["betaSuppress"],
+        shape=smooth_spec["shape"],
+        gateMode=spec["blockerType"],
+    )
+    metric, case_rows = v19_gas_boundary_gated_score_spec(base_spec, gate_overrides)
+    hard_metric = v19_gas_boundary_hardening_metric(metric, case_rows)
+    target_names = {"UGC02259", "UGC04325", "UGC06983", "UGC07399"}
+    focus_names = target_names | {"PGC51017"}
+    focus_rows = []
+    for row in case_rows:
+        if row["galaxy"] not in focus_names:
+            continue
+        components = components_by_name.get(row["galaxy"], {})
+        curve = curves[row["galaxy"]]
+        focus_rows.append(
+            {
+                **row,
+                "blockerId": spec["blockerId"],
+                "blockerType": spec["blockerType"],
+                "nPoints": len(curve.get("points", [])),
+                "blockerFactor": blocker_factor_by_name.get(row["galaxy"], 1.0),
+                "isPgc51017BlockerCase": row["galaxy"] == "PGC51017",
+                "isTrueAdditiveTarget": row["galaxy"] in target_names,
+                "outerDiskShare": components.get("outerDiskShare", row.get("outerDiskShare", "")),
+                "outerGasShare": components.get("outerGasShare", ""),
+                "outerBulgeShare": components.get("outerBulgeShare", ""),
+                "barCurvAbs": components.get("barCurvAbs", ""),
+                "lGapOverH": components.get("lGapOverH", ""),
+                "satFraction": components.get("satFraction", ""),
+            }
+        )
+    pgc_row = next(row for row in case_rows if row["galaxy"] == "PGC51017")
+    target_focus = [row for row in focus_rows if row["galaxy"] in target_names]
+    hard_metric.update(
+        {
+            "blockerId": spec["blockerId"],
+            "blockerFamily": spec["blockerFamily"],
+            "blockerType": spec["blockerType"],
+            "pgc51017AddGate": pgc_row["addGate"],
+            "pgc51017XiAddGated": pgc_row["xiAddActivationGated"],
+            "pgc51017RegressionKmS": max(0.0, parse_float(pgc_row["candidateMinusHierarchyKmS"], 0.0)),
+            "focusTargetHitCount": sum(1 for row in target_focus if parse_float(row["xiAddActivationGated"], 0.0) >= 0.05),
+            "focusTargetMeanGainKmS": safe_mean(parse_float(row["candidateGainOverHierarchyKmS"], math.nan) for row in target_focus),
+            "focusTargetHitCases": ";".join(row["galaxy"] for row in target_focus if parse_float(row["xiAddActivationGated"], 0.0) >= 0.05),
+        }
+    )
+    return hard_metric, focus_rows
+
+
+def write_v19_pgc51017_blocker_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_pgc51017_blocker"
+    score_rows: list[dict] = []
+    focus_rows: list[dict] = []
+    for spec in v19_pgc51017_blocker_specs():
+        metric, rows = v19_pgc51017_score_blocker(spec)
+        score_rows.append(metric)
+        focus_rows.extend(rows)
+    candidate_rows = [row for row in score_rows if row["blockerId"] != "smooth-source-reference"]
+    best = max(
+        candidate_rows,
+        key=lambda row: (
+            parse_float(row["pgc51017RegressionKmS"], math.inf) <= 0.25,
+            parse_float(row["additiveTargetRecall"], 0.0),
+            parse_float(row["focusTargetMeanGainKmS"], -math.inf),
+            -parse_float(row["protectedAddHitMaxRegressionKmS"], math.inf),
+        ),
+    )
+    if parse_float(best["pgc51017RegressionKmS"], math.inf) <= 0.25 and parse_float(best["additiveTargetRecall"], 0.0) >= 0.75 and best["blockerFamily"] == "observational-sampling":
+        verdict = "PGC51017 explained by sampling/provenance admissibility"
+    elif parse_float(best["pgc51017RegressionKmS"], math.inf) <= 0.25 and parse_float(best["additiveTargetRecall"], 0.0) >= 0.75:
+        verdict = "PGC51017 separable by current state/profile variable"
+    else:
+        verdict = "PGC51017 remains missing-variable blocker"
+    recommendations = [
+        {
+            "nextStep": "source-admissibility validation gate",
+            "reason": "PGC51017 has only 6 rotation-curve points while all four true additive targets have at least 8; this is evidence for observational/source admissibility, not a physical source term.",
+            "promoteAsPhysicsLaw": False,
+        },
+        {
+            "nextStep": "do not smooth the current 3-state gate further",
+            "reason": "smooth uMax/pointDensity/memoryLoad source fields reintroduce PGC51017; a separate admissibility variable is needed.",
+            "promoteAsPhysicsLaw": False,
+        },
+    ]
+    formula = {
+        "candidateId": "mts-v19-pgc51017-blocker-v1",
+        "status": verdict,
+        "bestBlocker": best,
+        "formulaUse": "diagnostic/source-admissibility only",
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_focus_case_ledger.csv", focus_rows)
+    write_csv(out_dir / f"{prefix}_next_actions.csv", recommendations)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 PGC51017 Additive-Boundary Blocker",
+        "",
+        "This mode attacks the protected case that broke the smooth additive gas-boundary field. It compares PGC51017 directly against the four true additive targets and tests whether a blocker is physical state/profile or observational/source-admissibility.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Best Blocker",
+        "",
+        f"- Blocker: `{best['blockerId']}`.",
+        f"- Family: `{best['blockerFamily']}`.",
+        f"- PGC51017 regression: `{fmt(best['pgc51017RegressionKmS'])}` km/s.",
+        f"- Additive target recall: `{fmt(best['additiveTargetRecall'])}`.",
+        f"- Focus target mean gain: `{fmt(best['focusTargetMeanGainKmS'])}` km/s.",
+        f"- Protected additive false releases: `{best['protectedAddFalseReleaseCount']}`.",
+        "",
+        "## Blocker Table",
+        "",
+        "| blocker | family | PGC regression | add recall | focus target gain | protected false | protected add reg |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['blockerId']} | {row['blockerFamily']} | {fmt(row['pgc51017RegressionKmS'])} | {fmt(row['additiveTargetRecall'])} | {fmt(row['focusTargetMeanGainKmS'])} | {row['protectedAddFalseReleaseCount']} | {fmt(row['protectedAddHitMaxRegressionKmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "The clean separation is observational: PGC51017 has 6 sampled curve points, while the true additive targets have 8, 8, 10, and 17. That means the additive `Xi` source field should not be promoted as a physical law from this local state vector alone. The honest route is a source-admissibility/quality gate or additional 2D/radial-flow evidence, not more smoothing.",
+            "",
+            "## Guardrails",
+            "",
+            "- No locked v18/browser law changed.",
+            "- PGC51017 is used as an evaluation blocker, not as a formula input.",
+            "- Sampling/provenance gates are validation discipline, not physical transport terms.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-pgc51017-blocker-v1",
+        "verdict": verdict,
+        "bestBlocker": best,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_focus_case_ledger.csv",
+            f"{prefix}_next_actions.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -119058,6 +119297,26 @@ def cmd_v19gasboundarysmoothsource(args: argparse.Namespace) -> None:
     print(f"Wrote gas-boundary smooth source field to {out_dir.resolve()}")
 
 
+def cmd_v19pgc51017blocker(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_PGC51017_BLOCKER_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_pgc51017_blocker_artifacts(out_dir)
+    best = capsule["bestBlocker"]
+    print("MTS v19 PGC51017 additive-boundary blocker")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['blockerId']}",
+                f"family={best['blockerFamily']}",
+                f"pgc_reg={fmt(best['pgc51017RegressionKmS'])}",
+                f"add_recall={fmt(best['additiveTargetRecall'])}",
+                f"target_gain={fmt(best['focusTargetMeanGainKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote PGC51017 blocker attack to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -119381,6 +119640,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19gasboundarygateharden",
             "v19gasboundarysmoothsource",
             "observedstatev19gasboundarysmoothsource",
+            "v19pgc51017blocker",
+            "observedstatev19pgc51017blocker",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -119880,6 +120141,8 @@ def main() -> None:
         cmd_v19gasboundarygateharden(args)
     elif args.mode in {"v19gasboundarysmoothsource", "observedstatev19gasboundarysmoothsource"}:
         cmd_v19gasboundarysmoothsource(args)
+    elif args.mode in {"v19pgc51017blocker", "observedstatev19pgc51017blocker"}:
+        cmd_v19pgc51017blocker(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
