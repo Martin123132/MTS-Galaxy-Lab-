@@ -304,6 +304,7 @@ DEFAULT_V19_PGC51017_BLOCKER_OUT = OUTPUT_PACK_ROOT / "mts-v19-pgc51017-blocker-
 DEFAULT_V19_SOURCE_ADMISSIBILITY_GATE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-admissibility-gate-v1"
 DEFAULT_V19_MOTION_FIELD_KERNEL_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-kernel-v1"
 DEFAULT_V19_MOTION_FIELD_KERNEL_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-kernel-hardening-v1"
+DEFAULT_V19_MOTION_FIELD_NORMALIZATION_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-normalization-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -119930,6 +119931,362 @@ def write_v19_motion_field_kernel_hardening_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_motion_field_normalization_specs() -> list[dict]:
+    return [
+        {
+            "normalizationId": "fixed-base-reference",
+            "normalizationFamily": "fixed-reference",
+            "description": "Base boundary-flux kernel with betaAdd=1.0 and betaSink=2.0.",
+            "normalizationType": "fixed",
+            "betaAdd": 1.0,
+            "betaSink": 2.0,
+            "equation": "Delta S = [1.0*A_source - 2.0*A_sink] S0 G",
+        },
+        {
+            "normalizationId": "fixed-strong-ceiling",
+            "normalizationFamily": "fixed-ceiling",
+            "description": "Best nearby fixed coefficient from hardening sweep; ceiling, not derived physics.",
+            "normalizationType": "fixed",
+            "betaAdd": 1.5,
+            "betaSink": 2.5,
+            "equation": "Delta S = [1.5*A_source - 2.5*A_sink] S0 G",
+        },
+        {
+            "normalizationId": "memory-density-source-strength",
+            "normalizationFamily": "state-derived-normalization",
+            "description": "Normalize source strength by the overlap of memory band and sampled source-density band.",
+            "normalizationType": "memory-density",
+            "betaAdd": 1.0,
+            "betaSink": 2.0,
+            "equation": "N_add = 1 + 0.70*(memoryBand*densityBand); N_sink = 1 + 0.25*memoryBand",
+        },
+        {
+            "normalizationId": "boundary-load-source-strength",
+            "normalizationFamily": "state-derived-normalization",
+            "description": "Normalize by gas-boundary loading itself.",
+            "normalizationType": "boundary-load",
+            "betaAdd": 1.0,
+            "betaSink": 2.0,
+            "equation": "N_add = 1 + 0.65*B_gas; N_sink = 1 + 0.25*B_gas",
+        },
+        {
+            "normalizationId": "gas-disk-source-strength",
+            "normalizationFamily": "state-derived-normalization",
+            "description": "Normalize by coupled outer gas and outer disk source coherence.",
+            "normalizationType": "gas-disk",
+            "betaAdd": 1.0,
+            "betaSink": 2.0,
+            "equation": "N_add = 1 + 0.85*sqrt(outerGasShare*outerDiskShare); N_sink = 1 + 0.15*sqrt(outerGasShare*outerDiskShare)",
+        },
+        {
+            "normalizationId": "memory-gap-source-strength",
+            "normalizationFamily": "state-derived-normalization",
+            "description": "Normalize by the saturated-memory gap.",
+            "normalizationType": "memory-gap",
+            "betaAdd": 1.0,
+            "betaSink": 2.0,
+            "equation": "N_add = 1 + 0.55*band(L_gap/h); N_sink = 1 + 0.25*band(L_gap/h)",
+        },
+        {
+            "normalizationId": "combined-source-strength",
+            "normalizationFamily": "state-derived-normalization",
+            "description": "Combined source-strength normalization from boundary loading, memory-density overlap, and gas-disk coupling.",
+            "normalizationType": "combined",
+            "betaAdd": 1.0,
+            "betaSink": 2.0,
+            "equation": "N_add = 1 + clamp(0.35*B_gas + 0.35*M_density + 0.30*G_disk,0,0.75); N_sink = 1 + 0.25*B_gas",
+        },
+    ]
+
+
+def v19_motion_field_normalization_factors(details: dict, components: dict, spec: dict) -> tuple[float, float, dict]:
+    norm_type = str(spec.get("normalizationType", "fixed"))
+    boundary = clamp(parse_float(details.get("sourceBoundary"), 0.0), 0.0, 1.0)
+    memory_band = clamp(parse_float(details.get("sourceMemoryBand"), 0.0), 0.0, 1.0)
+    density_band = clamp(parse_float(details.get("sourceDensityBand"), 0.0), 0.0, 1.0)
+    gas_disk = clamp(parse_float(details.get("sourceGasDiskCoupling"), 0.0), 0.0, 1.0)
+    gap_gate = clamp(parse_float(details.get("sourceGapGate"), 0.0), 0.0, 1.0)
+    memory_density = clamp(memory_band * density_band, 0.0, 1.0)
+    if norm_type == "memory-density":
+        add_norm = 1.0 + 0.70 * memory_density
+        sink_norm = 1.0 + 0.25 * memory_band
+    elif norm_type == "boundary-load":
+        add_norm = 1.0 + 0.65 * boundary
+        sink_norm = 1.0 + 0.25 * boundary
+    elif norm_type == "gas-disk":
+        add_norm = 1.0 + 0.85 * gas_disk
+        sink_norm = 1.0 + 0.15 * gas_disk
+    elif norm_type == "memory-gap":
+        add_norm = 1.0 + 0.55 * gap_gate
+        sink_norm = 1.0 + 0.25 * gap_gate
+    elif norm_type == "combined":
+        combined = clamp(0.35 * boundary + 0.35 * memory_density + 0.30 * gas_disk, 0.0, 0.75)
+        add_norm = 1.0 + combined
+        sink_norm = 1.0 + 0.25 * boundary
+    else:
+        add_norm = 1.0
+        sink_norm = 1.0
+    return (
+        clamp(add_norm, 0.0, 2.25),
+        clamp(sink_norm, 0.0, 2.25),
+        {
+            "sourceBoundary": boundary,
+            "sourceMemoryDensity": memory_density,
+            "sourceGasDiskCoupling": gas_disk,
+            "sourceGapGate": gap_gate,
+            "addNorm": clamp(add_norm, 0.0, 2.25),
+            "sinkNorm": clamp(sink_norm, 0.0, 2.25),
+        },
+    )
+
+
+def v19_motion_field_normalization_score_spec(spec: dict) -> tuple[dict, list[dict], list[dict]]:
+    base_spec = v19_motion_field_base_kernel_spec(
+        kernelId=spec["normalizationId"],
+        kernelFamily=spec["normalizationFamily"],
+        betaAdd=spec["betaAdd"],
+        betaSink=spec["betaSink"],
+    )
+    if str(spec.get("normalizationType")) == "fixed":
+        metric, case_rows, shape_rows = v19_motion_field_kernel_score_spec(base_spec)
+        for row in case_rows:
+            row.update(
+                {
+                    "normalizationId": spec["normalizationId"],
+                    "normalizationType": spec["normalizationType"],
+                    "addNorm": 1.0,
+                    "sinkNorm": 1.0,
+                    "addActivationNormalized": row.get("addActivation", 0.0),
+                    "sinkActivationNormalized": row.get("sinkActivation", 0.0),
+                }
+            )
+        metric.update({**spec, "meanAddNormActive": 1.0, "meanSinkNormActive": 1.0})
+        return metric, case_rows, shape_rows
+    curves, _canonical, _target, _hierarchy, components_by_name, _meta = v19_gas_boundary_hierarchy_pack()
+    overrides: dict[str, tuple[float, float]] = {}
+    norm_by_name: dict[str, dict] = {}
+    for name, curve in curves.items():
+        components = components_by_name.get(name)
+        if not components:
+            continue
+        add_activation, sink_activation, details = v19_motion_field_kernel_activations(curve, components, base_spec)
+        add_norm, sink_norm, norm_details = v19_motion_field_normalization_factors(details, components, spec)
+        overrides[name] = (clamp(add_activation * add_norm, 0.0, 1.0), clamp(sink_activation * sink_norm, 0.0, 1.0))
+        norm_by_name[name] = norm_details
+    metric, case_rows, shape_rows = v19_motion_field_kernel_score_spec(base_spec, overrides)
+    for row in case_rows:
+        norm_details = norm_by_name.get(row["galaxy"], {})
+        row.update(
+            {
+                "normalizationId": spec["normalizationId"],
+                "normalizationType": spec["normalizationType"],
+                "addNorm": norm_details.get("addNorm", 1.0),
+                "sinkNorm": norm_details.get("sinkNorm", 1.0),
+                "sourceMemoryDensity": norm_details.get("sourceMemoryDensity", ""),
+                "addActivationNormalized": row.get("addActivation", 0.0),
+                "sinkActivationNormalized": row.get("sinkActivation", 0.0),
+            }
+        )
+    active_rows = [
+        row
+        for row in case_rows
+        if parse_float(row.get("addActivation"), 0.0) >= 0.05 or parse_float(row.get("sinkActivation"), 0.0) >= 0.05
+    ]
+    metric.update(
+        {
+            **spec,
+            "meanAddNormActive": safe_mean(parse_float(row.get("addNorm"), math.nan) for row in active_rows),
+            "meanSinkNormActive": safe_mean(parse_float(row.get("sinkNorm"), math.nan) for row in active_rows),
+        }
+    )
+    return metric, case_rows, shape_rows
+
+
+def v19_motion_field_normalization_null_controls(best_spec: dict, candidate_metric: dict, seeds: list[int] | None = None) -> list[dict]:
+    if seeds is None:
+        seeds = [19703, 19709, 19717, 19727, 19739, 19751, 19753, 19759, 19763, 19777, 19793]
+    base_spec = v19_motion_field_base_kernel_spec(
+        kernelId=best_spec["normalizationId"],
+        kernelFamily=best_spec["normalizationFamily"],
+        betaAdd=best_spec["betaAdd"],
+        betaSink=best_spec["betaSink"],
+    )
+    metric, case_rows, _shape_rows = v19_motion_field_normalization_score_spec(best_spec)
+    eligible = [
+        row["galaxy"]
+        for row in case_rows
+        if row["set"] != "weak-systematics-excluded"
+        and row["lockedRoute"] == "low-load"
+        and parse_float(row.get("sourceBoundary"), 0.0) >= 0.05
+        and parse_float(row.get("nPoints"), 0.0) >= 8
+    ]
+    active_values = [
+        (parse_float(row.get("addActivation"), 0.0), parse_float(row.get("sinkActivation"), 0.0))
+        for row in case_rows
+        if row["galaxy"] in eligible
+    ]
+    active_count = sum(1 for row in case_rows if row["galaxy"] in eligible and parse_float(row.get("addActivation"), 0.0) >= 0.05)
+    rows: list[dict] = []
+    for null_type in ["same-active-random-admissible-lowload", "shuffled-normalized-strength"]:
+        for seed in seeds:
+            rng = random.Random(seed)
+            if null_type == "same-active-random-admissible-lowload":
+                chosen = set(rng.sample(eligible, min(active_count, len(eligible))))
+                overrides = {name: ((1.0, 0.0) if name in chosen else (0.0, 0.0)) for name in eligible}
+            else:
+                shuffled = active_values[:]
+                rng.shuffle(shuffled)
+                overrides = dict(zip(eligible, shuffled))
+            null_metric, _cases, _shape = v19_motion_field_kernel_score_spec(base_spec, overrides)
+            rows.append(
+                {
+                    "nullType": null_type,
+                    "seed": seed,
+                    "activeCount": active_count,
+                    "eligibleCount": len(eligible),
+                    "targetGainKmS": null_metric["targetMeanGainOverHierarchyKmS"],
+                    "additiveTargetRecall": null_metric["additiveTargetRecall"],
+                    "protectedFalseReleaseCount": null_metric["protectedFalseReleaseCount"],
+                    "protectedActiveMaxRegressionKmS": null_metric["protectedActiveMaxRegressionKmS"],
+                    "beatsOrTiesCandidateTargetGain": parse_float(null_metric["targetMeanGainOverHierarchyKmS"], -math.inf) >= parse_float(candidate_metric["targetMeanGainOverHierarchyKmS"], math.inf),
+                    "protectedUnsafe": parse_float(null_metric["protectedActiveMaxRegressionKmS"], 0.0) > 1.0 or int(null_metric["protectedFalseReleaseCount"]) > 1,
+                }
+            )
+    return rows
+
+
+def write_v19_motion_field_normalization_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_motion_field_normalization"
+    score_rows: list[dict] = []
+    case_rows_all: list[dict] = []
+    shape_rows_all: list[dict] = []
+    for spec in v19_motion_field_normalization_specs():
+        metric, case_rows, shape_rows = v19_motion_field_normalization_score_spec(spec)
+        score_rows.append(metric)
+        case_rows_all.extend(case_rows)
+        shape_rows_all.extend(shape_rows)
+    derived_rows = [row for row in score_rows if row["normalizationFamily"] == "state-derived-normalization"]
+    best = max(
+        derived_rows,
+        key=lambda row: (
+            int(row["protectedFalseReleaseCount"]) == 0,
+            -parse_float(row["protectedActiveMaxRegressionKmS"], math.inf),
+            parse_float(row["additiveTargetRecall"], 0.0),
+            parse_float(row["targetMeanGainOverHierarchyKmS"], -math.inf),
+        ),
+    )
+    fixed_ceiling = next(row for row in score_rows if row["normalizationId"] == "fixed-strong-ceiling")
+    fixed_base = next(row for row in score_rows if row["normalizationId"] == "fixed-base-reference")
+    best_spec = next(item for item in v19_motion_field_normalization_specs() if item["normalizationId"] == best["normalizationId"])
+    null_rows = v19_motion_field_normalization_null_controls(best_spec, best)
+    safe_null_rows = [row for row in null_rows if not parse_bool(row.get("protectedUnsafe"))]
+    null_p95 = v19_quantile([parse_float(row.get("targetGainKmS"), math.nan) for row in safe_null_rows], 0.95)
+    null_margin = parse_float(best.get("targetMeanGainOverHierarchyKmS"), 0.0) - null_p95
+    ceiling_gap = parse_float(fixed_ceiling["targetMeanGainOverHierarchyKmS"], 0.0) - parse_float(best["targetMeanGainOverHierarchyKmS"], 0.0)
+    base_gain = parse_float(best["targetMeanGainOverHierarchyKmS"], 0.0) - parse_float(fixed_base["targetMeanGainOverHierarchyKmS"], 0.0)
+    if (
+        int(best["protectedFalseReleaseCount"]) == 0
+        and parse_float(best["additiveTargetRecall"], 0.0) >= 1.0
+        and base_gain > 0.25
+        and ceiling_gap <= 0.75
+        and null_margin >= 1.0
+    ):
+        verdict = "state-derived normalization candidate for field equation"
+    elif int(best["protectedFalseReleaseCount"]) == 0 and parse_float(best["additiveTargetRecall"], 0.0) >= 1.0 and base_gain > 0.0:
+        verdict = "state-derived normalization plausible but not decisive"
+    elif int(best["protectedFalseReleaseCount"]) == 0:
+        verdict = "fixed normalization still preferred"
+    else:
+        verdict = "normalization unsafe"
+    formula = {
+        "candidateId": "mts-v19-motion-field-normalization-v1",
+        "status": verdict,
+        "bestDerivedNormalization": best,
+        "fixedBaseReference": fixed_base,
+        "fixedStrongCeiling": fixed_ceiling,
+        "fieldEquationSketch": "Delta S_Xi(r) = [N_add(state)*A_source - N_sink(state)*A_sink] * S_canonical(r) * G_midouter(r)",
+        "admissibilitySeparation": "A_obs(N_RC>=8) remains external source admissibility, not a transport source.",
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    report = [
+        "# MTS v19 Motion-Field Normalization",
+        "",
+        "This mode asks whether the stronger coefficient preferred by kernel hardening can be derived from existing dimensionless source-state variables instead of being fitted as a free constant.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Best Derived Normalization",
+        "",
+        f"- Normalization: `{best['normalizationId']}`.",
+        f"- Target gain: `{fmt(best['targetMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Base gain improvement: `{fmt(base_gain)}` km/s.",
+        f"- Gap to fixed strong ceiling: `{fmt(ceiling_gap)}` km/s.",
+        f"- Additive target recall: `{fmt(best['additiveTargetRecall'])}`.",
+        f"- Protected false releases: `{best['protectedFalseReleaseCount']}`.",
+        f"- Protected active regression: `{fmt(best['protectedActiveMaxRegressionKmS'])}` km/s.",
+        f"- Mean add norm on active cases: `{fmt(best['meanAddNormActive'])}`.",
+        f"- Safe-null margin: `{fmt(null_margin)}` km/s.",
+        "",
+        "## Score Table",
+        "",
+        "| normalization | family | target gain | add recall | protected false | active reg | mean add norm |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['normalizationId']} | {row['normalizationFamily']} | {fmt(row['targetMeanGainOverHierarchyKmS'])} | {fmt(row['additiveTargetRecall'])} | {row['protectedFalseReleaseCount']} | {fmt(row['protectedActiveMaxRegressionKmS'])} | {fmt(row.get('meanAddNormActive', 1.0))} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "A useful result here is not just a bigger coefficient. The target is a dimensionless source-normalization that approaches the fixed strong ceiling while staying protected-safe and beating nulls. If the best derived scalar remains below the fixed ceiling or only narrowly beats nulls, the missing physics is likely the source-strength derivation itself.",
+            "",
+            "## Guardrails",
+            "",
+            "- No v18/browser law changed.",
+            "- `N_RC` remains external admissibility.",
+            "- No names, residuals, raw RMSE, NFW, MOND, or weak/systematics inputs enter the normalization.",
+            "",
+            verdict,
+        ]
+    )
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows_all)
+    write_csv(out_dir / f"{prefix}_support_shape.csv", shape_rows_all)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-motion-field-normalization-v1",
+        "verdict": verdict,
+        "bestDerivedNormalization": best,
+        "fixedBaseReference": fixed_base,
+        "fixedStrongCeiling": fixed_ceiling,
+        "baseGainImprovementKmS": base_gain,
+        "gapToFixedStrongCeilingKmS": ceiling_gap,
+        "safeNullTargetGainP95": null_p95,
+        "safeNullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_support_shape.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -120416,6 +120773,28 @@ def cmd_v19motionfieldkernelharden(args: argparse.Namespace) -> None:
     print(f"Wrote motion-field kernel hardening to {out_dir.resolve()}")
 
 
+def cmd_v19motionfieldnormalization(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_MOTION_FIELD_NORMALIZATION_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_motion_field_normalization_artifacts(out_dir)
+    best = capsule["bestDerivedNormalization"]
+    print("MTS v19 motion-field normalization")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['normalizationId']}",
+                f"target_gain={fmt(best['targetMeanGainOverHierarchyKmS'])}",
+                f"base_gain={fmt(capsule['baseGainImprovementKmS'])}",
+                f"ceiling_gap={fmt(capsule['gapToFixedStrongCeilingKmS'])}",
+                f"add_recall={fmt(best['additiveTargetRecall'])}",
+                f"protected_false={best['protectedFalseReleaseCount']}",
+                f"null_margin={fmt(capsule['safeNullMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote motion-field normalization audit to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -120747,6 +121126,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19motionfieldkernel",
             "v19motionfieldkernelharden",
             "observedstatev19motionfieldkernelharden",
+            "v19motionfieldnormalization",
+            "observedstatev19motionfieldnormalization",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -121254,6 +121635,8 @@ def main() -> None:
         cmd_v19motionfieldkernel(args)
     elif args.mode in {"v19motionfieldkernelharden", "observedstatev19motionfieldkernelharden"}:
         cmd_v19motionfieldkernelharden(args)
+    elif args.mode in {"v19motionfieldnormalization", "observedstatev19motionfieldnormalization"}:
+        cmd_v19motionfieldnormalization(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
