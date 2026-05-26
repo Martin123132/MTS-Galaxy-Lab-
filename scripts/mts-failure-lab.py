@@ -306,6 +306,7 @@ DEFAULT_V19_MOTION_FIELD_KERNEL_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-k
 DEFAULT_V19_MOTION_FIELD_KERNEL_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-kernel-hardening-v1"
 DEFAULT_V19_MOTION_FIELD_NORMALIZATION_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-normalization-v1"
 DEFAULT_V19_MOTION_FIELD_NORMALIZATION_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-normalization-hardening-v1"
+DEFAULT_V19_MEMORY_DENSITY_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-memory-density-field-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -120009,8 +120010,10 @@ def v19_motion_field_normalization_factors(details: dict, components: dict, spec
     gap_gate = clamp(parse_float(details.get("sourceGapGate"), 0.0), 0.0, 1.0)
     memory_density = clamp(memory_band * density_band, 0.0, 1.0)
     if norm_type == "memory-density":
-        add_norm = 1.0 + 0.70 * memory_density
-        sink_norm = 1.0 + 0.25 * memory_band
+        add_weight = parse_float(spec.get("memoryDensityAddWeight"), 0.70)
+        sink_weight = parse_float(spec.get("memoryBandSinkWeight"), 0.25)
+        add_norm = 1.0 + add_weight * memory_density
+        sink_norm = 1.0 + sink_weight * memory_band
     elif norm_type == "boundary-load":
         add_norm = 1.0 + 0.65 * boundary
         sink_norm = 1.0 + 0.25 * boundary
@@ -120667,6 +120670,249 @@ def write_v19_motion_field_normalization_hardening_artifacts(out_dir: Path) -> d
     return capsule
 
 
+def v19_memory_density_field_spec(normalization_id: str, add_weight: float, sink_weight: float, *, family: str = "memory-density-field") -> dict:
+    return {
+        "normalizationId": normalization_id,
+        "normalizationFamily": family,
+        "description": "Memory-density source normalization only.",
+        "normalizationType": "memory-density",
+        "betaAdd": 1.0,
+        "betaSink": 2.0,
+        "memoryDensityAddWeight": add_weight,
+        "memoryBandSinkWeight": sink_weight,
+        "equation": f"N_add = 1 + {add_weight:.3f}*(memoryBand*densityBand); N_sink = 1 + {sink_weight:.3f}*memoryBand",
+    }
+
+
+def v19_memory_density_field_specs() -> list[dict]:
+    specs: list[dict] = []
+    for add_weight in [0.45, 0.55, 0.65, 0.70, 0.80, 0.90, 1.00, 1.10, 1.20, 1.35, 1.50, 1.65, 1.80, 2.00]:
+        for sink_weight in [0.00, 0.10, 0.20, 0.25, 0.30, 0.40]:
+            specs.append(
+                v19_memory_density_field_spec(
+                    f"memory-density-a{add_weight:.2f}-s{sink_weight:.2f}",
+                    add_weight,
+                    sink_weight,
+                )
+            )
+    return specs
+
+
+def v19_memory_density_field_leave_one_out(scored: list[tuple[dict, dict, list[dict]]]) -> list[dict]:
+    reference_cases = scored[0][2] if scored else []
+    heldout_targets = v19_motion_field_normalization_additive_targets(reference_cases)
+    rows: list[dict] = []
+    for heldout in heldout_targets:
+        ranked = []
+        for spec, full_metric, cases in scored:
+            train_metric = v19_motion_field_normalization_training_metric(cases, heldout)
+            ranked.append((spec, full_metric, cases, train_metric))
+        selected_spec, selected_full, selected_cases, selected_train = max(
+            ranked,
+            key=lambda item: (
+                item[3]["trainProtectedFalse"] == 0,
+                -parse_float(item[3]["trainProtectedActiveRegressionKmS"], math.inf),
+                parse_float(item[3]["trainAdditiveRecall"], 0.0),
+                parse_float(item[3]["trainTargetGainKmS"], -math.inf),
+                -abs(parse_float(item[0].get("memoryBandSinkWeight"), 0.0) - 0.25),
+            ),
+        )
+        heldout_row = next(row for row in selected_cases if row["galaxy"] == heldout)
+        rows.append(
+            {
+                "heldoutGalaxy": heldout,
+                "selectedNormalization": selected_spec["normalizationId"],
+                "selectedAddWeight": selected_spec["memoryDensityAddWeight"],
+                "selectedSinkWeight": selected_spec["memoryBandSinkWeight"],
+                "trainTargetCount": selected_train["trainTargetCount"],
+                "trainAdditiveRecall": selected_train["trainAdditiveRecall"],
+                "trainTargetGainKmS": selected_train["trainTargetGainKmS"],
+                "trainProtectedFalse": selected_train["trainProtectedFalse"],
+                "trainProtectedActiveRegressionKmS": selected_train["trainProtectedActiveRegressionKmS"],
+                "heldoutHit": parse_float(heldout_row.get("addActivation"), 0.0) >= 0.05,
+                "heldoutGainKmS": heldout_row.get("candidateGainOverHierarchyKmS"),
+                "heldoutRegressionKmS": max(0.0, parse_float(heldout_row.get("candidateMinusHierarchyKmS"), 0.0)),
+                "selectedFullTargetGainKmS": selected_full["targetMeanGainOverHierarchyKmS"],
+                "selectedFullProtectedFalse": selected_full["protectedFalseReleaseCount"],
+            }
+        )
+    return rows
+
+
+def write_v19_memory_density_field_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_memory_density_field"
+    scored: list[tuple[dict, dict, list[dict]]] = []
+    shape_by_id: dict[str, list[dict]] = {}
+    for spec in v19_memory_density_field_specs():
+        metric, cases, shape_rows = v19_motion_field_normalization_score_spec(spec)
+        metric["memoryDensityAddWeight"] = spec["memoryDensityAddWeight"]
+        metric["memoryBandSinkWeight"] = spec["memoryBandSinkWeight"]
+        scored.append((spec, metric, cases))
+        shape_by_id[spec["normalizationId"]] = shape_rows
+    best_spec, best_metric, best_cases = max(
+        scored,
+        key=lambda item: (
+            int(item[1]["protectedFalseReleaseCount"]) == 0,
+            -parse_float(item[1]["protectedActiveMaxRegressionKmS"], math.inf),
+            parse_float(item[1]["additiveTargetRecall"], 0.0),
+            parse_float(item[1]["targetMeanGainOverHierarchyKmS"], -math.inf),
+            -abs(parse_float(item[0].get("memoryDensityAddWeight"), 0.0) - 0.70),
+            -abs(parse_float(item[0].get("memoryBandSinkWeight"), 0.0) - 0.25),
+        ),
+    )
+    fixed_base_spec = next(spec for spec in v19_motion_field_normalization_specs() if spec["normalizationId"] == "fixed-base-reference")
+    fixed_ceiling_spec = next(spec for spec in v19_motion_field_normalization_specs() if spec["normalizationId"] == "fixed-strong-ceiling")
+    combined_spec = next(spec for spec in v19_motion_field_normalization_specs() if spec["normalizationId"] == "combined-source-strength")
+    fixed_base_metric, _base_cases, _base_shape = v19_motion_field_normalization_score_spec(fixed_base_spec)
+    fixed_ceiling_metric, _ceiling_cases, _ceiling_shape = v19_motion_field_normalization_score_spec(fixed_ceiling_spec)
+    combined_metric, _combined_cases, _combined_shape = v19_motion_field_normalization_score_spec(combined_spec)
+    loo_rows = v19_memory_density_field_leave_one_out(scored)
+    null_rows = v19_motion_field_normalization_null_controls(best_spec, best_metric)
+    safe_null_rows = [row for row in null_rows if not parse_bool(row.get("protectedUnsafe"))]
+    null_p95 = v19_quantile([parse_float(row.get("targetGainKmS"), math.nan) for row in safe_null_rows], 0.95)
+    null_margin = parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0) - null_p95
+    loo_hit_fraction = safe_mean(1.0 if parse_bool(row.get("heldoutHit")) else 0.0 for row in loo_rows)
+    loo_positive_fraction = safe_mean(1.0 if parse_float(row.get("heldoutGainKmS"), -math.inf) > 0.0 else 0.0 for row in loo_rows)
+    loo_min_gain = min([parse_float(row.get("heldoutGainKmS"), math.inf) for row in loo_rows] or [math.nan])
+    loo_add_weights = [parse_float(row.get("selectedAddWeight"), math.nan) for row in loo_rows]
+    loo_sink_weights = [parse_float(row.get("selectedSinkWeight"), math.nan) for row in loo_rows]
+    loo_add_weight_span = max(loo_add_weights or [math.nan]) - min(loo_add_weights or [math.nan])
+    loo_sink_weight_span = max(loo_sink_weights or [math.nan]) - min(loo_sink_weights or [math.nan])
+    base_gain_improvement = parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0) - parse_float(fixed_base_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+    combined_gap = parse_float(combined_metric["targetMeanGainOverHierarchyKmS"], 0.0) - parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+    ceiling_gap = parse_float(fixed_ceiling_metric["targetMeanGainOverHierarchyKmS"], 0.0) - parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+    if (
+        int(best_metric["protectedFalseReleaseCount"]) == 0
+        and parse_float(best_metric["protectedActiveMaxRegressionKmS"], math.inf) <= 0.25
+        and parse_float(best_metric["additiveTargetRecall"], 0.0) >= 1.0
+        and loo_hit_fraction >= 1.0
+        and loo_positive_fraction >= 1.0
+        and loo_min_gain > 0.0
+        and null_margin >= 1.0
+        and combined_gap <= 0.40
+    ):
+        verdict = "memory-density field kernel candidate"
+    elif (
+        int(best_metric["protectedFalseReleaseCount"]) == 0
+        and parse_float(best_metric["additiveTargetRecall"], 0.0) >= 1.0
+        and loo_positive_fraction >= 0.75
+        and null_margin > 0.0
+    ):
+        verdict = "memory-density field useful but not closed"
+    else:
+        verdict = "memory-density field insufficient"
+    score_rows = [metric for _spec, metric, _cases in scored]
+    formula = {
+        "candidateId": "mts-v19-memory-density-field-v1",
+        "status": verdict,
+        "fieldEquationSketch": "Delta S_Xi(r) = [(1 + alpha*M_density) A_source - (1 + eta*memoryBand) A_sink] * S_canonical(r) * G_midouter(r)",
+        "memoryDensity": "M_density = memoryBand(memoryLoad) * densityBand(pointDensity)",
+        "bestSpec": best_spec,
+        "candidateMetric": best_metric,
+        "fixedBaseMetric": fixed_base_metric,
+        "combinedSourceStrengthMetric": combined_metric,
+        "fixedStrongCeilingMetric": fixed_ceiling_metric,
+        "baseGainImprovementKmS": base_gain_improvement,
+        "gapToCombinedKmS": combined_gap,
+        "gapToFixedStrongCeilingKmS": ceiling_gap,
+        "leaveOneOut": {
+            "hitFraction": loo_hit_fraction,
+            "positiveGainFraction": loo_positive_fraction,
+            "minGainKmS": loo_min_gain,
+            "addWeightSpan": loo_add_weight_span,
+            "sinkWeightSpan": loo_sink_weight_span,
+        },
+        "safeNullTargetGainP95": null_p95,
+        "safeNullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    report = [
+        "# MTS v19 Memory-Density Field",
+        "",
+        "This mode tests the cleaner field-equation candidate exposed by normalization hardening: source strength is controlled by memory-density overlap, not by a blended empirical scalar.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Candidate",
+        "",
+        f"- Best weights: `alpha={fmt(best_spec['memoryDensityAddWeight'])}`, `eta={fmt(best_spec['memoryBandSinkWeight'])}`.",
+        f"- Target gain: `{fmt(best_metric['targetMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Improvement over fixed base: `{fmt(base_gain_improvement)}` km/s.",
+        f"- Gap to blended normalization: `{fmt(combined_gap)}` km/s.",
+        f"- Gap to fixed strong ceiling: `{fmt(ceiling_gap)}` km/s.",
+        f"- Additive target recall: `{fmt(best_metric['additiveTargetRecall'])}`.",
+        f"- Protected false releases: `{best_metric['protectedFalseReleaseCount']}`.",
+        f"- Protected active regression: `{fmt(best_metric['protectedActiveMaxRegressionKmS'])}` km/s.",
+        f"- Safe-null margin: `{fmt(null_margin)}` km/s.",
+        "",
+        "## Leave-One-Target-Out",
+        "",
+        f"- Held-out hit fraction: `{fmt(loo_hit_fraction)}`.",
+        f"- Held-out positive-gain fraction: `{fmt(loo_positive_fraction)}`.",
+        f"- Worst held-out gain: `{fmt(loo_min_gain)}` km/s.",
+        f"- Selected alpha span: `{fmt(loo_add_weight_span)}`.",
+        f"- Selected eta span: `{fmt(loo_sink_weight_span)}`.",
+        "",
+        "## Comparison",
+        "",
+        "| model | target gain | recall | protected false | active reg |",
+        "| --- | ---: | ---: | ---: | ---: |",
+        f"| fixed base | {fmt(fixed_base_metric['targetMeanGainOverHierarchyKmS'])} | {fmt(fixed_base_metric['additiveTargetRecall'])} | {fixed_base_metric['protectedFalseReleaseCount']} | {fmt(fixed_base_metric['protectedActiveMaxRegressionKmS'])} |",
+        f"| memory-density best | {fmt(best_metric['targetMeanGainOverHierarchyKmS'])} | {fmt(best_metric['additiveTargetRecall'])} | {best_metric['protectedFalseReleaseCount']} | {fmt(best_metric['protectedActiveMaxRegressionKmS'])} |",
+        f"| blended normalization | {fmt(combined_metric['targetMeanGainOverHierarchyKmS'])} | {fmt(combined_metric['additiveTargetRecall'])} | {combined_metric['protectedFalseReleaseCount']} | {fmt(combined_metric['protectedActiveMaxRegressionKmS'])} |",
+        f"| fixed strong ceiling | {fmt(fixed_ceiling_metric['targetMeanGainOverHierarchyKmS'])} | {fmt(fixed_ceiling_metric['additiveTargetRecall'])} | {fixed_ceiling_metric['protectedFalseReleaseCount']} | {fmt(fixed_ceiling_metric['protectedActiveMaxRegressionKmS'])} |",
+        "",
+        "## Physical Reading",
+        "",
+        "`M_density = memoryBand(memoryLoad) * densityBand(pointDensity)` is now the compact candidate source-strength term. It says the extra motion-field source is strongest where the galaxy sits in the right memory-load band and the rotation curve has enough radial sampling density to define that band. The latter remains partly provenance-facing, so this is a bridge term, not yet a fundamental-only field equation.",
+        "",
+        "## Guardrails",
+        "",
+        "- No locked v18/browser law changed.",
+        "- No galaxy names, residuals, raw RMSE, NFW/MOND parameters, or weak/systematics fitting enter the formula.",
+        "",
+        verdict,
+    ]
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", best_cases)
+    write_csv(out_dir / f"{prefix}_support_shape.csv", shape_by_id[best_spec["normalizationId"]])
+    write_csv(out_dir / f"{prefix}_leave_one_out.csv", loo_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-memory-density-field-v1",
+        "verdict": verdict,
+        "bestSpec": best_spec,
+        "candidateMetric": best_metric,
+        "baseGainImprovementKmS": base_gain_improvement,
+        "gapToCombinedKmS": combined_gap,
+        "gapToFixedStrongCeilingKmS": ceiling_gap,
+        "leaveOneOutHitFraction": loo_hit_fraction,
+        "leaveOneOutPositiveGainFraction": loo_positive_fraction,
+        "leaveOneOutMinGainKmS": loo_min_gain,
+        "safeNullTargetGainP95": null_p95,
+        "safeNullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_support_shape.csv",
+            f"{prefix}_leave_one_out.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -121197,6 +121443,30 @@ def cmd_v19motionfieldnormalizationharden(args: argparse.Namespace) -> None:
     print(f"Wrote motion-field normalization hardening to {out_dir.resolve()}")
 
 
+def cmd_v19memorydensityfield(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_MEMORY_DENSITY_FIELD_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_memory_density_field_artifacts(out_dir)
+    metric = capsule["candidateMetric"]
+    spec = capsule["bestSpec"]
+    print("MTS v19 memory-density field")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"alpha={fmt(spec['memoryDensityAddWeight'])}",
+                f"eta={fmt(spec['memoryBandSinkWeight'])}",
+                f"target_gain={fmt(metric['targetMeanGainOverHierarchyKmS'])}",
+                f"combined_gap={fmt(capsule['gapToCombinedKmS'])}",
+                f"ceiling_gap={fmt(capsule['gapToFixedStrongCeilingKmS'])}",
+                f"loo_hit={fmt(capsule['leaveOneOutHitFraction'])}",
+                f"protected_false={metric['protectedFalseReleaseCount']}",
+                f"null_margin={fmt(capsule['safeNullMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote memory-density field audit to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -121532,6 +121802,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19motionfieldnormalization",
             "v19motionfieldnormalizationharden",
             "observedstatev19motionfieldnormalizationharden",
+            "v19memorydensityfield",
+            "observedstatev19memorydensityfield",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -122043,6 +122315,8 @@ def main() -> None:
         cmd_v19motionfieldnormalization(args)
     elif args.mode in {"v19motionfieldnormalizationharden", "observedstatev19motionfieldnormalizationharden"}:
         cmd_v19motionfieldnormalizationharden(args)
+    elif args.mode in {"v19memorydensityfield", "observedstatev19memorydensityfield"}:
+        cmd_v19memorydensityfield(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
