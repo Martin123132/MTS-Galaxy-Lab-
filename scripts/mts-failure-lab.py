@@ -307,6 +307,7 @@ DEFAULT_V19_MOTION_FIELD_KERNEL_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-moti
 DEFAULT_V19_MOTION_FIELD_NORMALIZATION_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-normalization-v1"
 DEFAULT_V19_MOTION_FIELD_NORMALIZATION_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-normalization-hardening-v1"
 DEFAULT_V19_MEMORY_DENSITY_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-memory-density-field-v1"
+DEFAULT_V19_SOURCE_RESIDUAL_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-residual-field-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -120004,6 +120005,7 @@ def v19_motion_field_normalization_specs() -> list[dict]:
 def v19_motion_field_normalization_factors(details: dict, components: dict, spec: dict) -> tuple[float, float, dict]:
     norm_type = str(spec.get("normalizationType", "fixed"))
     boundary = clamp(parse_float(details.get("sourceBoundary"), 0.0), 0.0, 1.0)
+    admissibility = clamp(parse_float(details.get("sourceAdmissibility"), 0.0), 0.0, 1.0)
     memory_band = clamp(parse_float(details.get("sourceMemoryBand"), 0.0), 0.0, 1.0)
     density_band = clamp(parse_float(details.get("sourceDensityBand"), 0.0), 0.0, 1.0)
     gas_disk = clamp(parse_float(details.get("sourceGasDiskCoupling"), 0.0), 0.0, 1.0)
@@ -120014,6 +120016,16 @@ def v19_motion_field_normalization_factors(details: dict, components: dict, spec
         sink_weight = parse_float(spec.get("memoryBandSinkWeight"), 0.25)
         add_norm = 1.0 + add_weight * memory_density
         sink_norm = 1.0 + sink_weight * memory_band
+    elif norm_type == "memory-density-residual":
+        add_weight = parse_float(spec.get("memoryDensityAddWeight"), 1.50)
+        boundary_weight = parse_float(spec.get("boundaryResidualWeight"), 0.0)
+        gas_disk_weight = parse_float(spec.get("gasDiskResidualWeight"), 0.0)
+        density_weight = parse_float(spec.get("densityResidualWeight"), 0.0)
+        admissibility_weight = parse_float(spec.get("admissibilityResidualWeight"), 0.0)
+        sink_memory_weight = parse_float(spec.get("memoryBandSinkWeight"), 0.25)
+        sink_boundary_weight = parse_float(spec.get("sinkBoundaryWeight"), 0.0)
+        add_norm = 1.0 + add_weight * memory_density + boundary_weight * boundary + gas_disk_weight * gas_disk + density_weight * density_band + admissibility_weight * admissibility
+        sink_norm = 1.0 + sink_memory_weight * memory_band + sink_boundary_weight * boundary
     elif norm_type == "boundary-load":
         add_norm = 1.0 + 0.65 * boundary
         sink_norm = 1.0 + 0.25 * boundary
@@ -120040,6 +120052,8 @@ def v19_motion_field_normalization_factors(details: dict, components: dict, spec
         clamp(sink_norm, 0.0, 2.25),
         {
             "sourceBoundary": boundary,
+            "sourceAdmissibility": admissibility,
+            "sourceDensityBand": density_band,
             "sourceMemoryDensity": memory_density,
             "sourceGasDiskCoupling": gas_disk,
             "sourceGapGate": gap_gate,
@@ -120913,6 +120927,333 @@ def write_v19_memory_density_field_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_source_residual_field_spec(
+    residual_id: str,
+    residual_family: str,
+    *,
+    alpha: float = 1.50,
+    eta: float = 0.25,
+    boundary_weight: float = 0.0,
+    gas_disk_weight: float = 0.0,
+    density_weight: float = 0.0,
+    admissibility_weight: float = 0.0,
+    sink_boundary_weight: float = 0.0,
+) -> dict:
+    return {
+        "normalizationId": residual_id,
+        "normalizationFamily": residual_family,
+        "description": "Memory-density source normalization plus one residual term.",
+        "normalizationType": "memory-density-residual",
+        "betaAdd": 1.0,
+        "betaSink": 2.0,
+        "memoryDensityAddWeight": alpha,
+        "memoryBandSinkWeight": eta,
+        "boundaryResidualWeight": boundary_weight,
+        "gasDiskResidualWeight": gas_disk_weight,
+        "densityResidualWeight": density_weight,
+        "admissibilityResidualWeight": admissibility_weight,
+        "sinkBoundaryWeight": sink_boundary_weight,
+        "equation": f"N_add = 1 + {alpha:.3f}*M_density + {boundary_weight:.3f}*B_gas + {gas_disk_weight:.3f}*G_disk + {density_weight:.3f}*densityBand + {admissibility_weight:.3f}*A_obs; N_sink = 1 + {eta:.3f}*memoryBand + {sink_boundary_weight:.3f}*B_gas",
+    }
+
+
+def v19_source_residual_field_specs() -> list[dict]:
+    specs = [v19_source_residual_field_spec("memory-density-core-a1.50", "memory-density-core")]
+    for weight in [0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50]:
+        specs.append(
+            v19_source_residual_field_spec(
+                f"physical-boundary-w{weight:.2f}",
+                "physical-boundary",
+                boundary_weight=weight,
+                sink_boundary_weight=0.25,
+            )
+        )
+        specs.append(
+            v19_source_residual_field_spec(
+                f"physical-gasdisk-w{weight:.2f}",
+                "physical-gasdisk",
+                gas_disk_weight=weight,
+            )
+        )
+        specs.append(
+            v19_source_residual_field_spec(
+                f"provenance-density-w{weight:.2f}",
+                "provenance-density",
+                density_weight=weight,
+            )
+        )
+        specs.append(
+            v19_source_residual_field_spec(
+                f"provenance-admissibility-w{weight:.2f}",
+                "provenance-admissibility",
+                admissibility_weight=weight,
+            )
+        )
+    for boundary_weight in [0.10, 0.20, 0.30]:
+        for gas_disk_weight in [0.10, 0.20, 0.30]:
+            specs.append(
+                v19_source_residual_field_spec(
+                    f"physical-boundary-gasdisk-b{boundary_weight:.2f}-g{gas_disk_weight:.2f}",
+                    "physical-boundary-gasdisk",
+                    boundary_weight=boundary_weight,
+                    gas_disk_weight=gas_disk_weight,
+                    sink_boundary_weight=0.25,
+                )
+            )
+    return specs
+
+
+def v19_source_residual_field_leave_one_out(scored: list[tuple[dict, dict, list[dict]]]) -> list[dict]:
+    reference_cases = scored[0][2] if scored else []
+    heldout_targets = v19_motion_field_normalization_additive_targets(reference_cases)
+    rows: list[dict] = []
+    for heldout in heldout_targets:
+        ranked = []
+        for spec, full_metric, cases in scored:
+            train_metric = v19_motion_field_normalization_training_metric(cases, heldout)
+            ranked.append((spec, full_metric, cases, train_metric))
+        selected_spec, selected_full, selected_cases, selected_train = max(
+            ranked,
+            key=lambda item: (
+                item[3]["trainProtectedFalse"] == 0,
+                -parse_float(item[3]["trainProtectedActiveRegressionKmS"], math.inf),
+                parse_float(item[3]["trainAdditiveRecall"], 0.0),
+                parse_float(item[3]["trainTargetGainKmS"], -math.inf),
+                item[0]["normalizationFamily"].startswith("physical"),
+                -sum(
+                    abs(parse_float(item[0].get(field), 0.0))
+                    for field in ["boundaryResidualWeight", "gasDiskResidualWeight", "densityResidualWeight", "admissibilityResidualWeight"]
+                ),
+            ),
+        )
+        heldout_row = next(row for row in selected_cases if row["galaxy"] == heldout)
+        rows.append(
+            {
+                "heldoutGalaxy": heldout,
+                "selectedNormalization": selected_spec["normalizationId"],
+                "selectedFamily": selected_spec["normalizationFamily"],
+                "trainTargetCount": selected_train["trainTargetCount"],
+                "trainAdditiveRecall": selected_train["trainAdditiveRecall"],
+                "trainTargetGainKmS": selected_train["trainTargetGainKmS"],
+                "trainProtectedFalse": selected_train["trainProtectedFalse"],
+                "trainProtectedActiveRegressionKmS": selected_train["trainProtectedActiveRegressionKmS"],
+                "heldoutHit": parse_float(heldout_row.get("addActivation"), 0.0) >= 0.05,
+                "heldoutGainKmS": heldout_row.get("candidateGainOverHierarchyKmS"),
+                "heldoutRegressionKmS": max(0.0, parse_float(heldout_row.get("candidateMinusHierarchyKmS"), 0.0)),
+                "selectedFullTargetGainKmS": selected_full["targetMeanGainOverHierarchyKmS"],
+                "selectedFullProtectedFalse": selected_full["protectedFalseReleaseCount"],
+            }
+        )
+    return rows
+
+
+def write_v19_source_residual_field_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_source_residual_field"
+    scored: list[tuple[dict, dict, list[dict]]] = []
+    shape_by_id: dict[str, list[dict]] = {}
+    for spec in v19_source_residual_field_specs():
+        metric, cases, shape_rows = v19_motion_field_normalization_score_spec(spec)
+        for field in ["memoryDensityAddWeight", "memoryBandSinkWeight", "boundaryResidualWeight", "gasDiskResidualWeight", "densityResidualWeight", "admissibilityResidualWeight", "sinkBoundaryWeight"]:
+            metric[field] = spec.get(field, "")
+        scored.append((spec, metric, cases))
+        shape_by_id[spec["normalizationId"]] = shape_rows
+    core_spec, core_metric, _core_cases = next(item for item in scored if item[0]["normalizationId"] == "memory-density-core-a1.50")
+    best_spec, best_metric, best_cases = max(
+        scored,
+        key=lambda item: (
+            int(item[1]["protectedFalseReleaseCount"]) == 0,
+            -parse_float(item[1]["protectedActiveMaxRegressionKmS"], math.inf),
+            parse_float(item[1]["additiveTargetRecall"], 0.0),
+            parse_float(item[1]["targetMeanGainOverHierarchyKmS"], -math.inf),
+            item[0]["normalizationFamily"].startswith("physical"),
+        ),
+    )
+    physics_rows = [item for item in scored if item[0]["normalizationFamily"].startswith("physical")]
+    provenance_rows = [item for item in scored if item[0]["normalizationFamily"].startswith("provenance")]
+    best_physics_spec, best_physics_metric, _best_physics_cases = max(
+        physics_rows,
+        key=lambda item: (
+            int(item[1]["protectedFalseReleaseCount"]) == 0,
+            -parse_float(item[1]["protectedActiveMaxRegressionKmS"], math.inf),
+            parse_float(item[1]["additiveTargetRecall"], 0.0),
+            parse_float(item[1]["targetMeanGainOverHierarchyKmS"], -math.inf),
+        ),
+    )
+    best_provenance_spec, best_provenance_metric, _best_provenance_cases = max(
+        provenance_rows,
+        key=lambda item: (
+            int(item[1]["protectedFalseReleaseCount"]) == 0,
+            -parse_float(item[1]["protectedActiveMaxRegressionKmS"], math.inf),
+            parse_float(item[1]["additiveTargetRecall"], 0.0),
+            parse_float(item[1]["targetMeanGainOverHierarchyKmS"], -math.inf),
+        ),
+    )
+    combined_spec = next(spec for spec in v19_motion_field_normalization_specs() if spec["normalizationId"] == "combined-source-strength")
+    combined_metric, _combined_cases, _combined_shape = v19_motion_field_normalization_score_spec(combined_spec)
+    loo_rows = v19_source_residual_field_leave_one_out(scored)
+    null_rows = v19_motion_field_normalization_null_controls(best_spec, best_metric)
+    safe_null_rows = [row for row in null_rows if not parse_bool(row.get("protectedUnsafe"))]
+    null_p95 = v19_quantile([parse_float(row.get("targetGainKmS"), math.nan) for row in safe_null_rows], 0.95)
+    null_margin = parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0) - null_p95
+    loo_hit_fraction = safe_mean(1.0 if parse_bool(row.get("heldoutHit")) else 0.0 for row in loo_rows)
+    loo_positive_fraction = safe_mean(1.0 if parse_float(row.get("heldoutGainKmS"), -math.inf) > 0.0 else 0.0 for row in loo_rows)
+    loo_min_gain = min([parse_float(row.get("heldoutGainKmS"), math.inf) for row in loo_rows] or [math.nan])
+    loo_selected_counts: dict[str, int] = {}
+    for row in loo_rows:
+        family = str(row.get("selectedFamily", ""))
+        loo_selected_counts[family] = loo_selected_counts.get(family, 0) + 1
+    residual_gain = parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0) - parse_float(core_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+    physics_over_provenance = parse_float(best_physics_metric["targetMeanGainOverHierarchyKmS"], 0.0) - parse_float(best_provenance_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+    best_over_combined = parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0) - parse_float(combined_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+    if (
+        best_spec["normalizationFamily"].startswith("physical")
+        and int(best_metric["protectedFalseReleaseCount"]) == 0
+        and parse_float(best_metric["protectedActiveMaxRegressionKmS"], math.inf) <= 0.25
+        and residual_gain > 0.10
+        and physics_over_provenance >= 0.05
+        and loo_positive_fraction >= 1.0
+        and null_margin >= 1.0
+    ):
+        verdict = "physical boundary residual favored"
+    elif (
+        best_spec["normalizationFamily"].startswith("provenance")
+        and int(best_metric["protectedFalseReleaseCount"]) == 0
+        and residual_gain > 0.10
+        and -physics_over_provenance >= 0.05
+        and loo_positive_fraction >= 1.0
+    ):
+        verdict = "residual likely provenance-driven"
+    elif residual_gain > 0.0 and int(best_metric["protectedFalseReleaseCount"]) == 0:
+        verdict = "residual mixed or too small to classify"
+    else:
+        verdict = "memory-density core remains sufficient"
+    score_rows = []
+    for spec, metric, _cases in scored:
+        row = dict(metric)
+        row["residualGainOverCoreKmS"] = parse_float(metric["targetMeanGainOverHierarchyKmS"], 0.0) - parse_float(core_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+        score_rows.append(row)
+    comparison_rows = [
+        {"role": "memory-density-core", "normalizationId": core_spec["normalizationId"], **core_metric},
+        {"role": "best-physical", "normalizationId": best_physics_spec["normalizationId"], **best_physics_metric},
+        {"role": "best-provenance", "normalizationId": best_provenance_spec["normalizationId"], **best_provenance_metric},
+        {"role": "best-overall", "normalizationId": best_spec["normalizationId"], **best_metric},
+        {"role": "previous-blended", "normalizationId": combined_spec["normalizationId"], **combined_metric},
+    ]
+    formula = {
+        "candidateId": "mts-v19-source-residual-field-v1",
+        "status": verdict,
+        "fieldEquationSketch": "Delta S_Xi(r) = [N_core(M_density) + N_residual(B_gas,G_disk,densityBand,A_obs)] A_source S0 G - sink",
+        "bestSpec": best_spec,
+        "coreMetric": core_metric,
+        "bestMetric": best_metric,
+        "bestPhysicsMetric": best_physics_metric,
+        "bestProvenanceMetric": best_provenance_metric,
+        "previousBlendedMetric": combined_metric,
+        "residualGainOverCoreKmS": residual_gain,
+        "physicsMinusProvenanceKmS": physics_over_provenance,
+        "bestMinusPreviousBlendedKmS": best_over_combined,
+        "leaveOneOut": {
+            "hitFraction": loo_hit_fraction,
+            "positiveGainFraction": loo_positive_fraction,
+            "minGainKmS": loo_min_gain,
+            "selectedFamilyCounts": loo_selected_counts,
+        },
+        "safeNullTargetGainP95": null_p95,
+        "safeNullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    report = [
+        "# MTS v19 Source Residual Field",
+        "",
+        "This mode tests what the memory-density kernel is missing: a physical boundary/gas-disk residual or a provenance/sampling residual. It does not change locked v18 or the browser.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Best Residual",
+        "",
+        f"- Best: `{best_spec['normalizationId']}`.",
+        f"- Family: `{best_spec['normalizationFamily']}`.",
+        f"- Target gain: `{fmt(best_metric['targetMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Residual gain over memory-density core: `{fmt(residual_gain)}` km/s.",
+        f"- Best physical minus best provenance: `{fmt(physics_over_provenance)}` km/s.",
+        f"- Best minus previous blended: `{fmt(best_over_combined)}` km/s.",
+        f"- Protected false releases: `{best_metric['protectedFalseReleaseCount']}`.",
+        f"- Protected active regression: `{fmt(best_metric['protectedActiveMaxRegressionKmS'])}` km/s.",
+        f"- Safe-null margin: `{fmt(null_margin)}` km/s.",
+        "",
+        "## Leave-One-Out",
+        "",
+        f"- Held-out hit fraction: `{fmt(loo_hit_fraction)}`.",
+        f"- Held-out positive-gain fraction: `{fmt(loo_positive_fraction)}`.",
+        f"- Worst held-out gain: `{fmt(loo_min_gain)}` km/s.",
+        f"- Train-only selected family counts: `{json.dumps(loo_selected_counts, sort_keys=True)}`.",
+        "",
+        "## Comparison",
+        "",
+        "| role | normalization | family | target gain | protected false | active reg |",
+        "| --- | --- | --- | ---: | ---: | ---: |",
+        f"| core | {core_spec['normalizationId']} | {core_spec['normalizationFamily']} | {fmt(core_metric['targetMeanGainOverHierarchyKmS'])} | {core_metric['protectedFalseReleaseCount']} | {fmt(core_metric['protectedActiveMaxRegressionKmS'])} |",
+        f"| best physical | {best_physics_spec['normalizationId']} | {best_physics_spec['normalizationFamily']} | {fmt(best_physics_metric['targetMeanGainOverHierarchyKmS'])} | {best_physics_metric['protectedFalseReleaseCount']} | {fmt(best_physics_metric['protectedActiveMaxRegressionKmS'])} |",
+        f"| best provenance | {best_provenance_spec['normalizationId']} | {best_provenance_spec['normalizationFamily']} | {fmt(best_provenance_metric['targetMeanGainOverHierarchyKmS'])} | {best_provenance_metric['protectedFalseReleaseCount']} | {fmt(best_provenance_metric['protectedActiveMaxRegressionKmS'])} |",
+        f"| previous blended | {combined_spec['normalizationId']} | {combined_spec['normalizationFamily']} | {fmt(combined_metric['targetMeanGainOverHierarchyKmS'])} | {combined_metric['protectedFalseReleaseCount']} | {fmt(combined_metric['protectedActiveMaxRegressionKmS'])} |",
+        "",
+        "## Physical Reading",
+        "",
+        "If the physical residual wins, the v19 source equation should keep a boundary/gas-disk term. If provenance wins, the extra gain should stay outside the field equation as source admissibility. A mixed or tiny residual means the compact memory-density kernel is the safer theoretical object.",
+        "",
+        "## Guardrails",
+        "",
+        "- No locked v18/browser law changed.",
+        "- No galaxy names, residuals, raw RMSE, NFW/MOND parameters, or weak/systematics fitting enter the formula.",
+        "",
+        verdict,
+    ]
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", best_cases)
+    write_csv(out_dir / f"{prefix}_residual_comparison.csv", comparison_rows)
+    write_csv(out_dir / f"{prefix}_support_shape.csv", shape_by_id[best_spec["normalizationId"]])
+    write_csv(out_dir / f"{prefix}_leave_one_out.csv", loo_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-source-residual-field-v1",
+        "verdict": verdict,
+        "bestSpec": best_spec,
+        "coreMetric": core_metric,
+        "bestMetric": best_metric,
+        "bestPhysicsMetric": best_physics_metric,
+        "bestProvenanceMetric": best_provenance_metric,
+        "previousBlendedMetric": combined_metric,
+        "residualGainOverCoreKmS": residual_gain,
+        "physicsMinusProvenanceKmS": physics_over_provenance,
+        "bestMinusPreviousBlendedKmS": best_over_combined,
+        "leaveOneOutHitFraction": loo_hit_fraction,
+        "leaveOneOutPositiveGainFraction": loo_positive_fraction,
+        "leaveOneOutMinGainKmS": loo_min_gain,
+        "safeNullTargetGainP95": null_p95,
+        "safeNullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_residual_comparison.csv",
+            f"{prefix}_support_shape.csv",
+            f"{prefix}_leave_one_out.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -121467,6 +121808,30 @@ def cmd_v19memorydensityfield(args: argparse.Namespace) -> None:
     print(f"Wrote memory-density field audit to {out_dir.resolve()}")
 
 
+def cmd_v19sourceresidualfield(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SOURCE_RESIDUAL_FIELD_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_source_residual_field_artifacts(out_dir)
+    metric = capsule["bestMetric"]
+    spec = capsule["bestSpec"]
+    print("MTS v19 source residual field")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={spec['normalizationId']}",
+                f"family={spec['normalizationFamily']}",
+                f"target_gain={fmt(metric['targetMeanGainOverHierarchyKmS'])}",
+                f"residual_gain={fmt(capsule['residualGainOverCoreKmS'])}",
+                f"phys_minus_prov={fmt(capsule['physicsMinusProvenanceKmS'])}",
+                f"loo_hit={fmt(capsule['leaveOneOutHitFraction'])}",
+                f"protected_false={metric['protectedFalseReleaseCount']}",
+                f"null_margin={fmt(capsule['safeNullMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote source residual field audit to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -121804,6 +122169,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19motionfieldnormalizationharden",
             "v19memorydensityfield",
             "observedstatev19memorydensityfield",
+            "v19sourceresidualfield",
+            "observedstatev19sourceresidualfield",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -122317,6 +122684,8 @@ def main() -> None:
         cmd_v19motionfieldnormalizationharden(args)
     elif args.mode in {"v19memorydensityfield", "observedstatev19memorydensityfield"}:
         cmd_v19memorydensityfield(args)
+    elif args.mode in {"v19sourceresidualfield", "observedstatev19sourceresidualfield"}:
+        cmd_v19sourceresidualfield(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
