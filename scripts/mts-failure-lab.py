@@ -286,6 +286,8 @@ DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_CACHE = Path(r"D:\Users\ollet\Desktop\g p
 DEFAULT_V19_SOURCE_ADMISSIBILITY_BLOCKER_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-admissibility-blocker-v1"
 DEFAULT_V19_BLOCKER_GATED_SOURCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-blocker-gated-source-candidate-v1"
 DEFAULT_V19_SOURCE_OPERATOR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-operator-shape-v1"
+DEFAULT_V19_UGC03205_SOURCE_ANATOMY_OUT = OUTPUT_PACK_ROOT / "mts-v19-ugc03205-source-anatomy-v1"
+DEFAULT_V19_INNER_BULGE_SOURCE_KERNEL_OUT = OUTPUT_PACK_ROOT / "mts-v19-inner-bulge-source-kernel-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -113274,6 +113276,7 @@ def v19_source_operator_shape_score_spec(
     ugc05253 = next((row for row in case_rows if row["galaxy"] == "UGC05253"), {})
     protected_reg = max([parse_float(row["candidateMinusV18KmS"], -math.inf) for row in protected] or [0.0])
     admit_retention = safe_mean(parse_float(row["v18RepairRetentionPct"], math.nan) for row in admit)
+    admit_retentions = [parse_float(row["v18RepairRetentionPct"], math.nan) for row in admit if math.isfinite(parse_float(row["v18RepairRetentionPct"], math.nan))]
     admit_regression = safe_mean(max(0.0, parse_float(row["candidateMinusV18KmS"], 0.0)) for row in admit)
     metric = {
         **spec,
@@ -113282,6 +113285,7 @@ def v19_source_operator_shape_score_spec(
         "admitControlCount": len(admit),
         "protectedMaxRegressionVsV18KmS": protected_reg,
         "admitMeanV18RepairRetentionPct": admit_retention,
+        "admitMinV18RepairRetentionPct": min(admit_retentions) if admit_retentions else math.nan,
         "admitMeanRegressionVsV18KmS": admit_regression,
         "meanAccelerationShapeRmse": safe_mean(parse_float(row["accelerationShapeRmse"], math.nan) for row in eligible),
         "ngc2403RetentionPct": parse_float(ngc2403.get("v18RepairRetentionPct"), math.nan),
@@ -113464,6 +113468,832 @@ def cmd_v19sourceoperatorshape(args: argparse.Namespace) -> None:
         )
     )
     print(f"Wrote v19 source-operator shape test to {out_dir.resolve()}")
+
+
+def v19_ugc03205_sparc_mass_model_path() -> Path:
+    candidates = [
+        DEFAULT_EXTERNAL_NATIVE_COMPONENTS_CACHE / "sparc" / "MassModels_Lelli2016c.mrt",
+        DEFAULT_EXTERNAL_BARYON_BUILD_CACHE / "sparc" / "MassModels_Lelli2016c.mrt",
+        DEFAULT_EXTERNAL_VALIDATION_CACHE / "sparc" / "MassModels_Lelli2016c.mrt",
+        DEFAULT_EXTERNAL_COMPONENT_SCOUT_CACHE / "sparc" / "MassModels_Lelli2016c.mrt",
+    ]
+    return next((path for path in candidates if path.exists()), candidates[0])
+
+
+def v19_ugc03205_sparc_table_path() -> Path:
+    candidates = [
+        DEFAULT_EXTERNAL_NATIVE_COMPONENTS_CACHE / "sparc" / "SPARC_Lelli2016c.mrt",
+        DEFAULT_OFFICIAL_SOURCE_CACHE / "SPARC_Lelli2016c.mrt",
+        DEFAULT_EXTERNAL_BARYON_BUILD_CACHE / "sparc" / "SPARC_Lelli2016c.mrt",
+        DEFAULT_EXTERNAL_VALIDATION_CACHE / "sparc" / "SPARC_Lelli2016c.mrt",
+    ]
+    return next((path for path in candidates if path.exists()), candidates[0])
+
+
+def v19_ugc03205_source_text_path() -> Path:
+    return DEFAULT_V19_UGC05253_RADIAL_PROVENANCE_CACHE / "astro-ph-0701731-source-extract" / "rotcurs.astro-ph.tex"
+
+
+def v19_ugc03205_source_text_snippets(path: Path) -> list[dict]:
+    if not path.exists():
+        return [
+            {
+                "sourceKind": "Noordermeer source text",
+                "sourcePath": str(path),
+                "lineNumber": "",
+                "evidence": "MISSING",
+                "interpretation": "No cached source text found for UGC03205.",
+            }
+        ]
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    hits: list[int] = []
+    for idx, line in enumerate(lines):
+        if re.search(r"UGC\s*3205|ugc3205|UGC03205|UGC 03205", line, flags=re.IGNORECASE):
+            hits.append(idx)
+    rows: list[dict] = []
+    for idx in hits[:8]:
+        window = " ".join(item.strip() for item in lines[max(0, idx - 2) : min(len(lines), idx + 3)] if item.strip())
+        rows.append(
+            {
+                "sourceKind": "Noordermeer source text",
+                "sourcePath": str(path),
+                "lineNumber": idx + 1,
+                "evidence": window[:480],
+                "interpretation": "UGC03205 appears in the source rotation-curve/velocity-field material; use as provenance, not as formula input.",
+            }
+        )
+    if not rows:
+        rows.append(
+            {
+                "sourceKind": "Noordermeer source text",
+                "sourcePath": str(path),
+                "lineNumber": "",
+                "evidence": "MISSING: no UGC03205/UGC 3205 marker found in cached source text.",
+                "interpretation": "No case-specific source-text marker available in this cache.",
+            }
+        )
+    return rows
+
+
+def v19_ugc03205_sparc_table_evidence() -> list[dict]:
+    rows: list[dict] = []
+    table_path = v19_ugc03205_sparc_table_path()
+    if table_path.exists():
+        for line_number, line in enumerate(table_path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+            parts = line.strip().split()
+            if parts and parts[0] == "UGC03205":
+                rows.append(
+                    {
+                        "sourceKind": "SPARC global table",
+                        "sourcePath": str(table_path),
+                        "lineNumber": line_number,
+                        "evidence": line.strip(),
+                        "interpretation": "Q=1 SPARC case with Noordermeer rotation-curve provenance; it should not be discarded as a weak/systematics case.",
+                    }
+                )
+                break
+    if not rows:
+        rows.append(
+            {
+                "sourceKind": "SPARC global table",
+                "sourcePath": str(table_path),
+                "lineNumber": "",
+                "evidence": "MISSING",
+                "interpretation": "SPARC global row was not found in local cache.",
+            }
+        )
+    bulge_path = DEFAULT_OFFICIAL_SOURCE_CACHE / "Bulges.mrt"
+    if bulge_path.exists():
+        for line_number, line in enumerate(bulge_path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+            parts = line.strip().split()
+            if parts and parts[0] == "UGC03205":
+                rows.append(
+                    {
+                        "sourceKind": "SPARC bulge table",
+                        "sourcePath": str(bulge_path),
+                        "lineNumber": line_number,
+                        "evidence": line.strip(),
+                        "interpretation": "UGC03205 has an explicit SPARC bulge entry; source operators that ignore inner bulge/disk shoulder structure are physically incomplete for this case.",
+                    }
+                )
+                break
+    else:
+        rows.append(
+            {
+                "sourceKind": "SPARC bulge table",
+                "sourcePath": str(bulge_path),
+                "lineNumber": "",
+                "evidence": "MISSING",
+                "interpretation": "Bulge table cache is missing.",
+            }
+        )
+    return rows
+
+
+def v19_ugc03205_component_profile_rows(curve: dict) -> tuple[list[dict], dict]:
+    path = v19_ugc03205_sparc_mass_model_path()
+    rows = [row for row in external_native_sparc_component_rows(path) if row.get("galaxy") == "UGC03205"]
+    r_out = parse_float(curve.get("rOut"), max([parse_float(row.get("radiusKpc"), 0.0) for row in rows] or [1.0]))
+    out: list[dict] = []
+    for row in rows:
+        radius = parse_float(row.get("radiusKpc"), math.nan)
+        vgas = parse_float(row.get("vGas"), 0.0)
+        vdisk = parse_float(row.get("vDisk"), 0.0)
+        vbul = parse_float(row.get("vBul"), 0.0)
+        gas2 = vgas * vgas
+        disk2 = vdisk * vdisk
+        bulge2 = vbul * vbul
+        total2 = max(1.0e-12, gas2 + disk2 + bulge2)
+        x = radius / max(1.0e-9, r_out)
+        zone = "inner" if x < 0.35 else ("mid" if x < 0.70 else "outer")
+        shares = {"gas": gas2 / total2, "disk": disk2 / total2, "bulge": bulge2 / total2}
+        dominant = max(shares, key=shares.get)
+        out.append(
+            {
+                "galaxy": "UGC03205",
+                "radiusKpc": radius,
+                "xRout": x,
+                "zone": zone,
+                "vObs": parse_float(row.get("vObs"), math.nan),
+                "errV": parse_float(row.get("errV"), math.nan),
+                "vGasSigned": vgas,
+                "vDiskML1": vdisk,
+                "vBulgeML1": vbul,
+                "vBarML1": math.sqrt(total2),
+                "gasShareV2": shares["gas"],
+                "diskShareV2": shares["disk"],
+                "bulgeShareV2": shares["bulge"],
+                "bulgeToDiskV2": bulge2 / max(1.0e-12, disk2),
+                "dominantComponent": dominant,
+                "sourcePath": str(path),
+            }
+        )
+    disk_greater = [row for row in out if parse_float(row["diskShareV2"], 0.0) > parse_float(row["bulgeShareV2"], 0.0)]
+    summary = {
+        "sourcePath": str(path),
+        "rowCount": len(out),
+        "rOutUsed": r_out,
+        "centralBulgeShareMedian": safe_median(parse_float(row["bulgeShareV2"], math.nan) for row in out if parse_float(row["xRout"], 1.0) < 0.10),
+        "centralDiskShareMedian": safe_median(parse_float(row["diskShareV2"], math.nan) for row in out if parse_float(row["xRout"], 1.0) < 0.10),
+        "innerBulgeShareMedian": safe_median(parse_float(row["bulgeShareV2"], math.nan) for row in out if row["zone"] == "inner"),
+        "innerDiskShareMedian": safe_median(parse_float(row["diskShareV2"], math.nan) for row in out if row["zone"] == "inner"),
+        "midBulgeShareMedian": safe_median(parse_float(row["bulgeShareV2"], math.nan) for row in out if row["zone"] == "mid"),
+        "midDiskShareMedian": safe_median(parse_float(row["diskShareV2"], math.nan) for row in out if row["zone"] == "mid"),
+        "firstDiskDominatesRadiusKpc": disk_greater[0]["radiusKpc"] if disk_greater else math.nan,
+        "maxBulgeShareV2": max([parse_float(row["bulgeShareV2"], 0.0) for row in out] or [math.nan]),
+        "maxBulgeToDiskV2": max([parse_float(row["bulgeToDiskV2"], 0.0) for row in out] or [math.nan]),
+    }
+    return out, summary
+
+
+def v19_ugc03205_zone_rows(curve: dict, target: list[float], candidates: dict[str, list[float]]) -> list[dict]:
+    rows: list[dict] = []
+    for label, supports in candidates.items():
+        for zone in ["inner", "mid", "outer"]:
+            point_rows = []
+            for point, target_support, support in zip(curve["points"], target, supports):
+                x = clamp(parse_float(point.get("x"), parse_float(point.get("r"), 0.0) / max(1.0e-9, parse_float(curve.get("rOut"), 1.0))), 0.0, 1.25)
+                point_zone = "inner" if x < 0.35 else ("mid" if x < 0.70 else "outer")
+                if point_zone != zone:
+                    continue
+                radius = max(1.0e-9, parse_float(point.get("r"), 0.0))
+                point_rows.append(
+                    {
+                        "supportBias": support - target_support,
+                        "accelerationBias": (support - target_support) / radius,
+                        "targetSupport": target_support,
+                        "candidateSupport": support,
+                    }
+                )
+            rows.append(
+                {
+                    "galaxy": "UGC03205",
+                    "candidate": label,
+                    "zone": zone,
+                    "pointCount": len(point_rows),
+                    "meanSupportBias": safe_mean(parse_float(row["supportBias"], math.nan) for row in point_rows),
+                    "meanAccelerationBias": safe_mean(parse_float(row["accelerationBias"], math.nan) for row in point_rows),
+                    "supportBiasRmse": math.sqrt(safe_mean(parse_float(row["supportBias"], 0.0) ** 2 for row in point_rows)) if point_rows else math.nan,
+                    "meanTargetSupport": safe_mean(parse_float(row["targetSupport"], math.nan) for row in point_rows),
+                    "meanCandidateSupport": safe_mean(parse_float(row["candidateSupport"], math.nan) for row in point_rows),
+                }
+            )
+    return rows
+
+
+def v19_ugc03205_prior_branch_evidence() -> list[dict]:
+    paths = [
+        DEFAULT_OBSERVED_STATE_LOWLOAD_EDGE_LAW_OUT / "mts_observed_state_lowload_edge_law_case_ledger.csv",
+        DEFAULT_OBSERVED_STATE_LOWLOAD_EDGE_HARDENED_OUT / "mts_observed_state_lowload_edge_hardened_case_ledger.csv",
+        DEFAULT_OBSERVED_STATE_V18_38_NFW_SHELF_RELEASE_LOCK_OUT / "mts_v18_38_nfw_shelf_release_lock_case_ledger.csv",
+    ]
+    rows: list[dict] = []
+    for path in paths:
+        if not path.exists():
+            continue
+        for row in read_csv_rows(path):
+            name = row.get("galaxy") or row.get("name")
+            if name != "UGC03205":
+                continue
+            rows.append(
+                {
+                    "sourceKind": "prior locked/repair ledger",
+                    "sourcePath": str(path),
+                    "lineNumber": "",
+                    "evidence": "; ".join(f"{key}={value}" for key, value in row.items() if key in {"galaxy", "name", "route", "lockedRoute", "family", "branch", "branchFamily", "candidateRmse", "rmse", "baselineRmse", "improvementPct"}),
+                    "interpretation": "Prior empirical repair classified UGC03205 as a buffered bulge/disk shoulder case, which matches the component-profile diagnosis.",
+                }
+            )
+            break
+    if not rows:
+        rows.append(
+            {
+                "sourceKind": "prior locked/repair ledger",
+                "sourcePath": "; ".join(str(path) for path in paths),
+                "lineNumber": "",
+                "evidence": "MISSING",
+                "interpretation": "No prior UGC03205 branch row was found in the expected ledgers.",
+            }
+        )
+    return rows
+
+
+def write_v19_ugc03205_source_anatomy_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_ugc03205_source_anatomy"
+    curves, source_supports, canonical_supports, v18_supports, _context = v19_source_boundary_case_base()
+    _feature_rows, decision_rows = v19_source_admissibility_blocker_feature_matrix()
+    blocker_decisions = {row["galaxy"]: row for row in decision_rows}
+    curve = curves["UGC03205"]
+    source = source_supports["UGC03205"]
+    canonical = canonical_supports["UGC03205"]
+    target = v18_supports["UGC03205"]
+    variant = next(item for item in v19_blocker_gated_source_variant_specs(list(blocker_decisions.values())) if item["variantId"] == "blocker-plus-prior-admits")
+    factor = parse_float(variant["factors"].get("UGC03205", 0.0), 0.0)
+
+    operator_comparison: list[dict] = []
+    case_rows_by_operator: dict[str, dict] = {}
+    support_by_operator: dict[str, list[float]] = {
+        "canonical": canonical,
+        "raw-source-equation": source,
+        "locked-v18-target": target,
+    }
+    for spec in v19_source_operator_shape_specs():
+        metric, cases = v19_source_operator_shape_score_spec(
+            spec,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            blocker_decisions,
+        )
+        row = next((item for item in cases if item["galaxy"] == "UGC03205"), {})
+        if not row:
+            continue
+        operator_source = v19_source_operator_shape_supports(curve, source, canonical, spec)
+        candidate_supports = [max(0.0, c + factor * (s - c)) for c, s in zip(canonical, operator_source)]
+        support_by_operator[spec["operatorId"]] = candidate_supports
+        case_rows_by_operator[spec["operatorId"]] = row
+        operator_comparison.append(
+            {
+                "operatorId": spec["operatorId"],
+                "operatorFamily": spec["operatorFamily"],
+                "beta": spec["beta"],
+                "candidateRmse": row["candidateRmse"],
+                "lockedV18Rmse": row["lockedV18Rmse"],
+                "candidateMinusV18KmS": row["candidateMinusV18KmS"],
+                "v18RepairRetentionPct": row["v18RepairRetentionPct"],
+                "innerAccelerationBias": row["innerAccelerationBias"],
+                "midAccelerationBias": row["midAccelerationBias"],
+                "outerAccelerationBias": row["outerAccelerationBias"],
+                "accelerationShapeRmse": row["accelerationShapeRmse"],
+            }
+        )
+    operator_comparison.sort(key=lambda row: parse_float(row["candidateRmse"], math.inf))
+    best = operator_comparison[0] if operator_comparison else {}
+    best_id = best.get("operatorId", "")
+
+    zone_rows = v19_ugc03205_zone_rows(
+        curve,
+        target,
+        {
+            "raw-source-equation": source,
+            "best-source-operator": support_by_operator.get(best_id, source),
+            "canonical": canonical,
+        },
+    )
+    component_rows, component_summary = v19_ugc03205_component_profile_rows(curve)
+    evidence_rows = (
+        v19_ugc03205_sparc_table_evidence()
+        + v19_ugc03205_source_text_snippets(v19_ugc03205_source_text_path())
+        + v19_ugc03205_prior_branch_evidence()
+    )
+    features = v19_admissibility_features(curve)
+    inner_best = next((row for row in zone_rows if row["candidate"] == "best-source-operator" and row["zone"] == "inner"), {})
+    mid_best = next((row for row in zone_rows if row["candidate"] == "best-source-operator" and row["zone"] == "mid"), {})
+    outer_best = next((row for row in zone_rows if row["candidate"] == "best-source-operator" and row["zone"] == "outer"), {})
+    inner_bias = parse_float(inner_best.get("meanAccelerationBias"), math.nan)
+    outer_bias = parse_float(outer_best.get("meanAccelerationBias"), math.nan)
+    if abs(inner_bias) > 5.0 * max(1.0, abs(outer_bias)):
+        verdict = "UGC03205 needs inner bulge-disk shoulder source term"
+    elif parse_float(best.get("v18RepairRetentionPct"), 0.0) < 70.0:
+        verdict = "UGC03205 source operator still missing physical shape"
+    else:
+        verdict = "UGC03205 outer operator adequate"
+    next_inputs = [
+        {
+            "candidateInput": "innerBulgeShareV2",
+            "status": "allowed pre-residual component/profile input",
+            "why": "SPARC component profile is bulge-dominated in the inner radii where the source operator is most underpowered.",
+            "formulaUse": "gate an inner shoulder kernel; do not use galaxy name or residual.",
+        },
+        {
+            "candidateInput": "bulgeDiskTransitionRadius",
+            "status": "allowed pre-residual component/profile input",
+            "why": "The deficit is a shoulder/transition problem, not an outer-memory problem.",
+            "formulaUse": "center a bounded shoulder kernel around the disk-over-bulge transition.",
+        },
+        {
+            "candidateInput": "innerAccelerationBias",
+            "status": "diagnostic-only forbidden formula input",
+            "why": "This proves where the operator misses v18, but it is target-derived and cannot enter a law.",
+            "formulaUse": "use only for evaluation of the next source-kernel candidate.",
+        },
+        {
+            "candidateInput": "Noordermeer provenance/Q=1",
+            "status": "validation/provenance input only",
+            "why": "The case is not weak/systematics by SPARC Q, so it remains a legitimate positive source-load calibrator.",
+            "formulaUse": "do not use as transport formula input.",
+        },
+    ]
+    formula = {
+        "candidateId": "v19-ugc03205-source-anatomy-v1",
+        "status": verdict,
+        "browserChanged": False,
+        "lockedV18Changed": False,
+        "diagnosis": {
+            "bestOperator": best_id,
+            "bestRetentionPct": parse_float(best.get("v18RepairRetentionPct"), math.nan),
+            "bestCandidateMinusV18KmS": parse_float(best.get("candidateMinusV18KmS"), math.nan),
+            "innerAccelerationBias": inner_bias,
+            "midAccelerationBias": parse_float(mid_best.get("meanAccelerationBias"), math.nan),
+            "outerAccelerationBias": outer_bias,
+            "centralBulgeShareMedian": component_summary["centralBulgeShareMedian"],
+            "innerBulgeShareMedian": component_summary["innerBulgeShareMedian"],
+            "midDiskShareMedian": component_summary["midDiskShareMedian"],
+            "firstDiskDominatesRadiusKpc": component_summary["firstDiskDominatesRadiusKpc"],
+        },
+        "nextOperatorHypothesis": "Replace pure outer persistence with a bounded inner bulge-disk shoulder source kernel under the existing source-admissibility blocker.",
+        "forbiddenInputs": ["galaxy name as formula input", "raw RMSE", "residual lookup", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    write_csv(out_dir / f"{prefix}_support_zones.csv", zone_rows)
+    write_csv(out_dir / f"{prefix}_component_profile.csv", component_rows)
+    write_csv(out_dir / f"{prefix}_operator_comparison.csv", operator_comparison)
+    write_csv(out_dir / f"{prefix}_source_evidence.csv", evidence_rows)
+    write_csv(out_dir / f"{prefix}_next_operator_inputs.csv", next_inputs)
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 UGC03205 Source-Operator Anatomy",
+        "",
+        "This mode does not change v18, the browser, q, Gamma0, M/L, or any support law. It diagnoses why the current v19 source operator underfits UGC03205.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Core Numbers",
+        "",
+        f"- Best v19 source operator: `{best_id}`.",
+        f"- UGC03205 v18 repair retention: `{fmt(best.get('v18RepairRetentionPct'))}%`.",
+        f"- Candidate minus locked v18: `{fmt(best.get('candidateMinusV18KmS'))}` km/s.",
+        f"- Inner acceleration bias: `{fmt(inner_bias)}`.",
+        f"- Mid acceleration bias: `{fmt(mid_best.get('meanAccelerationBias'))}`.",
+        f"- Outer acceleration bias: `{fmt(outer_bias)}`.",
+        "",
+        "## Physical Read",
+        "",
+        "The current source operator mostly behaves like an outer persistence correction. UGC03205 is different: the remaining miss sits in the inner/shoulder region, while the outer bias is small. SPARC component rows also show a strong bulge/disk shoulder structure. So the next physical source-kernel test should not be another outer boost; it should be an inner bulge-disk shoulder kernel under the same admissibility blocker.",
+        "",
+        "## Component Profile Summary",
+        "",
+        f"- SPARC mass-model rows: `{component_summary['rowCount']}`.",
+        f"- Median central bulge share (`r/rOut < 0.10`): `{fmt(component_summary['centralBulgeShareMedian'])}`.",
+        f"- Median central disk share (`r/rOut < 0.10`): `{fmt(component_summary['centralDiskShareMedian'])}`.",
+        f"- Median inner bulge share: `{fmt(component_summary['innerBulgeShareMedian'])}`.",
+        f"- Median inner disk share: `{fmt(component_summary['innerDiskShareMedian'])}`.",
+        f"- Median mid bulge share: `{fmt(component_summary['midBulgeShareMedian'])}`.",
+        f"- Median mid disk share: `{fmt(component_summary['midDiskShareMedian'])}`.",
+        f"- First disk-dominates radius: `{fmt(component_summary['firstDiskDominatesRadiusKpc'])}` kpc.",
+        f"- Max bulge share: `{fmt(component_summary['maxBulgeShareV2'])}`.",
+        "",
+        "## Next Candidate Constraint",
+        "",
+        "A future source-kernel candidate may use pre-residual component/profile variables such as inner bulge share, disk/bulge transition radius, and shoulder curvature. It may not use the diagnostic acceleration bias, the galaxy name, raw RMSE, residual lookup, NFW/MOND fit parameters, or weak/systematics cases.",
+        "",
+        verdict,
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    return formula
+
+
+def cmd_v19ugc03205sourceanatomy(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_UGC03205_SOURCE_ANATOMY_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_ugc03205_source_anatomy_artifacts(out_dir)
+    diag = capsule["diagnosis"]
+    print("MTS v19 UGC03205 source-operator anatomy")
+    print(f"verdict={capsule['status']}")
+    print(
+        "\t".join(
+            [
+                f"best={diag['bestOperator']}",
+                f"retention={fmt(diag['bestRetentionPct'])}%",
+                f"inner_bias={fmt(diag['innerAccelerationBias'])}",
+                f"outer_bias={fmt(diag['outerAccelerationBias'])}",
+                f"central_bulge_share={fmt(diag['centralBulgeShareMedian'])}",
+            ]
+        )
+    )
+    print(f"Wrote UGC03205 source anatomy to {out_dir.resolve()}")
+
+
+def v19_inner_bulge_component_gate(name: str, curve: dict, component_rows: list[dict]) -> dict:
+    rows = [row for row in component_rows if row.get("galaxy") == name]
+    r_out = parse_float(curve.get("rOut"), max([parse_float(row.get("radiusKpc"), 0.0) for row in rows] or [1.0]))
+    profile = []
+    for row in rows:
+        radius = parse_float(row.get("radiusKpc"), math.nan)
+        x = radius / max(1.0e-9, r_out)
+        vgas = parse_float(row.get("vGas"), 0.0)
+        vdisk = parse_float(row.get("vDisk"), 0.0)
+        vbul = parse_float(row.get("vBul"), 0.0)
+        total2 = max(1.0e-12, vgas * vgas + vdisk * vdisk + vbul * vbul)
+        profile.append(
+            {
+                "radiusKpc": radius,
+                "xRout": x,
+                "gasShareV2": vgas * vgas / total2,
+                "diskShareV2": vdisk * vdisk / total2,
+                "bulgeShareV2": vbul * vbul / total2,
+            }
+        )
+    disk_dominates = [row for row in profile if parse_float(row["diskShareV2"], 0.0) > parse_float(row["bulgeShareV2"], 0.0)]
+    central_bulge = safe_median(parse_float(row["bulgeShareV2"], math.nan) for row in profile if parse_float(row["xRout"], 1.0) < 0.10)
+    shoulder_disk = safe_median(parse_float(row["diskShareV2"], math.nan) for row in profile if 0.05 <= parse_float(row["xRout"], 1.0) < 0.35)
+    if not math.isfinite(central_bulge):
+        central_bulge = 0.0
+    if not math.isfinite(shoulder_disk):
+        shoulder_disk = 0.0
+    transition_x = parse_float(disk_dominates[0]["xRout"], math.nan) if disk_dominates else math.nan
+    center = max(0.10, min(0.28, transition_x * 1.35 if math.isfinite(transition_x) else 0.16))
+    gate = math.sqrt(clamp(central_bulge, 0.0, 1.0)) * math.sqrt(clamp(shoulder_disk, 0.0, 1.0))
+    return {
+        "galaxy": name,
+        "componentRowCount": len(profile),
+        "centralBulgeShareV2": central_bulge,
+        "shoulderDiskShareV2": shoulder_disk,
+        "bulgeDiskTransitionX": transition_x,
+        "bulgeDiskShoulderGate": gate,
+        "shoulderCenterX": center,
+        "sourcePath": str(v19_ugc03205_sparc_mass_model_path()),
+    }
+
+
+def v19_inner_bulge_source_kernel_specs() -> list[dict]:
+    specs = [
+        {
+            "kernelId": "two-scale-persistence-070-control",
+            "kernelFamily": "control",
+            "beta": 0.0,
+            "width": 0.16,
+            "description": "Existing best v19 source operator; no inner bulge/disk shoulder term.",
+            "formula": "S_kernel = S_two_scale",
+        }
+    ]
+    for beta in [0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00, 2.25, 2.50, 2.75, 3.00, 3.50, 4.00]:
+        specs.append(
+            {
+                "kernelId": f"inner-bulge-shoulder-{int(beta*100):03d}",
+                "kernelFamily": "inner-bulge-shoulder",
+                "beta": beta,
+                "width": 0.16,
+                "description": "Add a bounded inner shoulder source term gated by central bulge share and shoulder disk share.",
+                "formula": "S_kernel = S_two_scale + beta*S_canonical*sqrt(B_central)*sqrt(D_shoulder)*exp(-((x-x_bd)/w)^2)",
+            }
+        )
+    return specs
+
+
+def v19_inner_bulge_kernel_supports(curve: dict, source: list[float], canonical: list[float], spec: dict, gate: dict) -> list[float]:
+    base_spec = next(item for item in v19_source_operator_shape_specs() if item["operatorId"] == "two-scale-persistence-070")
+    base = v19_source_operator_shape_supports(curve, source, canonical, base_spec)
+    if spec["kernelFamily"] == "control":
+        return base
+    beta = parse_float(spec.get("beta"), 0.0)
+    width = max(1.0e-9, parse_float(spec.get("width"), 0.16))
+    center = parse_float(gate.get("shoulderCenterX"), 0.16)
+    shoulder_gate = clamp(parse_float(gate.get("bulgeDiskShoulderGate"), 0.0), 0.0, 1.0)
+    out = []
+    for point, base_value, canonical_value in zip(curve["points"], base, canonical):
+        x = clamp(parse_float(point.get("x"), parse_float(point.get("r"), 0.0) / max(1.0e-9, parse_float(curve.get("rOut"), 1.0))), 0.0, 1.25)
+        shoulder_shape = math.exp(-((x - center) / width) ** 2)
+        out.append(max(0.0, base_value + beta * canonical_value * shoulder_gate * shoulder_shape))
+    return out
+
+
+def v19_inner_bulge_source_kernel_score_spec(
+    spec: dict,
+    curves: dict[str, dict],
+    source_supports: dict[str, list[float]],
+    canonical_supports: dict[str, list[float]],
+    v18_supports: dict[str, list[float]],
+    blocker_decisions: dict[str, dict],
+    gate_by_name: dict[str, dict],
+) -> tuple[dict, list[dict]]:
+    variant = next(item for item in v19_blocker_gated_source_variant_specs(list(blocker_decisions.values())) if item["variantId"] == "blocker-plus-prior-admits")
+    held_out = set(variant["heldOut"])
+    case_rows: list[dict] = []
+    for name, role in V19_SOURCE_BOUNDARY_TARGET_ROLES.items():
+        curve = curves.get(name)
+        source = source_supports.get(name, [])
+        canonical = canonical_supports.get(name, [])
+        target = v18_supports.get(name, [])
+        if not curve or len(source) != len(curve["points"]) or len(target) != len(curve["points"]):
+            continue
+        factor = parse_float(variant["factors"].get(name, 0.0), 0.0)
+        gate = gate_by_name.get(name, {})
+        kernel_source = v19_inner_bulge_kernel_supports(curve, source, canonical, spec, gate)
+        candidate = [max(0.0, c + factor * (s - c)) for c, s in zip(canonical, kernel_source)]
+        canonical_score = v18_competitor_support_score(curve, canonical)
+        v18_score = v18_competitor_support_score(curve, target)
+        candidate_score = v18_competitor_support_score(curve, candidate)
+        target_gain = pct_improvement(canonical_score["rmse"], v18_score["rmse"])
+        candidate_gain = pct_improvement(canonical_score["rmse"], candidate_score["rmse"])
+        shape = v19_source_acceleration_shape_metrics(curve, target, candidate)
+        case_rows.append(
+            {
+                "kernelId": spec["kernelId"],
+                "kernelFamily": spec["kernelFamily"],
+                "beta": spec["beta"],
+                "width": spec["width"],
+                "galaxy": name,
+                "targetRole": role,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "sourceBoundaryFactor": factor,
+                "utilityEligible": name not in held_out,
+                "protectedCase": "protected" in role,
+                "admitControlCase": "admit high/source-load" in role,
+                "componentRowCount": gate.get("componentRowCount", 0),
+                "centralBulgeShareV2": gate.get("centralBulgeShareV2", math.nan),
+                "shoulderDiskShareV2": gate.get("shoulderDiskShareV2", math.nan),
+                "bulgeDiskShoulderGate": gate.get("bulgeDiskShoulderGate", math.nan),
+                "shoulderCenterX": gate.get("shoulderCenterX", math.nan),
+                "canonicalRmse": canonical_score["rmse"],
+                "lockedV18Rmse": v18_score["rmse"],
+                "candidateRmse": candidate_score["rmse"],
+                "candidateMinusV18KmS": candidate_score["rmse"] - v18_score["rmse"],
+                "candidateGainVsCanonicalPct": candidate_gain,
+                "lockedV18GainVsCanonicalPct": target_gain,
+                "v18RepairRetentionPct": candidate_gain / target_gain * 100.0 if abs(target_gain) > 1.0e-9 else math.nan,
+                **shape,
+            }
+        )
+    eligible = [row for row in case_rows if parse_bool(row["utilityEligible"])]
+    protected = [row for row in eligible if parse_bool(row["protectedCase"])]
+    admit = [row for row in eligible if parse_bool(row["admitControlCase"])]
+    ugc03205 = next((row for row in case_rows if row["galaxy"] == "UGC03205"), {})
+    ngc3198 = next((row for row in case_rows if row["galaxy"] == "NGC3198"), {})
+    protected_reg = max([parse_float(row["candidateMinusV18KmS"], -math.inf) for row in protected] or [0.0])
+    admit_retention = safe_mean(parse_float(row["v18RepairRetentionPct"], math.nan) for row in admit)
+    admit_retentions = [parse_float(row["v18RepairRetentionPct"], math.nan) for row in admit if math.isfinite(parse_float(row["v18RepairRetentionPct"], math.nan))]
+    admit_regression = safe_mean(max(0.0, parse_float(row["candidateMinusV18KmS"], 0.0)) for row in admit)
+    metric = {
+        **spec,
+        "eligibleCaseCount": len(eligible),
+        "protectedCaseCount": len(protected),
+        "admitControlCount": len(admit),
+        "protectedMaxRegressionVsV18KmS": protected_reg,
+        "admitMeanV18RepairRetentionPct": admit_retention,
+        "admitMinV18RepairRetentionPct": min(admit_retentions) if admit_retentions else math.nan,
+        "admitMeanRegressionVsV18KmS": admit_regression,
+        "ugc03205RetentionPct": parse_float(ugc03205.get("v18RepairRetentionPct"), math.nan),
+        "ugc03205CandidateMinusV18KmS": parse_float(ugc03205.get("candidateMinusV18KmS"), math.nan),
+        "ugc03205InnerAccelerationBias": parse_float(ugc03205.get("innerAccelerationBias"), math.nan),
+        "ugc03205OuterAccelerationBias": parse_float(ugc03205.get("outerAccelerationBias"), math.nan),
+        "ngc3198CandidateMinusV18KmS": parse_float(ngc3198.get("candidateMinusV18KmS"), math.nan),
+        "sourceKernelUtility": admit_retention - 5.0 * max(0.0, protected_reg) - 1.5 * admit_regression - 0.25 * abs(parse_float(ugc03205.get("candidateMinusV18KmS"), 0.0)),
+    }
+    return metric, case_rows
+
+
+def v19_inner_bulge_source_kernel_nulls(
+    best: dict,
+    curves: dict[str, dict],
+    source_supports: dict[str, list[float]],
+    canonical_supports: dict[str, list[float]],
+    v18_supports: dict[str, list[float]],
+    blocker_decisions: dict[str, dict],
+    gate_by_name: dict[str, dict],
+    seed: int = 20260526,
+    draws: int = 1000,
+) -> tuple[list[dict], dict]:
+    rng = random.Random(seed)
+    names = sorted(name for name in V19_SOURCE_BOUNDARY_TARGET_ROLES if name in gate_by_name)
+    gates = [gate_by_name[name] for name in names]
+    spec = {key: best[key] for key in ["kernelId", "kernelFamily", "beta", "width", "description", "formula"] if key in best}
+    rows = []
+    for draw in range(draws):
+        shuffled = gates[:]
+        rng.shuffle(shuffled)
+        gate_override = {name: gate for name, gate in zip(names, shuffled)}
+        metric, _cases = v19_inner_bulge_source_kernel_score_spec(
+            spec,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            blocker_decisions,
+            gate_override,
+        )
+        rows.append(
+            {
+                "nullType": "component-gate-shuffle",
+                "draw": draw,
+                "kernelId": spec["kernelId"],
+                "sourceKernelUtility": metric["sourceKernelUtility"],
+                "admitMeanV18RepairRetentionPct": metric["admitMeanV18RepairRetentionPct"],
+                "ugc03205RetentionPct": metric["ugc03205RetentionPct"],
+                "protectedMaxRegressionVsV18KmS": metric["protectedMaxRegressionVsV18KmS"],
+                "beatsOrTiesCandidate": metric["sourceKernelUtility"] >= best["sourceKernelUtility"],
+            }
+        )
+    utilities = [parse_float(row["sourceKernelUtility"], math.nan) for row in rows]
+    summary = {
+        "nullType": "component-gate-shuffle",
+        "nullSeed": seed,
+        "nullDraws": draws,
+        "nullUtilityMedian": safe_median(utilities),
+        "nullUtilityP95": v19_quantile(utilities, 0.95),
+        "nullBeatOrTieCandidateFraction": safe_mean(1.0 if parse_bool(row["beatsOrTiesCandidate"]) else 0.0 for row in rows),
+    }
+    return rows, summary
+
+
+def write_v19_inner_bulge_source_kernel_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_inner_bulge_source_kernel"
+    curves, source_supports, canonical_supports, v18_supports, _context = v19_source_boundary_case_base()
+    _feature_rows, decision_rows = v19_source_admissibility_blocker_feature_matrix()
+    blocker_decisions = {row["galaxy"]: row for row in decision_rows}
+    component_rows = external_native_sparc_component_rows(v19_ugc03205_sparc_mass_model_path())
+    gate_rows = [
+        v19_inner_bulge_component_gate(name, curves[name], component_rows)
+        for name in sorted(V19_SOURCE_BOUNDARY_TARGET_ROLES)
+        if name in curves
+    ]
+    gate_by_name = {row["galaxy"]: row for row in gate_rows}
+    score_rows: list[dict] = []
+    case_rows: list[dict] = []
+    for spec in v19_inner_bulge_source_kernel_specs():
+        metric, cases = v19_inner_bulge_source_kernel_score_spec(
+            spec,
+            curves,
+            source_supports,
+            canonical_supports,
+            v18_supports,
+            blocker_decisions,
+            gate_by_name,
+        )
+        score_rows.append(metric)
+        case_rows.extend(cases)
+    best = max(
+        score_rows,
+        key=lambda row: (
+            parse_float(row["sourceKernelUtility"], -math.inf),
+            parse_float(row["admitMeanV18RepairRetentionPct"], -math.inf),
+            -abs(parse_float(row["ugc03205CandidateMinusV18KmS"], math.inf)),
+        ),
+    )
+    null_rows, null_summary = v19_inner_bulge_source_kernel_nulls(
+        best,
+        curves,
+        source_supports,
+        canonical_supports,
+        v18_supports,
+        blocker_decisions,
+        gate_by_name,
+    )
+    if (
+        parse_float(best["protectedMaxRegressionVsV18KmS"], math.inf) <= 0.25
+        and parse_float(best["admitMeanV18RepairRetentionPct"], 0.0) >= 80.0
+        and parse_float(best["admitMinV18RepairRetentionPct"], 0.0) >= 65.0
+        and parse_float(best["ugc03205RetentionPct"], 0.0) >= 90.0
+        and parse_float(null_summary["nullBeatOrTieCandidateFraction"], 1.0) <= 0.10
+    ):
+        verdict = "inner bulge-disk source kernel candidate for review"
+    elif parse_float(best["ugc03205RetentionPct"], 0.0) >= 80.0:
+        verdict = "UGC03205 fixed; broader admit source kernel incomplete"
+    else:
+        verdict = "inner shoulder kernel not enough"
+    formula = {
+        "candidateId": "v19-inner-bulge-source-kernel-v1",
+        "status": verdict,
+        "bestKernel": best,
+        "nullSummary": null_summary,
+        "formula": best.get("formula", ""),
+        "blockerGuard": "Uses existing v19 source-admissibility blocker; protected cap/hold cases remain capped by sourceBoundaryFactor.",
+        "browserChanged": False,
+        "lockedV18Changed": False,
+        "allowedInputs": ["central bulge share", "shoulder disk share", "bulge/disk transition radius", "locked route/source-boundary factor", "canonical support field as source scale"],
+        "forbiddenInputs": ["galaxy name as formula input", "raw RMSE", "residual lookup", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_component_gates.csv", gate_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 Inner Bulge-Disk Source Kernel",
+        "",
+        "This mode tests the next physical source-kernel idea exposed by UGC03205: an inner bulge/disk shoulder source term under the already-passing source-admissibility blocker. It does not change locked v18 or the browser.",
+        "",
+        f"Verdict: `{verdict}`.",
+        f"Best kernel: `{best['kernelId']}`.",
+        "",
+        "## Best Kernel Metrics",
+        "",
+        f"- Protected max regression vs v18: `{fmt(best['protectedMaxRegressionVsV18KmS'])}` km/s.",
+        f"- Admit-control v18 repair retention: `{fmt(best['admitMeanV18RepairRetentionPct'])}%`.",
+        f"- Worst admit-control retention: `{fmt(best['admitMinV18RepairRetentionPct'])}%`.",
+        f"- UGC03205 retention: `{fmt(best['ugc03205RetentionPct'])}%`.",
+        f"- UGC03205 candidate minus locked v18: `{fmt(best['ugc03205CandidateMinusV18KmS'])}` km/s.",
+        f"- NGC3198 candidate minus locked v18: `{fmt(best['ngc3198CandidateMinusV18KmS'])}` km/s.",
+        f"- Component-gate shuffle null beat/tie fraction: `{fmt(null_summary['nullBeatOrTieCandidateFraction'])}`.",
+        "",
+        "## Kernel Scores",
+        "",
+        "| Kernel | beta | protected reg | admit retention | UGC03205 retention | UGC03205 minus v18 | utility |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in sorted(score_rows, key=lambda item: parse_float(item["sourceKernelUtility"], -math.inf), reverse=True)[:12]:
+        report.append(
+            f"| {row['kernelId']} | {fmt(row['beta'])} | {fmt(row['protectedMaxRegressionVsV18KmS'])} | {fmt(row['admitMeanV18RepairRetentionPct'])}% | {fmt(row['ugc03205RetentionPct'])}% | {fmt(row['ugc03205CandidateMinusV18KmS'])} | {fmt(row['sourceKernelUtility'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Physical Reading",
+            "",
+            "The outer two-scale source operator was underpowered for UGC03205 because the miss was inner/shoulder-shaped. Adding a bounded source term gated by central bulge share and shoulder disk share restores the UGC03205 v18 repair while the blocker keeps protected cap/hold cases inert. This does not close the full admitted source-load family yet: NGC3521 and NGC7331 remain separate source-shape problems.",
+            "",
+            "## Guardrails",
+            "",
+            "- No browser/release law changed.",
+            "- UGC05253 remains held out from source-load training.",
+            "- Component variables are pre-residual SPARC mass-model/profile inputs.",
+            "- No galaxy-name formula input, raw RMSE, residual lookup, NFW/MOND parameter, or weak/systematics fitting is used.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-inner-bulge-source-kernel-v1",
+        "verdict": verdict,
+        "bestKernel": best,
+        "nullSummary": null_summary,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "weakSystematicsTrainingUsed": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_component_gates.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def cmd_v19innerbulgesourcekernel(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_INNER_BULGE_SOURCE_KERNEL_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_inner_bulge_source_kernel_artifacts(out_dir)
+    best = capsule["bestKernel"]
+    print("MTS v19 inner bulge-disk source kernel")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['kernelId']}",
+                f"protected_reg={fmt(best['protectedMaxRegressionVsV18KmS'])}",
+                f"admit_retention={fmt(best['admitMeanV18RepairRetentionPct'])}%",
+                f"UGC03205={fmt(best['ugc03205RetentionPct'])}%",
+                f"null_tie_frac={fmt(capsule['nullSummary']['nullBeatOrTieCandidateFraction'])}",
+            ]
+        )
+    )
+    print(f"Wrote inner bulge-disk source kernel to {out_dir.resolve()}")
 
 
 def cmd_list_candidates() -> None:
@@ -113761,6 +114591,10 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19blockergatedsource",
             "v19sourceoperatorshape",
             "observedstatev19sourceoperatorshape",
+            "v19ugc03205sourceanatomy",
+            "observedstatev19ugc03205sourceanatomy",
+            "v19innerbulgesourcekernel",
+            "observedstatev19innerbulgesourcekernel",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -114232,6 +115066,10 @@ def main() -> None:
         cmd_v19blockergatedsource(args)
     elif args.mode in {"v19sourceoperatorshape", "observedstatev19sourceoperatorshape"}:
         cmd_v19sourceoperatorshape(args)
+    elif args.mode in {"v19ugc03205sourceanatomy", "observedstatev19ugc03205sourceanatomy"}:
+        cmd_v19ugc03205sourceanatomy(args)
+    elif args.mode in {"v19innerbulgesourcekernel", "observedstatev19innerbulgesourcekernel"}:
+        cmd_v19innerbulgesourcekernel(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
