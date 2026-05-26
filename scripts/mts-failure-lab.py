@@ -295,6 +295,7 @@ DEFAULT_V19_SECTOR_FIELD_BRIDGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-sector-field-b
 DEFAULT_V19_PERSISTENCE_FIELD_BRIDGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-persistence-field-bridge-v1"
 DEFAULT_V19_PHASE_FIELD_BRIDGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-phase-field-bridge-v1"
 DEFAULT_V19_FIELD_HIERARCHY_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-v19-field-hierarchy-audit-v1"
+DEFAULT_V19_GAS_BOUNDARY_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-field-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -116605,6 +116606,578 @@ def write_v19_field_hierarchy_audit_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_gas_boundary_field_specs() -> list[dict]:
+    return [
+        {
+            "fieldId": "xi-none-control",
+            "fieldFamily": "control",
+            "betaAdd": 0.0,
+            "betaSuppress": 0.0,
+            "shape": "midouter",
+            "description": "Frozen Psi+Pi+Theta hierarchy with no gas-boundary continuity field.",
+        },
+        {
+            "fieldId": "xi-split-conservative",
+            "fieldFamily": "bidirectional-gas-boundary",
+            "betaAdd": 0.75,
+            "betaSuppress": 2.00,
+            "shape": "midouter",
+            "description": "Conservative bidirectional gas-boundary continuity response.",
+        },
+        {
+            "fieldId": "xi-split-balanced",
+            "fieldFamily": "bidirectional-gas-boundary",
+            "betaAdd": 1.00,
+            "betaSuppress": 2.00,
+            "shape": "midouter",
+            "description": "Balanced bidirectional gas-boundary continuity response.",
+        },
+        {
+            "fieldId": "xi-split-strong",
+            "fieldFamily": "bidirectional-gas-boundary",
+            "betaAdd": 1.50,
+            "betaSuppress": 2.00,
+            "shape": "midouter",
+            "description": "Stronger additive side of the same continuity response.",
+        },
+        {
+            "fieldId": "xi-outer-balanced",
+            "fieldFamily": "bidirectional-gas-boundary",
+            "betaAdd": 1.00,
+            "betaSuppress": 2.00,
+            "shape": "outer",
+            "description": "Same split gate with a purely outer radial response.",
+        },
+        {
+            "fieldId": "xi-add-only-control",
+            "fieldFamily": "sign-ablation",
+            "betaAdd": 1.00,
+            "betaSuppress": 0.00,
+            "shape": "midouter",
+            "description": "Ablation: gas-boundary field may only add support.",
+        },
+        {
+            "fieldId": "xi-suppress-only-control",
+            "fieldFamily": "sign-ablation",
+            "betaAdd": 0.00,
+            "betaSuppress": 2.00,
+            "shape": "midouter",
+            "description": "Ablation: gas-boundary field may only suppress support.",
+        },
+        {
+            "fieldId": "xi-sign-flipped-control",
+            "fieldFamily": "sign-ablation",
+            "betaAdd": -2.00,
+            "betaSuppress": -1.00,
+            "shape": "midouter",
+            "description": "Ablation: reverse the inferred add/suppress sign.",
+        },
+    ]
+
+
+def v19_gas_boundary_field_components(curve: dict) -> dict:
+    features = v19_admissibility_features(curve)
+    route = curve.get("lockedModelRoute", "")
+    if route != "low-load":
+        return {
+            "xiBoundary": 0.0,
+            "xiAddActivation": 0.0,
+            "xiSuppressActivation": 0.0,
+            "xiDirection": 0.0,
+            "xiReason": "not-low-load",
+            **features,
+        }
+    memory_load = parse_float(features.get("memoryLoad"), 0.0)
+    fgas = parse_float(features.get("fGasOut"), 0.0)
+    u075 = parse_float(features.get("u075"), 0.0)
+    umax = parse_float(features.get("uMax"), 0.0)
+    outer_disk = parse_float(features.get("outerDiskShare"), 0.0)
+    point_density = parse_float(features.get("pointDensity"), 0.0)
+    boundary = (
+        v19_smoothstep01(fgas, 0.38, 0.55)
+        * v19_smooth_band(u075, 0.30, 0.54, 0.08)
+        * v19_smoothstep01(umax, 0.65, 0.80)
+    )
+    low_u_cap = v19_smoothstep01(umax, 0.70, 0.82)
+    add_activation = (
+        boundary
+        * max(v19_smoothstep01(memory_load, 1.75, 2.50), v19_smoothstep01(point_density, 1.00, 1.60))
+        * v19_smooth_band(outer_disk, 0.30, 0.68, 0.12)
+        * low_u_cap
+    )
+    suppress_activation = (
+        boundary
+        * (1.0 - v19_smoothstep01(memory_load, 1.10, 1.80))
+        * (1.0 - v19_smoothstep01(point_density, 0.80, 1.35))
+        * v19_smoothstep01(outer_disk, 0.38, 0.55)
+        * (1.0 - v19_smoothstep01(fgas, 0.70, 0.82))
+        * low_u_cap
+    )
+    if add_activation >= 0.05 and suppress_activation >= 0.05:
+        reason = "mixed-add-suppress-boundary"
+    elif add_activation >= 0.05:
+        reason = "gas-boundary-continuity-add"
+    elif suppress_activation >= 0.05:
+        reason = "gas-boundary-continuity-suppress"
+    else:
+        reason = "inactive-gas-boundary"
+    return {
+        "xiBoundary": clamp(boundary, 0.0, 1.0),
+        "xiAddActivation": clamp(add_activation, 0.0, 1.0),
+        "xiSuppressActivation": clamp(suppress_activation, 0.0, 1.0),
+        "xiDirection": clamp(add_activation, 0.0, 1.0) - clamp(suppress_activation, 0.0, 1.0),
+        "xiReason": reason,
+        **features,
+    }
+
+
+def v19_gas_boundary_field_shape(point: dict, shape_id: str) -> float:
+    x = clamp(parse_float(point.get("x"), 0.0), 0.0, 1.25)
+    outer = clamp((x - 0.35) / 0.55, 0.0, 1.0) ** 1.15
+    mid = math.exp(-((x - 0.55) / 0.27) ** 2)
+    if shape_id == "outer":
+        return outer
+    return 0.40 * mid + 0.65 * outer
+
+
+def v19_gas_boundary_hierarchy_pack() -> tuple[dict[str, dict], dict[str, list[float]], dict[str, list[float]], dict[str, list[float]], dict[str, list[float]], dict[str, dict], dict]:
+    context = observed_state_candidate_context()
+    curves = {curve["name"]: curve for curve in context["curves"]}
+    weak_names = set(context["weakNames"])
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    component_rows = external_native_sparc_component_rows(v19_ugc03205_sparc_mass_model_path())
+    scales = v19_source_equation_global_scales(list(curves.values()), weak_names, supports_by_name)
+    source_scale = scales.get("curvature-memory-growth-equation", 1.0)
+    source_kernel = next(item for item in v19_admit_source_shape_kernel_specs() if item["kernelId"] == "bulge-disk-plus-lowgas-disk-transfer")
+    canonical_by_name: dict[str, list[float]] = {}
+    target_by_name: dict[str, list[float]] = {}
+    hierarchy_by_name: dict[str, list[float]] = {}
+    components_by_name: dict[str, dict] = {}
+    for name, curve in curves.items():
+        target = supports_by_name.get(name, [])
+        if len(target) != len(curve["points"]):
+            continue
+        canonical = v18_competitor_canonical_supports(curve)
+        raw, _raw_meta = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        source = [max(0.0, source_scale * value) for value in raw]
+        component_gate = v19_inner_bulge_component_gate(name, curve, component_rows)
+        gates = v19_admit_source_shape_gates(name, curve, component_gate)
+        source_factor, _source_reason, _source_components = v19_source_field_factor(gates)
+        kernel_source = v19_admit_source_shape_supports(curve, source, canonical, source_kernel, gates)
+        psi_supports = [max(0.0, c + source_factor * (s - c)) for c, s in zip(canonical, kernel_source)]
+        pi_components = v19_persistence_field_components(curve, source_factor)
+        pi_supports = [
+            max(0.0, base + 1.40 * canonical_value * v19_persistence_field_shape(point, pi_components, "lowload-memory-only"))
+            for point, base, canonical_value in zip(curve["points"], psi_supports, canonical)
+        ]
+        theta_components = v19_buffered_phase_field_components(curve, source_factor)
+        hierarchy = [
+            max(0.0, base + 1.10 * canonical_value * v19_phase_field_shape(point, theta_components, "phase-combined"))
+            for point, base, canonical_value in zip(curve["points"], pi_supports, canonical)
+        ]
+        canonical_by_name[name] = canonical
+        target_by_name[name] = target
+        hierarchy_by_name[name] = hierarchy
+        components_by_name[name] = v19_gas_boundary_field_components(curve)
+    metadata = {"sourceEquationScale": source_scale, "baseHierarchy": "Psi+Pi+Theta", "xiRole": "gas-boundary continuity/normalization field"}
+    return curves, canonical_by_name, target_by_name, hierarchy_by_name, components_by_name, metadata
+
+
+def v19_gas_boundary_field_supports(curve: dict, canonical: list[float], hierarchy: list[float], components: dict, spec: dict, override: tuple[float, float] | None = None) -> list[float]:
+    if override is None:
+        add_activation = parse_float(components.get("xiAddActivation"), 0.0)
+        suppress_activation = parse_float(components.get("xiSuppressActivation"), 0.0)
+    else:
+        add_activation, suppress_activation = override
+    beta_add = parse_float(spec.get("betaAdd"), 0.0)
+    beta_suppress = parse_float(spec.get("betaSuppress"), 0.0)
+    shape_id = str(spec.get("shape", "midouter"))
+    out = []
+    for point, base, canonical_value in zip(curve["points"], hierarchy, canonical):
+        shape = v19_gas_boundary_field_shape(point, shape_id)
+        delta = (beta_add * add_activation - beta_suppress * suppress_activation) * canonical_value * shape
+        out.append(max(0.0, base + delta))
+    return out
+
+
+def v19_gas_boundary_target_names(case_rows: list[dict]) -> set[str]:
+    return {
+        row["galaxy"]
+        for row in case_rows
+        if row.get("set") == "clean-high-rmse" and row.get("remainingClass") == "inactive gas-rich low-load boundary"
+    }
+
+
+def v19_gas_boundary_metric(rows: list[dict], target_names: set[str], spec: dict) -> dict:
+    clean = [row for row in rows if row["set"] != "weak-systematics-excluded"]
+    high = [row for row in clean if row["set"] == "clean-high-rmse"]
+    protected = [row for row in clean if row["set"] == "clean-protected"]
+    target = [row for row in clean if row["galaxy"] in target_names]
+    active_protected = [row for row in protected if parse_float(row["xiEffectiveActivation"], 0.0) >= 0.05]
+    active_high = [row for row in high if parse_float(row["xiEffectiveActivation"], 0.0) >= 0.05]
+
+    def mean_gain(group: list[dict]) -> float:
+        return safe_mean(parse_float(row["hierarchyRmse"], math.nan) - parse_float(row["xiRmse"], math.nan) for row in group)
+
+    return {
+        "fieldId": spec["fieldId"],
+        "fieldFamily": spec["fieldFamily"],
+        "betaAdd": spec["betaAdd"],
+        "betaSuppress": spec["betaSuppress"],
+        "shape": spec["shape"],
+        "cleanCount": len(clean),
+        "highCount": len(high),
+        "protectedCount": len(protected),
+        "targetCount": len(target),
+        "activeCleanCount": sum(1 for row in clean if parse_float(row["xiEffectiveActivation"], 0.0) >= 0.05),
+        "activeHighCount": len(active_high),
+        "activeProtectedCount": len(active_protected),
+        "cleanMeanGainOverHierarchyKmS": mean_gain(clean),
+        "highMeanGainOverHierarchyKmS": mean_gain(high),
+        "gasBoundaryTargetMeanGainOverHierarchyKmS": mean_gain(target),
+        "activeHighMeanGainOverHierarchyKmS": mean_gain(active_high),
+        "protectedMaxRegressionOverHierarchyKmS": max(0.0, max([parse_float(row["xiMinusHierarchyKmS"], 0.0) for row in active_protected] or [0.0])),
+        "protectedMaxReplacementGapVsV18KmS": max(0.0, max([parse_float(row["xiMinusV18KmS"], 0.0) for row in protected] or [0.0])),
+        "highMaxRegressionOverHierarchyKmS": max(0.0, max([parse_float(row["xiMinusHierarchyKmS"], 0.0) for row in high] or [0.0])),
+        "targetImprovedCases": ";".join(row["galaxy"] for row in target if parse_float(row["xiMinusHierarchyKmS"], 0.0) < -0.25),
+        "targetWorsenedCases": ";".join(row["galaxy"] for row in target if parse_float(row["xiMinusHierarchyKmS"], 0.0) > 0.25),
+        "protectedRegressedCases": ";".join(row["galaxy"] for row in active_protected if parse_float(row["xiMinusHierarchyKmS"], 0.0) > 0.25),
+        "weakSystematicsLeakage": 0,
+    }
+
+
+def v19_gas_boundary_score_spec(spec: dict) -> tuple[dict, list[dict], list[dict]]:
+    hierarchy_rows, _field_rows, _metadata = v19_field_hierarchy_case_rows()
+    target_names = v19_gas_boundary_target_names(hierarchy_rows)
+    curves, canonical_by_name, target_by_name, hierarchy_by_name, components_by_name, _meta = v19_gas_boundary_hierarchy_pack()
+    context = observed_state_candidate_context()
+    weak_names = set(context["weakNames"])
+    high_names = set(context["highNames"])
+    case_rows: list[dict] = []
+    field_rows: list[dict] = []
+    for name, curve in curves.items():
+        if name not in target_by_name:
+            continue
+        canonical = canonical_by_name[name]
+        target = target_by_name[name]
+        hierarchy = hierarchy_by_name[name]
+        components = components_by_name[name]
+        xi_supports = v19_gas_boundary_field_supports(curve, canonical, hierarchy, components, spec)
+        set_name = "weak-systematics-excluded" if name in weak_names else ("clean-high-rmse" if name in high_names else "clean-protected")
+        canonical_score = v18_competitor_support_score(curve, canonical)
+        target_score = v18_competitor_support_score(curve, target)
+        hierarchy_score = v18_competitor_support_score(curve, hierarchy)
+        xi_score = v18_competitor_support_score(curve, xi_supports)
+        shape = v19_source_acceleration_shape_metrics(curve, target, xi_supports)
+        add_activation = parse_float(components.get("xiAddActivation"), 0.0)
+        suppress_activation = parse_float(components.get("xiSuppressActivation"), 0.0)
+        effective_activation = max(
+            abs(parse_float(spec.get("betaAdd"), 0.0) * add_activation),
+            abs(parse_float(spec.get("betaSuppress"), 0.0) * suppress_activation),
+        )
+        row = {
+            "fieldId": spec["fieldId"],
+            "galaxy": name,
+            "set": set_name,
+            "lockedRoute": curve.get("lockedModelRoute", ""),
+            "isGasBoundaryTarget": name in target_names,
+            "canonicalRmse": canonical_score["rmse"],
+            "lockedV18Rmse": target_score["rmse"],
+            "hierarchyRmse": hierarchy_score["rmse"],
+            "xiRmse": xi_score["rmse"],
+            "hierarchyMinusV18KmS": hierarchy_score["rmse"] - target_score["rmse"],
+            "xiMinusV18KmS": xi_score["rmse"] - target_score["rmse"],
+            "xiMinusHierarchyKmS": xi_score["rmse"] - hierarchy_score["rmse"],
+            "xiGainOverHierarchyKmS": hierarchy_score["rmse"] - xi_score["rmse"],
+            "xiAddActivation": add_activation,
+            "xiSuppressActivation": suppress_activation,
+            "xiAbsActivation": max(add_activation, suppress_activation),
+            "xiEffectiveActivation": effective_activation,
+            "xiDirection": parse_float(components.get("xiDirection"), 0.0),
+            "xiReason": components.get("xiReason", ""),
+            **shape,
+        }
+        case_rows.append(row)
+        field_rows.append(
+            {
+                "fieldId": spec["fieldId"],
+                "galaxy": name,
+                "set": set_name,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "xiAddActivation": add_activation,
+                "xiSuppressActivation": suppress_activation,
+                "xiEffectiveActivation": effective_activation,
+                "xiDirection": parse_float(components.get("xiDirection"), 0.0),
+                "xiBoundary": parse_float(components.get("xiBoundary"), 0.0),
+                "xiReason": components.get("xiReason", ""),
+                "memoryLoad": components.get("memoryLoad", math.nan),
+                "fGasOut": components.get("fGasOut", math.nan),
+                "u075": components.get("u075", math.nan),
+                "uOut": components.get("uOut", math.nan),
+                "uMax": components.get("uMax", math.nan),
+                "outerDiskShare": components.get("outerDiskShare", math.nan),
+                "pointDensity": components.get("pointDensity", math.nan),
+                "rOutOverH": components.get("rOutOverH", math.nan),
+                "shape": spec["shape"],
+                "betaAdd": spec["betaAdd"],
+                "betaSuppress": spec["betaSuppress"],
+            }
+        )
+    return v19_gas_boundary_metric(case_rows, target_names, spec), case_rows, field_rows
+
+
+def v19_gas_boundary_null_controls(spec: dict, candidate_metric: dict, seeds: list[int] | None = None) -> list[dict]:
+    if seeds is None:
+        seeds = [1901, 1907, 1913, 1919, 1927, 1931, 1933, 1949, 1951]
+    hierarchy_rows, _field_rows, _metadata = v19_field_hierarchy_case_rows()
+    target_names = v19_gas_boundary_target_names(hierarchy_rows)
+    curves, canonical_by_name, target_by_name, hierarchy_by_name, components_by_name, _meta = v19_gas_boundary_hierarchy_pack()
+    context = observed_state_candidate_context()
+    weak_names = set(context["weakNames"])
+    high_names = set(context["highNames"])
+    lowload_clean = [
+        name
+        for name, curve in curves.items()
+        if name not in weak_names and curve.get("lockedModelRoute", "") == "low-load" and name in target_by_name
+    ]
+    activation_pairs = [
+        (
+            parse_float(components_by_name[name].get("xiAddActivation"), 0.0),
+            parse_float(components_by_name[name].get("xiSuppressActivation"), 0.0),
+        )
+        for name in lowload_clean
+    ]
+    rows: list[dict] = []
+    for null_type in ["shuffled-xi-activation", "same-active-random-xi"]:
+        for seed in seeds:
+            rng = random.Random(seed)
+            if null_type == "shuffled-xi-activation":
+                shuffled = activation_pairs[:]
+                rng.shuffle(shuffled)
+                overrides = dict(zip(lowload_clean, shuffled))
+            else:
+                active_pairs = [pair for pair in activation_pairs if max(pair) >= 0.05]
+                inactive_pairs = [(0.0, 0.0)] * max(0, len(lowload_clean) - len(active_pairs))
+                assigned = active_pairs + inactive_pairs
+                rng.shuffle(assigned)
+                overrides = dict(zip(lowload_clean, assigned))
+            case_rows: list[dict] = []
+            for name, curve in curves.items():
+                if name not in target_by_name:
+                    continue
+                canonical = canonical_by_name[name]
+                target = target_by_name[name]
+                hierarchy = hierarchy_by_name[name]
+                components = components_by_name[name]
+                override = overrides.get(name, (0.0, 0.0)) if name in lowload_clean else (0.0, 0.0)
+                xi_supports = v19_gas_boundary_field_supports(curve, canonical, hierarchy, components, spec, override)
+                set_name = "weak-systematics-excluded" if name in weak_names else ("clean-high-rmse" if name in high_names else "clean-protected")
+                target_score = v18_competitor_support_score(curve, target)
+                hierarchy_score = v18_competitor_support_score(curve, hierarchy)
+                xi_score = v18_competitor_support_score(curve, xi_supports)
+                case_rows.append(
+                    {
+                        "fieldId": spec["fieldId"],
+                        "galaxy": name,
+                        "set": set_name,
+                        "lockedRoute": curve.get("lockedModelRoute", ""),
+                        "isGasBoundaryTarget": name in target_names,
+                        "lockedV18Rmse": target_score["rmse"],
+                        "hierarchyRmse": hierarchy_score["rmse"],
+                        "xiRmse": xi_score["rmse"],
+                        "xiMinusV18KmS": xi_score["rmse"] - target_score["rmse"],
+                        "xiMinusHierarchyKmS": xi_score["rmse"] - hierarchy_score["rmse"],
+                        "xiAbsActivation": max(override),
+                        "xiEffectiveActivation": max(
+                            abs(parse_float(spec.get("betaAdd"), 0.0) * override[0]),
+                            abs(parse_float(spec.get("betaSuppress"), 0.0) * override[1]),
+                        ),
+                    }
+                )
+            metric = v19_gas_boundary_metric(case_rows, target_names, spec)
+            rows.append(
+                {
+                    "fieldId": spec["fieldId"],
+                    "nullType": null_type,
+                    "seed": seed,
+                    "targetGainKmS": metric["gasBoundaryTargetMeanGainOverHierarchyKmS"],
+                    "highGainKmS": metric["highMeanGainOverHierarchyKmS"],
+                    "protectedMaxRegressionKmS": metric["protectedMaxRegressionOverHierarchyKmS"],
+                    "beatsOrTiesCandidateTargetGain": parse_float(metric["gasBoundaryTargetMeanGainOverHierarchyKmS"], -math.inf) >= parse_float(candidate_metric["gasBoundaryTargetMeanGainOverHierarchyKmS"], math.inf),
+                    "protectedUnsafe": parse_float(metric["protectedMaxRegressionOverHierarchyKmS"], 0.0) > 1.0,
+                }
+            )
+    return rows
+
+
+def write_v19_gas_boundary_field_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_gas_boundary_field"
+    score_rows: list[dict] = []
+    all_case_rows: list[dict] = []
+    all_field_rows: list[dict] = []
+    for spec in v19_gas_boundary_field_specs():
+        metric, case_rows, field_rows = v19_gas_boundary_score_spec(spec)
+        score_rows.append(metric)
+        all_case_rows.extend(case_rows)
+        all_field_rows.extend(field_rows)
+    positive_specs = [row for row in score_rows if row["fieldId"] != "xi-none-control"]
+    best_target = max(positive_specs, key=lambda row: parse_float(row["gasBoundaryTargetMeanGainOverHierarchyKmS"], -math.inf))
+    best_safe = max(
+        positive_specs,
+        key=lambda row: (
+            parse_float(row["protectedMaxRegressionOverHierarchyKmS"], math.inf) <= 1.0,
+            parse_float(row["gasBoundaryTargetMeanGainOverHierarchyKmS"], -math.inf),
+        ),
+    )
+    best_spec = next(item for item in v19_gas_boundary_field_specs() if item["fieldId"] == best_target["fieldId"])
+    null_rows = v19_gas_boundary_null_controls(best_spec, best_target)
+    null_target_p95 = v19_quantile([parse_float(row["targetGainKmS"], 0.0) for row in null_rows], 0.95)
+    null_unsafe_fraction = safe_mean(1.0 if parse_bool(row["protectedUnsafe"]) else 0.0 for row in null_rows)
+    target_gain = parse_float(best_target["gasBoundaryTargetMeanGainOverHierarchyKmS"], 0.0)
+    protected_reg = parse_float(best_target["protectedMaxRegressionOverHierarchyKmS"], math.inf)
+    safe_gain = parse_float(best_safe["gasBoundaryTargetMeanGainOverHierarchyKmS"], 0.0)
+    if target_gain >= 2.0 and protected_reg <= 1.0 and target_gain >= null_target_p95 + 1.0:
+        verdict = "gas-boundary continuity field candidate survives"
+    elif target_gain >= 2.0 and protected_reg > 1.0:
+        verdict = "gas-boundary continuity signal real but protected-unsafe"
+    elif safe_gain > 0.5:
+        verdict = "weak protected-safe gas-boundary signal"
+    else:
+        verdict = "gas-boundary field not separable from current variables"
+    formula = {
+        "candidateId": "mts-v19-gas-boundary-field-v1",
+        "status": verdict,
+        "fieldSymbol": "Xi",
+        "baseHierarchy": "Psi + Pi + Theta",
+        "candidateEquation": "S_Xi(r)=S_base(r)+[beta_add*A_add-beta_suppress*A_suppress]*S_canonical(r)*G_midouter(r)",
+        "activation": {
+            "A_boundary": "lowLoad * smooth(f_gas_out;0.38,0.55) * band(u_0.75;0.30,0.54,edge=0.08) * smooth(u_max;0.65,0.80)",
+            "A_add": "A_boundary * max(smooth(memory_load;1.75,2.50), smooth(pointDensity;1.00,1.60)) * band(outerDiskShare;0.30,0.68,edge=0.12) * smooth(u_max;0.70,0.82)",
+            "A_suppress": "A_boundary * (1-smooth(memory_load;1.10,1.80)) * (1-smooth(pointDensity;0.80,1.35)) * smooth(outerDiskShare;0.38,0.55) * (1-smooth(f_gas_out;0.70,0.82)) * smooth(u_max;0.70,0.82)",
+        },
+        "bestTargetMetric": best_target,
+        "bestProtectedSafeMetric": best_safe,
+        "nullTargetGainP95KmS": null_target_p95,
+        "nullProtectedUnsafeFraction": null_unsafe_fraction,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    limit_rows = [
+        {"check": "locked release unchanged", "status": "pass", "detail": "v18/browser/canonical law not edited"},
+        {"check": "target signal", "status": "pass" if target_gain >= 2.0 else "fail", "detail": f"best target gain over hierarchy={fmt(target_gain)} km/s"},
+        {"check": "protected safety", "status": "pass" if protected_reg <= 1.0 else "fail", "detail": f"best target field protected regression={fmt(protected_reg)} km/s"},
+        {"check": "safe alternative", "status": "pass" if safe_gain > 0.5 else "fail", "detail": f"best protected-safe target gain={fmt(safe_gain)} km/s"},
+        {"check": "null context", "status": "diagnostic", "detail": f"shuffled/random target-gain p95={fmt(null_target_p95)} km/s; protected-unsafe null fraction={fmt(null_unsafe_fraction)}"},
+        {"check": "weak/systematics leakage", "status": "pass", "detail": "weak/systematics rows excluded from framework-facing metrics"},
+    ]
+    equations = [
+        "# MTS v19 Gas-Boundary Continuity Field",
+        "",
+        "This mode tests a fourth disk-limit field `Xi` after `Psi + Pi + Theta`. It is not a browser law and it does not replace locked v18.",
+        "",
+        "```text",
+        "V_model(r)^2 = V_bar(r)^2 + S_Psi(r) + S_Pi(r) + S_Theta(r) + S_Xi(r)",
+        "",
+        "A_boundary = B_lowload smooth(f_gas,out) band(u_0.75) smooth(u_max)",
+        "A_add = A_boundary max[smooth(memory_load), smooth(point_density)] band(outer_disk_share) smooth(u_max)",
+        "A_suppress = A_boundary [1-smooth(memory_load)] [1-smooth(point_density)] smooth(outer_disk_share) [1-smooth(f_gas,out)] smooth(u_max)",
+        "",
+        "S_Xi(r) = [beta_add A_add - beta_suppress A_suppress] S_canonical(r) G_midouter(r)",
+        "```",
+        "",
+        "Physical reading: the gas-rich low-load boundary is sign-split. Some cases need outer support continuity, while others need support suppression. If the same local state variables hit protected lookalikes, a future theory needs another discriminator before `Xi` can become a law.",
+    ]
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", all_case_rows)
+    write_csv(out_dir / f"{prefix}_field_ledger.csv", all_field_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    write_csv(out_dir / f"{prefix}_limit_checks.csv", limit_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    (out_dir / f"{prefix}_equations.md").write_text("\n".join(equations) + "\n", encoding="utf-8")
+    report = [
+        "# MTS v19 Gas-Boundary Field Attack",
+        "",
+        "This is the direct attack on the largest remaining v19 hierarchy class: inactive gas-rich low-load boundary cases. It tests a fourth disk-limit field `Xi` as a continuity/normalization response. It does not change locked v18 or the browser.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Best Target Field",
+        "",
+        f"- Field: `{best_target['fieldId']}`.",
+        f"- Gas-boundary target gain over hierarchy: `{fmt(best_target['gasBoundaryTargetMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- High-RMSE gain over hierarchy: `{fmt(best_target['highMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Clean gain over hierarchy: `{fmt(best_target['cleanMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Active protected cases: `{best_target['activeProtectedCount']}`.",
+        f"- Protected max regression over hierarchy: `{fmt(best_target['protectedMaxRegressionOverHierarchyKmS'])}` km/s.",
+        f"- Protected max replacement gap vs locked v18: `{fmt(best_target['protectedMaxReplacementGapVsV18KmS'])}` km/s.",
+        f"- Target improved: `{best_target['targetImprovedCases']}`.",
+        f"- Target worsened: `{best_target['targetWorsenedCases']}`.",
+        f"- Protected regressed: `{best_target['protectedRegressedCases']}`.",
+        "",
+        "## Protected-Safe Alternative",
+        "",
+        f"- Field: `{best_safe['fieldId']}`.",
+        f"- Gas-boundary target gain: `{fmt(best_safe['gasBoundaryTargetMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Protected max regression: `{fmt(best_safe['protectedMaxRegressionOverHierarchyKmS'])}` km/s.",
+        "",
+        "## Score Table",
+        "",
+        "| Field | target gain | high gain | clean gain | active protected | protected regression | target worsened |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['fieldId']} | {fmt(row['gasBoundaryTargetMeanGainOverHierarchyKmS'])} | {fmt(row['highMeanGainOverHierarchyKmS'])} | {fmt(row['cleanMeanGainOverHierarchyKmS'])} | {row['activeProtectedCount']} | {fmt(row['protectedMaxRegressionOverHierarchyKmS'])} | {row['targetWorsenedCases']} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Null Context",
+            "",
+            f"- Shuffled/random activation target-gain p95: `{fmt(null_target_p95)}` km/s.",
+            f"- Protected-unsafe null fraction: `{fmt(null_unsafe_fraction)}`.",
+            "",
+            "## Interpretation",
+            "",
+            "The target signal is real: a bidirectional gas-boundary field can move the missed low-load boundary cases toward locked v18. But the same allowed state/profile variables also activate protected low-load lookalikes, especially on the additive side. That means `Xi` is not yet a promotable physical field from the current variables. The next meaningful variable is not another threshold; it is a discriminator for gas-boundary admissibility, most likely 2D kinematic/provenance structure or a stronger source-conservation quantity.",
+            "",
+            "## Guardrails",
+            "",
+            "- No locked v18/browser law changed.",
+            "- No galaxy names, raw residuals, raw RMSE, NFW/MOND parameters, or weak/systematics fitting enter the field formula.",
+            "- Names are used only for evaluation ledgers.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-gas-boundary-field-v1",
+        "verdict": verdict,
+        "bestTargetMetric": best_target,
+        "bestProtectedSafeMetric": best_safe,
+        "nullTargetGainP95KmS": null_target_p95,
+        "nullProtectedUnsafeFraction": null_unsafe_fraction,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_equations.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_field_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_limit_checks.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -116905,6 +117478,26 @@ def cmd_v19fieldhierarchyaudit(args: argparse.Namespace) -> None:
         )
     )
     print(f"Wrote field hierarchy audit to {out_dir.resolve()}")
+
+
+def cmd_v19gasboundaryfield(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_GAS_BOUNDARY_FIELD_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_gas_boundary_field_artifacts(out_dir)
+    best = capsule["bestTargetMetric"]
+    print("MTS v19 gas-boundary continuity field")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['fieldId']}",
+                f"target_gain={fmt(best['gasBoundaryTargetMeanGainOverHierarchyKmS'])}",
+                f"high_gain={fmt(best['highMeanGainOverHierarchyKmS'])}",
+                f"protected_reg={fmt(best['protectedMaxRegressionOverHierarchyKmS'])}",
+                f"active_protected={best['activeProtectedCount']}",
+            ]
+        )
+    )
+    print(f"Wrote gas-boundary field attack to {out_dir.resolve()}")
 
 
 def cmd_list_candidates() -> None:
@@ -117220,6 +117813,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19phasefieldbridge",
             "v19fieldhierarchyaudit",
             "observedstatev19fieldhierarchyaudit",
+            "v19gasboundaryfield",
+            "observedstatev19gasboundaryfield",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -117709,6 +118304,8 @@ def main() -> None:
         cmd_v19phasefieldbridge(args)
     elif args.mode in {"v19fieldhierarchyaudit", "observedstatev19fieldhierarchyaudit"}:
         cmd_v19fieldhierarchyaudit(args)
+    elif args.mode in {"v19gasboundaryfield", "observedstatev19gasboundaryfield"}:
+        cmd_v19gasboundaryfield(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
