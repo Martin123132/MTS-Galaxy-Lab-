@@ -299,6 +299,7 @@ DEFAULT_V19_GAS_BOUNDARY_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-fi
 DEFAULT_V19_GAS_BOUNDARY_DISCRIMINATOR_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-discriminator-v1"
 DEFAULT_V19_GAS_BOUNDARY_GATED_CANDIDATE_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-gated-candidate-v1"
 DEFAULT_V19_GAS_BOUNDARY_GATE_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-gate-hardening-v1"
+DEFAULT_V19_GAS_BOUNDARY_SMOOTH_SOURCE_OUT = OUTPUT_PACK_ROOT / "mts-v19-gas-boundary-smooth-source-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -118303,6 +118304,358 @@ def write_v19_gas_boundary_gate_hardening_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_gaussian_gate(value: float, center: float, width: float) -> float:
+    if not math.isfinite(value) or width <= 0.0:
+        return 0.0
+    return math.exp(-0.5 * ((value - center) / width) ** 2)
+
+
+def v19_gas_boundary_smooth_source_specs() -> list[dict]:
+    return [
+        {
+            "candidateId": "xi-smooth-boundary-band",
+            "candidateFamily": "smooth-additive-xi-source",
+            "description": "Smooth compact band replacing the hard uMax/pointDensity/memoryLoad cut.",
+            "betaAdd": 1.50,
+            "betaSuppress": 2.00,
+            "shape": "midouter",
+            "gateMode": "smooth-band",
+            "uMaxHi": 0.88,
+            "uMaxEdge": 0.06,
+            "pointDensityLo": 0.70,
+            "pointDensityHi": 1.90,
+            "pointDensityEdge": 0.35,
+            "memoryLoadLo": 1.70,
+            "memoryLoadHi": 2.60,
+            "memoryLoadEdge": 0.30,
+        },
+        {
+            "candidateId": "xi-smooth-compact-ridge",
+            "candidateFamily": "smooth-additive-xi-source",
+            "description": "Gaussian ridge in low-load boundary state space.",
+            "betaAdd": 1.50,
+            "betaSuppress": 2.00,
+            "shape": "midouter",
+            "gateMode": "smooth-ridge",
+            "uMaxCenter": 0.79,
+            "uMaxWidth": 0.07,
+            "pointDensityCenter": 1.28,
+            "pointDensityWidth": 0.48,
+            "memoryLoadCenter": 2.22,
+            "memoryLoadWidth": 0.42,
+        },
+        {
+            "candidateId": "xi-smooth-memory-shoulder",
+            "candidateFamily": "smooth-additive-xi-source",
+            "description": "Smooth memory shoulder that fades high-uMax and low-density lookalikes.",
+            "betaAdd": 1.50,
+            "betaSuppress": 2.00,
+            "shape": "midouter",
+            "gateMode": "smooth-shoulder",
+            "uMaxHi": 0.86,
+            "uMaxEdge": 0.05,
+            "pointDensityLo": 0.78,
+            "pointDensityHi": 2.05,
+            "pointDensityEdge": 0.30,
+            "memoryLoadLo": 1.65,
+            "memoryLoadHi": 2.72,
+            "memoryLoadEdge": 0.36,
+        },
+        {
+            "candidateId": "xi-smooth-conservative-band",
+            "candidateFamily": "smooth-additive-xi-source",
+            "description": "Lower-strength smooth compact band.",
+            "betaAdd": 1.00,
+            "betaSuppress": 2.00,
+            "shape": "midouter",
+            "gateMode": "smooth-band",
+            "uMaxHi": 0.88,
+            "uMaxEdge": 0.06,
+            "pointDensityLo": 0.70,
+            "pointDensityHi": 1.90,
+            "pointDensityEdge": 0.35,
+            "memoryLoadLo": 1.70,
+            "memoryLoadHi": 2.60,
+            "memoryLoadEdge": 0.30,
+        },
+    ]
+
+
+def v19_gas_boundary_smooth_source_gate(components: dict, spec: dict) -> float:
+    umax = parse_float(components.get("uMax"), math.nan)
+    point_density = parse_float(components.get("pointDensity"), math.nan)
+    memory_load = parse_float(components.get("memoryLoad"), math.nan)
+    if not all(math.isfinite(value) for value in [umax, point_density, memory_load]):
+        return 0.0
+    mode = str(spec.get("gateMode", "smooth-band"))
+    if mode == "smooth-ridge":
+        return clamp(
+            v19_gaussian_gate(umax, parse_float(spec["uMaxCenter"]), parse_float(spec["uMaxWidth"]))
+            * v19_gaussian_gate(point_density, parse_float(spec["pointDensityCenter"]), parse_float(spec["pointDensityWidth"]))
+            * v19_gaussian_gate(memory_load, parse_float(spec["memoryLoadCenter"]), parse_float(spec["memoryLoadWidth"])),
+            0.0,
+            1.0,
+        )
+    u_gate = 1.0 - v19_smoothstep01(umax, parse_float(spec["uMaxHi"]) - parse_float(spec["uMaxEdge"]), parse_float(spec["uMaxHi"]) + parse_float(spec["uMaxEdge"]))
+    pd_gate = v19_smooth_band(
+        point_density,
+        parse_float(spec["pointDensityLo"]),
+        parse_float(spec["pointDensityHi"]),
+        parse_float(spec["pointDensityEdge"]),
+    )
+    mem_gate = v19_smooth_band(
+        memory_load,
+        parse_float(spec["memoryLoadLo"]),
+        parse_float(spec["memoryLoadHi"]),
+        parse_float(spec["memoryLoadEdge"]),
+    )
+    if mode == "smooth-shoulder":
+        # The shoulder keeps the field continuous, but still reads as a compact
+        # source band because both memory and density must be present.
+        return clamp(u_gate * max(pd_gate * mem_gate, 0.35 * pd_gate * v19_smoothstep01(memory_load, 1.65, 2.05)), 0.0, 1.0)
+    return clamp(u_gate * pd_gate * mem_gate, 0.0, 1.0)
+
+
+def v19_gas_boundary_smooth_score_spec(spec: dict) -> tuple[dict, list[dict]]:
+    curves, _canonical, _target, _hierarchy, components_by_name, _meta = v19_gas_boundary_hierarchy_pack()
+    gate_overrides = {
+        name: v19_gas_boundary_smooth_source_gate(components_by_name[name], spec)
+        for name in curves
+        if name in components_by_name
+    }
+    base_spec = v19_gas_boundary_memory_cap_spec(
+        candidateId=spec["candidateId"],
+        candidateFamily=spec["candidateFamily"],
+        description=spec["description"],
+        betaAdd=spec["betaAdd"],
+        betaSuppress=spec["betaSuppress"],
+        shape=spec["shape"],
+        gateMode=spec["gateMode"],
+    )
+    metric, case_rows = v19_gas_boundary_gated_score_spec(base_spec, gate_overrides)
+    metric = v19_gas_boundary_hardening_metric(metric, case_rows)
+    metric.update({key: value for key, value in spec.items() if key not in metric})
+    return metric, case_rows
+
+
+def v19_gas_boundary_smooth_null_controls(best_spec: dict, candidate_metric: dict, seeds: list[int] | None = None) -> list[dict]:
+    if seeds is None:
+        seeds = [19403, 19417, 19421, 19423, 19427, 19429, 19433, 19441, 19447, 19457, 19463, 19469, 19471]
+    metric, case_rows = v19_gas_boundary_smooth_score_spec(best_spec)
+    eligible = [
+        row["galaxy"]
+        for row in case_rows
+        if row["set"] != "weak-systematics-excluded"
+        and row["lockedRoute"] == "low-load"
+        and parse_float(row["xiAddActivationRaw"], 0.0) >= 0.05
+    ]
+    active = [row["galaxy"] for row in case_rows if parse_float(row["xiAddActivationGated"], 0.0) >= 0.05]
+    active_count = len(active)
+    gate_values = [parse_float(row["addGate"], 0.0) for row in case_rows if row["galaxy"] in eligible]
+    rows: list[dict] = []
+    for null_type in ["same-active-random-smooth-source", "shuffled-smooth-source-strength"]:
+        for seed in seeds:
+            rng = random.Random(seed)
+            if null_type == "same-active-random-smooth-source":
+                chosen = set(rng.sample(eligible, min(active_count, len(eligible))))
+                overrides = {name: (1.0 if name in chosen else 0.0) for name in eligible}
+            else:
+                shuffled = gate_values[:]
+                rng.shuffle(shuffled)
+                overrides = dict(zip(eligible, shuffled))
+            base_spec = v19_gas_boundary_memory_cap_spec(
+                candidateId=f"{best_spec['candidateId']}-{null_type}-{seed}",
+                candidateFamily=best_spec["candidateFamily"],
+                description=best_spec["description"],
+                betaAdd=best_spec["betaAdd"],
+                betaSuppress=best_spec["betaSuppress"],
+                shape=best_spec["shape"],
+                gateMode=best_spec["gateMode"],
+            )
+            null_metric, null_cases = v19_gas_boundary_gated_score_spec(base_spec, overrides)
+            hard_metric = v19_gas_boundary_hardening_metric(null_metric, null_cases)
+            rows.append(
+                {
+                    "nullType": null_type,
+                    "seed": seed,
+                    "activeCount": active_count,
+                    "targetGainKmS": hard_metric["targetMeanGainOverHierarchyKmS"],
+                    "additiveTargetGainKmS": hard_metric["additiveTargetMeanGainKmS"],
+                    "additiveTargetRecall": hard_metric["additiveTargetRecall"],
+                    "protectedAddFalseReleaseCount": hard_metric["protectedAddFalseReleaseCount"],
+                    "protectedAddHitMaxRegressionKmS": hard_metric["protectedAddHitMaxRegressionKmS"],
+                    "beatsOrTiesCandidateTargetGain": parse_float(hard_metric["targetMeanGainOverHierarchyKmS"], -math.inf) >= parse_float(candidate_metric["targetMeanGainOverHierarchyKmS"], math.inf),
+                    "protectedUnsafe": parse_float(hard_metric["protectedAddHitMaxRegressionKmS"], 0.0) > 1.0 or int(hard_metric["protectedAddFalseReleaseCount"]) > 1,
+                }
+            )
+    return rows
+
+
+def v19_gas_boundary_smooth_stability_rows(best_spec: dict) -> list[dict]:
+    rows: list[dict] = []
+    if best_spec["gateMode"] == "smooth-ridge":
+        for du in [-0.015, 0.0, 0.015]:
+            for dp in [-0.12, 0.0, 0.12]:
+                for dm in [-0.12, 0.0, 0.12]:
+                    spec = best_spec.copy()
+                    spec["candidateId"] = f"{best_spec['candidateId']}-ridge-stability-u{du:+.3f}-p{dp:+.2f}-m{dm:+.2f}"
+                    spec["uMaxCenter"] = parse_float(best_spec["uMaxCenter"]) + du
+                    spec["pointDensityCenter"] = parse_float(best_spec["pointDensityCenter"]) + dp
+                    spec["memoryLoadCenter"] = parse_float(best_spec["memoryLoadCenter"]) + dm
+                    metric, _cases = v19_gas_boundary_smooth_score_spec(spec)
+                    rows.append({**metric, "uDelta": du, "pointDensityDelta": dp, "memoryLoadDelta": dm})
+        return rows
+    for du in [-0.02, 0.0, 0.02]:
+        for dp in [-0.12, 0.0, 0.12]:
+            for dm in [-0.12, 0.0, 0.12]:
+                spec = best_spec.copy()
+                spec["candidateId"] = f"{best_spec['candidateId']}-band-stability-u{du:+.2f}-p{dp:+.2f}-m{dm:+.2f}"
+                spec["uMaxHi"] = parse_float(best_spec["uMaxHi"]) + du
+                spec["pointDensityLo"] = max(0.0, parse_float(best_spec["pointDensityLo"]) + dp)
+                spec["pointDensityHi"] = max(spec["pointDensityLo"] + 0.1, parse_float(best_spec["pointDensityHi"]) + dp)
+                spec["memoryLoadLo"] = max(0.0, parse_float(best_spec["memoryLoadLo"]) + dm)
+                spec["memoryLoadHi"] = max(spec["memoryLoadLo"] + 0.1, parse_float(best_spec["memoryLoadHi"]) + dm)
+                metric, _cases = v19_gas_boundary_smooth_score_spec(spec)
+                rows.append({**metric, "uDelta": du, "pointDensityDelta": dp, "memoryLoadDelta": dm})
+    return rows
+
+
+def write_v19_gas_boundary_smooth_source_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_gas_boundary_smooth_source"
+    score_rows: list[dict] = []
+    case_rows_all: list[dict] = []
+    for spec in v19_gas_boundary_smooth_source_specs():
+        metric, case_rows = v19_gas_boundary_smooth_score_spec(spec)
+        score_rows.append(metric)
+        case_rows_all.extend(case_rows)
+    best = max(
+        score_rows,
+        key=lambda row: (
+            int(row["protectedAddFalseReleaseCount"]) == 0,
+            -parse_float(row["protectedAddHitMaxRegressionKmS"], math.inf),
+            parse_float(row["additiveTargetMeanGainKmS"], -math.inf),
+            parse_float(row["targetMeanGainOverHierarchyKmS"], -math.inf),
+        ),
+    )
+    best_spec = next(item for item in v19_gas_boundary_smooth_source_specs() if item["candidateId"] == best["candidateId"])
+    null_rows = v19_gas_boundary_smooth_null_controls(best_spec, best)
+    stability_rows = v19_gas_boundary_smooth_stability_rows(best_spec)
+    null_target_p95 = v19_quantile([parse_float(row["targetGainKmS"], math.nan) for row in null_rows], 0.95)
+    stability_pass_fraction = safe_mean(
+        1.0
+        if parse_float(row.get("additiveTargetRecall"), 0.0) >= 0.75
+        and int(row.get("protectedAddFalseReleaseCount", 999)) == 0
+        and parse_float(row.get("protectedAddHitMaxRegressionKmS"), 0.0) <= 1.0
+        else 0.0
+        for row in stability_rows
+    )
+    null_margin = parse_float(best["targetMeanGainOverHierarchyKmS"], 0.0) - null_target_p95
+    if (
+        parse_float(best["additiveTargetRecall"], 0.0) >= 0.75
+        and int(best["protectedAddFalseReleaseCount"]) == 0
+        and parse_float(best["protectedAddHitMaxRegressionKmS"], 0.0) <= 1.0
+        and stability_pass_fraction >= 0.50
+        and null_margin >= 1.0
+    ):
+        verdict = "smooth additive Xi source field candidate for hardening"
+    elif (
+        parse_float(best["additiveTargetRecall"], 0.0) >= 0.75
+        and int(best["protectedAddFalseReleaseCount"]) == 0
+        and stability_pass_fraction > 0.0
+    ):
+        verdict = "smooth source field improves anatomy but not hardening"
+    else:
+        verdict = "smooth source field does not replace fragile gate"
+    best_cases = [row for row in case_rows_all if row["candidateId"] == best["candidateId"]]
+    formula = {
+        "candidateId": "mts-v19-gas-boundary-smooth-source-v1",
+        "status": verdict,
+        "bestCandidate": best,
+        "bestSpec": best_spec,
+        "nullTargetGainP95KmS": null_target_p95,
+        "nullMarginKmS": null_margin,
+        "stabilityPassFraction": stability_pass_fraction,
+        "equation": "A_add_smooth = A_add_raw * C_Xi(u_max, point_density, memory_load); S_Xi_add = beta_add*A_add_smooth*S_canonical*G_midouter",
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows_all)
+    write_csv(out_dir / f"{prefix}_best_case_ledger.csv", best_cases)
+    write_csv(out_dir / f"{prefix}_threshold_stability.csv", stability_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    report = [
+        "# MTS v19 Gas-Boundary Smooth Source Field",
+        "",
+        "This mode replaces the fragile hard additive `Xi` gate with a smooth source-coherence scalar. It does not change locked v18 or the browser.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Best Smooth Field",
+        "",
+        f"- Candidate: `{best['candidateId']}`.",
+        f"- Additive target recall: `{fmt(best['additiveTargetRecall'])}`.",
+        f"- Additive target mean gain: `{fmt(best['additiveTargetMeanGainKmS'])}` km/s.",
+        f"- Gas-boundary target mean gain: `{fmt(best['targetMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- High-RMSE mean gain: `{fmt(best['highMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Protected additive false releases: `{best['protectedAddFalseReleaseCount']}`.",
+        f"- Protected additive-hit max regression: `{fmt(best['protectedAddHitMaxRegressionKmS'])}` km/s.",
+        f"- Stability pass fraction: `{fmt(stability_pass_fraction)}`.",
+        f"- Null target-gain p95: `{fmt(null_target_p95)}` km/s.",
+        f"- Null margin: `{fmt(null_margin)}` km/s.",
+        "",
+        "## Candidate Table",
+        "",
+        "| candidate | add recall | add target gain | target gain | high gain | protected false | protected add reg |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in score_rows:
+        report.append(
+            f"| {row['candidateId']} | {fmt(row['additiveTargetRecall'])} | {fmt(row['additiveTargetMeanGainKmS'])} | {fmt(row['targetMeanGainOverHierarchyKmS'])} | {fmt(row['highMeanGainOverHierarchyKmS'])} | {row['protectedAddFalseReleaseCount']} | {fmt(row['protectedAddHitMaxRegressionKmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "This is the attempt to turn the hard cap into a smoother source-field quantity. If it passes, the next step is leave-one/source-family hardening. If it fails, the hard memory cap remains anatomy and the missing physics is likely another source-admissibility variable rather than a smoother version of the same three coordinates.",
+            "",
+            "## Guardrails",
+            "",
+            "- No locked v18/browser law changed.",
+            "- No galaxy name, raw residual, raw RMSE, NFW/MOND parameter, or weak/systematics fitting enters the formula.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-gas-boundary-smooth-source-v1",
+        "verdict": verdict,
+        "bestCandidate": best,
+        "nullTargetGainP95KmS": null_target_p95,
+        "nullMarginKmS": null_margin,
+        "stabilityPassFraction": stability_pass_fraction,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_best_case_ledger.csv",
+            f"{prefix}_threshold_stability.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -118684,6 +119037,27 @@ def cmd_v19gasboundarygateharden(args: argparse.Namespace) -> None:
     print(f"Wrote gas-boundary gate hardening to {out_dir.resolve()}")
 
 
+def cmd_v19gasboundarysmoothsource(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_GAS_BOUNDARY_SMOOTH_SOURCE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_gas_boundary_smooth_source_artifacts(out_dir)
+    best = capsule["bestCandidate"]
+    print("MTS v19 gas-boundary smooth source field")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={best['candidateId']}",
+                f"add_recall={fmt(best['additiveTargetRecall'])}",
+                f"add_gain={fmt(best['additiveTargetMeanGainKmS'])}",
+                f"protected_false={best['protectedAddFalseReleaseCount']}",
+                f"stability={fmt(capsule['stabilityPassFraction'])}",
+                f"null_margin={fmt(capsule['nullMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote gas-boundary smooth source field to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -119005,6 +119379,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19gasboundarygatedcandidate",
             "v19gasboundarygateharden",
             "observedstatev19gasboundarygateharden",
+            "v19gasboundarysmoothsource",
+            "observedstatev19gasboundarysmoothsource",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -119502,6 +119878,8 @@ def main() -> None:
         cmd_v19gasboundarygatedcandidate(args)
     elif args.mode in {"v19gasboundarygateharden", "observedstatev19gasboundarygateharden"}:
         cmd_v19gasboundarygateharden(args)
+    elif args.mode in {"v19gasboundarysmoothsource", "observedstatev19gasboundarysmoothsource"}:
+        cmd_v19gasboundarysmoothsource(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
