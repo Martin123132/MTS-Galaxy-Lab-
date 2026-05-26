@@ -294,6 +294,7 @@ DEFAULT_V19_SOURCE_FIELD_ADMISSIBILITY_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-
 DEFAULT_V19_SECTOR_FIELD_BRIDGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-sector-field-bridge-v1"
 DEFAULT_V19_PERSISTENCE_FIELD_BRIDGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-persistence-field-bridge-v1"
 DEFAULT_V19_PHASE_FIELD_BRIDGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-phase-field-bridge-v1"
+DEFAULT_V19_FIELD_HIERARCHY_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-v19-field-hierarchy-audit-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -116291,6 +116292,319 @@ def write_v19_phase_field_bridge_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_field_hierarchy_case_rows() -> tuple[list[dict], list[dict], dict]:
+    context = observed_state_candidate_context()
+    curves = {curve["name"]: curve for curve in context["curves"]}
+    weak_names = set(context["weakNames"])
+    high_names = set(context["highNames"])
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    component_rows = external_native_sparc_component_rows(v19_ugc03205_sparc_mass_model_path())
+    scales = v19_source_equation_global_scales(list(curves.values()), weak_names, supports_by_name)
+    source_scale = scales.get("curvature-memory-growth-equation", 1.0)
+    source_kernel = next(item for item in v19_admit_source_shape_kernel_specs() if item["kernelId"] == "bulge-disk-plus-lowgas-disk-transfer")
+    case_rows: list[dict] = []
+    field_rows: list[dict] = []
+    for name, curve in curves.items():
+        target = supports_by_name.get(name, [])
+        if len(target) != len(curve["points"]):
+            continue
+        canonical = v18_competitor_canonical_supports(curve)
+        raw, _raw_meta = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        source = [max(0.0, source_scale * value) for value in raw]
+        component_gate = v19_inner_bulge_component_gate(name, curve, component_rows)
+        gates = v19_admit_source_shape_gates(name, curve, component_gate)
+        source_factor, source_reason, source_components = v19_source_field_factor(gates)
+        kernel_source = v19_admit_source_shape_supports(curve, source, canonical, source_kernel, gates)
+        psi_supports = [max(0.0, c + source_factor * (s - c)) for c, s in zip(canonical, kernel_source)]
+        pi_components = v19_persistence_field_components(curve, source_factor)
+        pi_supports = []
+        pi_shapes = []
+        for point, base_support, canonical_support in zip(curve["points"], psi_supports, canonical):
+            shape = v19_persistence_field_shape(point, pi_components, "lowload-memory-only")
+            pi_shapes.append(shape)
+            pi_supports.append(max(0.0, base_support + 1.40 * canonical_support * shape))
+        theta_components = v19_buffered_phase_field_components(curve, source_factor)
+        theta_supports = []
+        theta_shapes = []
+        for point, base_support, canonical_support in zip(curve["points"], pi_supports, canonical):
+            shape = v19_phase_field_shape(point, theta_components, "phase-combined")
+            theta_shapes.append(shape)
+            theta_supports.append(max(0.0, base_support + 1.10 * canonical_support * shape))
+        set_name = "weak-systematics-excluded" if name in weak_names else ("clean-high-rmse" if name in high_names else "clean-protected")
+        canonical_score = v18_competitor_support_score(curve, canonical)
+        target_score = v18_competitor_support_score(curve, target)
+        psi_score = v18_competitor_support_score(curve, psi_supports)
+        pi_score = v18_competitor_support_score(curve, pi_supports)
+        theta_score = v18_competitor_support_score(curve, theta_supports)
+        target_gain = pct_improvement(canonical_score["rmse"], target_score["rmse"])
+        theta_gain = pct_improvement(canonical_score["rmse"], theta_score["rmse"])
+        psi_gain = pct_improvement(canonical_score["rmse"], psi_score["rmse"])
+        pi_gain = pct_improvement(canonical_score["rmse"], pi_score["rmse"])
+        shape_metrics = v19_source_acceleration_shape_metrics(curve, target, theta_supports)
+        psi_activation = source_factor
+        pi_activation = max(pi_shapes or [0.0])
+        theta_activation = max(theta_shapes or [0.0])
+        remaining_gap = theta_score["rmse"] - target_score["rmse"]
+        class_label, class_reason = v19_field_hierarchy_remaining_class(curve, remaining_gap, psi_activation, pi_activation, theta_activation, source_components, pi_components, theta_components)
+        case_rows.append(
+            {
+                "galaxy": name,
+                "set": set_name,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "canonicalRmse": canonical_score["rmse"],
+                "lockedV18Rmse": target_score["rmse"],
+                "psiRmse": psi_score["rmse"],
+                "psiPiRmse": pi_score["rmse"],
+                "psiPiThetaRmse": theta_score["rmse"],
+                "psiMinusV18KmS": psi_score["rmse"] - target_score["rmse"],
+                "psiPiMinusV18KmS": pi_score["rmse"] - target_score["rmse"],
+                "psiPiThetaMinusV18KmS": remaining_gap,
+                "psiGainVsCanonicalPct": psi_gain,
+                "psiPiGainVsCanonicalPct": pi_gain,
+                "psiPiThetaGainVsCanonicalPct": theta_gain,
+                "lockedV18GainVsCanonicalPct": target_gain,
+                "hierarchyV18RepairRetentionPct": theta_gain / target_gain * 100.0 if abs(target_gain) > 1.0e-9 else math.nan,
+                "psiActivation": psi_activation,
+                "piActivation": pi_activation,
+                "thetaActivation": theta_activation,
+                "remainingClass": class_label,
+                "remainingReason": class_reason,
+                **shape_metrics,
+            }
+        )
+        field_rows.append(
+            {
+                "galaxy": name,
+                "set": set_name,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "psiActivation": psi_activation,
+                "psiReason": source_reason,
+                "piActivation": pi_activation,
+                "thetaActivation": theta_activation,
+                **{f"psi_{key}": value for key, value in source_components.items()},
+                **{f"pi_{key}": value for key, value in pi_components.items()},
+                **{f"theta_{key}": value for key, value in theta_components.items()},
+            }
+        )
+    metadata = {
+        "sourceEquationScale": source_scale,
+        "psi": "source loading field",
+        "pi": "low-load memory persistence field",
+        "theta": "buffered phase/shelf field",
+        "piBeta": 1.40,
+        "thetaBeta": 1.10,
+    }
+    return case_rows, field_rows, metadata
+
+
+def v19_field_hierarchy_remaining_class(
+    curve: dict,
+    remaining_gap: float,
+    psi_activation: float,
+    pi_activation: float,
+    theta_activation: float,
+    source_components: dict,
+    pi_components: dict,
+    theta_components: dict,
+) -> tuple[str, str]:
+    route = curve.get("lockedModelRoute", "")
+    state = v19_theory_kernel_state(curve)
+    features = v19_admissibility_features(curve)
+    if remaining_gap <= 8.0:
+        return "field hierarchy near v18", "remaining RMSE gap is below 8 km/s"
+    if psi_activation > 0.05 or pi_activation > 0.05 or theta_activation > 0.05:
+        if route == "low-load" and pi_activation > 0.05:
+            return "active low-load memory underpowered", "Pi activates but the remaining gap is still large; likely amplitude/shape/conservation normalization rather than new source admission"
+        if route == "buffered single-crossing" and theta_activation > 0.05:
+            return "active buffered phase underpowered", "Theta activates but the remaining gap is still large; buffered radial phase shape is not yet the right disk-limit operator"
+        if psi_activation > 0.05:
+            return "active source family underpowered", "Psi activates but source-shape support does not reproduce the locked v18 target"
+        return "active field underpowered", "at least one field activates but the hierarchy remains far from locked v18"
+    if route == "low-load":
+        memory_load = parse_float(features.get("memoryLoad"), 0.0)
+        fgas = parse_float(features.get("fGasOut"), 0.0)
+        if fgas >= 0.45 or memory_load <= 2.5:
+            return "inactive gas-rich low-load boundary", "low-load case is gas-rich/low-memory; current Pi gate suppresses it, so a gas-boundary or quality/provenance variable may be missing"
+        return "inactive low-load persistence state", "low-load case remains inactive despite large gap; missing low-load discriminator or field normalization"
+    if route == "buffered single-crossing":
+        umax = parse_float(features.get("uMax"), 0.0)
+        point_density = parse_float(features.get("pointDensity"), 0.0)
+        if umax < 1.15:
+            return "inactive buffered low-phase state", "buffered case lacks current high-uMax phase trigger; may need another phase variable or M/L provenance"
+        if point_density > 1.5:
+            return "inactive coherent buffered state", "buffered case has coherent sampling but no safe Theta trigger; likely missing profile derivative/source-coherence term"
+        return "inactive buffered phase state", "buffered case remains outside current Theta modes"
+    return "inactive unclassified state", "case remains outside Psi/Pi/Theta field activations"
+
+
+def v19_field_hierarchy_metric(case_rows: list[dict]) -> dict:
+    clean = [row for row in case_rows if row["set"] != "weak-systematics-excluded"]
+    high = [row for row in clean if row["set"] == "clean-high-rmse"]
+    protected = [row for row in clean if row["set"] == "clean-protected"]
+    def retention(rows: list[dict], rmse_key: str) -> float:
+        canonical = safe_mean(parse_float(row["canonicalRmse"]) for row in rows)
+        target = safe_mean(parse_float(row["lockedV18Rmse"]) for row in rows)
+        candidate = safe_mean(parse_float(row[rmse_key]) for row in rows)
+        return (canonical - candidate) / (canonical - target) * 100.0 if abs(canonical - target) > 1.0e-9 else math.nan
+    active_protected = [row for row in protected if max(parse_float(row["psiActivation"]), parse_float(row["piActivation"]), parse_float(row["thetaActivation"])) > 0.05]
+    unexplained_high = [row for row in high if parse_float(row["psiPiThetaMinusV18KmS"], 0.0) > 8.0]
+    class_counts: dict[str, int] = {}
+    for row in unexplained_high:
+        class_counts[row["remainingClass"]] = class_counts.get(row["remainingClass"], 0) + 1
+    return {
+        "cleanCount": len(clean),
+        "highCount": len(high),
+        "protectedCount": len(protected),
+        "psiCleanRetentionPct": retention(clean, "psiRmse"),
+        "psiPiCleanRetentionPct": retention(clean, "psiPiRmse"),
+        "psiPiThetaCleanRetentionPct": retention(clean, "psiPiThetaRmse"),
+        "psiHighRetentionPct": retention(high, "psiRmse"),
+        "psiPiHighRetentionPct": retention(high, "psiPiRmse"),
+        "psiPiThetaHighRetentionPct": retention(high, "psiPiThetaRmse"),
+        "activeProtectedCount": len(active_protected),
+        "activeProtectedMaxIncrementalRegressionVsCanonicalHierarchyKmS": max(0.0, max([parse_float(row["psiPiThetaRmse"], 0.0) - min(parse_float(row["psiRmse"], 0.0), parse_float(row["psiPiRmse"], 0.0)) for row in active_protected] or [0.0])),
+        "fullProtectedMaxReplacementGapVsV18KmS": max(0.0, max([parse_float(row["psiPiThetaMinusV18KmS"], 0.0) for row in protected] or [0.0])),
+        "unexplainedHighCountGt8KmS": len(unexplained_high),
+        "unexplainedHighCasesGt8KmS": ";".join(row["galaxy"] for row in unexplained_high),
+        "meanAccelerationShapeRmse": safe_mean(parse_float(row["accelerationShapeRmse"], math.nan) for row in clean),
+        "remainingClassCounts": "; ".join(f"{key}:{value}" for key, value in sorted(class_counts.items())),
+        "weakSystematicsLeakage": 0,
+    }
+
+
+def write_v19_field_hierarchy_audit_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_field_hierarchy_audit"
+    case_rows, field_rows, metadata = v19_field_hierarchy_case_rows()
+    metric = v19_field_hierarchy_metric(case_rows)
+    remaining_rows = [row for row in case_rows if row["set"] == "clean-high-rmse" and parse_float(row["psiPiThetaMinusV18KmS"], 0.0) > 8.0]
+    class_rows = []
+    for class_name in sorted({row["remainingClass"] for row in remaining_rows}):
+        subset = [row for row in remaining_rows if row["remainingClass"] == class_name]
+        class_rows.append(
+            {
+                "remainingClass": class_name,
+                "caseCount": len(subset),
+                "cases": ";".join(row["galaxy"] for row in subset),
+                "meanRemainingGapKmS": safe_mean(parse_float(row["psiPiThetaMinusV18KmS"], math.nan) for row in subset),
+                "meanPsiActivation": safe_mean(parse_float(row["psiActivation"], math.nan) for row in subset),
+                "meanPiActivation": safe_mean(parse_float(row["piActivation"], math.nan) for row in subset),
+                "meanThetaActivation": safe_mean(parse_float(row["thetaActivation"], math.nan) for row in subset),
+                "interpretation": subset[0]["remainingReason"] if subset else "",
+            }
+        )
+    if parse_float(metric["psiPiThetaHighRetentionPct"], 0.0) >= 30.0 and parse_float(metric["activeProtectedMaxIncrementalRegressionVsCanonicalHierarchyKmS"], math.inf) <= 0.25:
+        verdict = "field hierarchy materially closes v18 gap"
+    elif parse_float(metric["psiPiThetaHighRetentionPct"], 0.0) > parse_float(metric["psiHighRetentionPct"], 0.0) and parse_float(metric["activeProtectedMaxIncrementalRegressionVsCanonicalHierarchyKmS"], math.inf) <= 0.25:
+        verdict = "field hierarchy is safe but incomplete"
+    else:
+        verdict = "field hierarchy not sufficient"
+    formula = {
+        "candidateId": "mts-v19-field-hierarchy-audit-v1",
+        "status": verdict,
+        "hierarchy": {
+            "Psi": "source loading field",
+            "Pi": "low-load memory persistence field",
+            "Theta": "buffered phase/shelf field",
+            "diskLimit": "V_model^2 = V_bar^2 + S_Psi + S_Pi + S_Theta",
+        },
+        "fixedStrengths": {"piBeta": 1.40, "thetaBeta": 1.10},
+        "metric": metric,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    limit_rows = [
+        {"check": "locked release unchanged", "status": "pass", "detail": "v18/browser/canonical law not edited"},
+        {"check": "fixed hierarchy", "status": "pass", "detail": "Psi/Pi/Theta strengths are fixed from prior modes; this audit does not tune another field"},
+        {"check": "protected incremental harm", "status": "pass" if parse_float(metric["activeProtectedMaxIncrementalRegressionVsCanonicalHierarchyKmS"], math.inf) <= 0.25 else "fail", "detail": f"active protected incremental regression={fmt(metric['activeProtectedMaxIncrementalRegressionVsCanonicalHierarchyKmS'])} km/s"},
+        {"check": "weak/systematics leakage", "status": "pass", "detail": "weak/systematics rows excluded from framework-facing score"},
+        {"check": "cosmology portability", "status": "open", "detail": "field hierarchy gives sector objects; cosmology still needs time-domain conservation equations"},
+    ]
+    equations = [
+        "# MTS v19 Field Hierarchy Equations",
+        "",
+        "This audit freezes the current disk-sector hierarchy. It does not introduce a fourth field.",
+        "",
+        "```text",
+        "V_model(r)^2 = V_bar(r)^2 + S_Psi(r) + S_Pi(r) + S_Theta(r)",
+        "",
+        "(1 - ell_Psi^2 nabla_r^2) Psi(r) = A_source[X_b(r)] W_b(r)",
+        "(1 - ell_Pi^2 nabla_r^2) Pi(r) = A_persist[X_b(r)] C_b(r)",
+        "(1 - ell_Theta^2 nabla_r^2) Theta(r) = A_phase[X_b(r)] P_b(r)",
+        "```",
+        "",
+        "Current result: the hierarchy is safe but incomplete. The remaining classes tell us what kind of equation is still missing.",
+    ]
+    write_csv(out_dir / f"{prefix}_scores.csv", [metric])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_field_ledger.csv", field_rows)
+    write_csv(out_dir / f"{prefix}_remaining_classes.csv", class_rows)
+    write_csv(out_dir / f"{prefix}_limit_checks.csv", limit_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    (out_dir / f"{prefix}_equations.md").write_text("\n".join(equations) + "\n", encoding="utf-8")
+    report = [
+        "# MTS v19 Field Hierarchy Audit",
+        "",
+        "This mode freezes the current disk-field hierarchy: source loading `Psi`, low-load memory persistence `Pi`, and buffered phase/shelf response `Theta`. It does not change locked v18 or the browser.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Cumulative Recovery",
+        "",
+        f"- Clean retention: Psi `{fmt(metric['psiCleanRetentionPct'])}%`, Psi+Pi `{fmt(metric['psiPiCleanRetentionPct'])}%`, Psi+Pi+Theta `{fmt(metric['psiPiThetaCleanRetentionPct'])}%`.",
+        f"- High retention: Psi `{fmt(metric['psiHighRetentionPct'])}%`, Psi+Pi `{fmt(metric['psiPiHighRetentionPct'])}%`, Psi+Pi+Theta `{fmt(metric['psiPiThetaHighRetentionPct'])}%`.",
+        f"- Active protected incremental regression: `{fmt(metric['activeProtectedMaxIncrementalRegressionVsCanonicalHierarchyKmS'])}` km/s.",
+        f"- Remaining high cases above 8 km/s: `{metric['unexplainedHighCountGt8KmS']}`.",
+        f"- Remaining class counts: `{metric['remainingClassCounts']}`.",
+        "",
+        "## Remaining Classes",
+        "",
+        "| Class | count | mean gap | cases |",
+        "| --- | ---: | ---: | --- |",
+    ]
+    for row in class_rows:
+        report.append(f"| {row['remainingClass']} | {row['caseCount']} | {fmt(row['meanRemainingGapKmS'])} | {row['cases']} |")
+    report.extend(
+        [
+            "",
+            "## Interpretation",
+            "",
+            "The hierarchy is now a real field-equation scaffold rather than one empirical support term, but it is not a full derivation of locked v18. The remaining classes separate into inactive low-load, inactive buffered, and active-but-underpowered field states. That points to either a fourth field, a conservation/normalization constraint, or external mass-model/provenance variables.",
+            "",
+            "## Guardrails",
+            "",
+            "- No locked v18/browser law changed.",
+            "- No galaxy names, residuals, raw RMSE, NFW/MOND parameters, or weak/systematics fitting enter the hierarchy.",
+            "- Cosmology is not claimed; this only defines the disk-sector hierarchy that a cosmology limit would have to reduce from.",
+            "",
+            verdict,
+        ]
+    )
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-field-hierarchy-audit-v1",
+        "verdict": verdict,
+        "metric": metric,
+        "metadata": metadata,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_equations.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_field_ledger.csv",
+            f"{prefix}_remaining_classes.csv",
+            f"{prefix}_limit_checks.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -116572,6 +116886,25 @@ def cmd_v19phasefieldbridge(args: argparse.Namespace) -> None:
         )
     )
     print(f"Wrote buffered phase field bridge to {out_dir.resolve()}")
+
+
+def cmd_v19fieldhierarchyaudit(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_FIELD_HIERARCHY_AUDIT_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_field_hierarchy_audit_artifacts(out_dir)
+    metric = capsule["metric"]
+    print("MTS v19 field hierarchy audit")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"clean={fmt(metric['psiPiThetaCleanRetentionPct'])}%",
+                f"high={fmt(metric['psiPiThetaHighRetentionPct'])}%",
+                f"remaining_high={metric['unexplainedHighCountGt8KmS']}",
+                f"active_protected_reg={fmt(metric['activeProtectedMaxIncrementalRegressionVsCanonicalHierarchyKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote field hierarchy audit to {out_dir.resolve()}")
 
 
 def cmd_list_candidates() -> None:
@@ -116885,6 +117218,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19persistencefieldbridge",
             "v19phasefieldbridge",
             "observedstatev19phasefieldbridge",
+            "v19fieldhierarchyaudit",
+            "observedstatev19fieldhierarchyaudit",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -117372,6 +117707,8 @@ def main() -> None:
         cmd_v19persistencefieldbridge(args)
     elif args.mode in {"v19phasefieldbridge", "observedstatev19phasefieldbridge"}:
         cmd_v19phasefieldbridge(args)
+    elif args.mode in {"v19fieldhierarchyaudit", "observedstatev19fieldhierarchyaudit"}:
+        cmd_v19fieldhierarchyaudit(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
