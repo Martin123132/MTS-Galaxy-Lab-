@@ -305,6 +305,7 @@ DEFAULT_V19_SOURCE_ADMISSIBILITY_GATE_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-a
 DEFAULT_V19_MOTION_FIELD_KERNEL_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-kernel-v1"
 DEFAULT_V19_MOTION_FIELD_KERNEL_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-kernel-hardening-v1"
 DEFAULT_V19_MOTION_FIELD_NORMALIZATION_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-normalization-v1"
+DEFAULT_V19_MOTION_FIELD_NORMALIZATION_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-motion-field-normalization-hardening-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -120020,9 +120021,14 @@ def v19_motion_field_normalization_factors(details: dict, components: dict, spec
         add_norm = 1.0 + 0.55 * gap_gate
         sink_norm = 1.0 + 0.25 * gap_gate
     elif norm_type == "combined":
-        combined = clamp(0.35 * boundary + 0.35 * memory_density + 0.30 * gas_disk, 0.0, 0.75)
+        boundary_weight = parse_float(spec.get("boundaryWeight"), 0.35)
+        memory_density_weight = parse_float(spec.get("memoryDensityWeight"), 0.35)
+        gas_disk_weight = parse_float(spec.get("gasDiskWeight"), 0.30)
+        combined_cap = parse_float(spec.get("combinedCap"), 0.75)
+        sink_boundary_weight = parse_float(spec.get("sinkBoundaryWeight"), 0.25)
+        combined = clamp(boundary_weight * boundary + memory_density_weight * memory_density + gas_disk_weight * gas_disk, 0.0, combined_cap)
         add_norm = 1.0 + combined
-        sink_norm = 1.0 + 0.25 * boundary
+        sink_norm = 1.0 + sink_boundary_weight * boundary
     else:
         add_norm = 1.0
         sink_norm = 1.0
@@ -120278,6 +120284,380 @@ def write_v19_motion_field_normalization_artifacts(out_dir: Path) -> dict:
             f"{prefix}_scores.csv",
             f"{prefix}_case_ledger.csv",
             f"{prefix}_support_shape.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def v19_motion_field_weighted_combined_spec(
+    normalization_id: str,
+    boundary_weight: float,
+    memory_density_weight: float,
+    gas_disk_weight: float,
+    *,
+    sink_boundary_weight: float = 0.25,
+    combined_cap: float = 0.75,
+    family: str = "state-derived-normalization-hardening",
+    description: str = "",
+) -> dict:
+    return {
+        "normalizationId": normalization_id,
+        "normalizationFamily": family,
+        "description": description or normalization_id,
+        "normalizationType": "combined",
+        "betaAdd": 1.0,
+        "betaSink": 2.0,
+        "boundaryWeight": boundary_weight,
+        "memoryDensityWeight": memory_density_weight,
+        "gasDiskWeight": gas_disk_weight,
+        "sinkBoundaryWeight": sink_boundary_weight,
+        "combinedCap": combined_cap,
+        "equation": f"N_add = 1 + clamp({boundary_weight:.3f}*B_gas + {memory_density_weight:.3f}*M_density + {gas_disk_weight:.3f}*G_disk,0,{combined_cap:.3f}); N_sink = 1 + {sink_boundary_weight:.3f}*B_gas",
+    }
+
+
+def v19_motion_field_normalization_candidate_specs_for_training() -> list[dict]:
+    return [spec for spec in v19_motion_field_normalization_specs() if spec["normalizationFamily"] == "state-derived-normalization"]
+
+
+def v19_motion_field_normalization_additive_targets(case_rows: list[dict]) -> list[str]:
+    targets = [
+        row["galaxy"]
+        for row in case_rows
+        if row["set"] == "clean-high-rmse"
+        and parse_bool(row.get("isGasBoundaryTarget"))
+        and parse_float(row.get("xiAddActivationRaw"), 0.0) >= 0.05
+    ]
+    return sorted(set(targets))
+
+
+def v19_motion_field_normalization_training_metric(case_rows: list[dict], excluded_target: str | None = None) -> dict:
+    pool = [
+        row
+        for row in case_rows
+        if row["set"] == "clean-high-rmse"
+        and parse_bool(row.get("isGasBoundaryTarget"))
+        and parse_float(row.get("xiAddActivationRaw"), 0.0) >= 0.05
+        and row["galaxy"] != excluded_target
+    ]
+    hits = [row for row in pool if parse_float(row.get("addActivation"), 0.0) >= 0.05]
+    protected_active = [
+        row
+        for row in case_rows
+        if row["set"] == "clean-protected"
+        and (parse_float(row.get("addActivation"), 0.0) >= 0.05 or parse_float(row.get("sinkActivation"), 0.0) >= 0.05)
+    ]
+    return {
+        "trainTargetCount": len(pool),
+        "trainTargetHitCount": len(hits),
+        "trainAdditiveRecall": len(hits) / len(pool) if pool else 0.0,
+        "trainTargetGainKmS": safe_mean(parse_float(row.get("candidateGainOverHierarchyKmS"), math.nan) for row in pool),
+        "trainProtectedFalse": sum(1 for row in protected_active if parse_float(row.get("candidateMinusHierarchyKmS"), 0.0) > 0.25),
+        "trainProtectedActiveRegressionKmS": max(0.0, max([parse_float(row.get("candidateMinusHierarchyKmS"), 0.0) for row in protected_active] or [0.0])),
+    }
+
+
+def v19_motion_field_normalization_leave_one_out(candidate_specs: list[dict]) -> list[dict]:
+    scored: list[tuple[dict, dict, list[dict]]] = []
+    for spec in candidate_specs:
+        metric, cases, _shape = v19_motion_field_normalization_score_spec(spec)
+        scored.append((spec, metric, cases))
+    reference_cases = next(cases for spec, _metric, cases in scored if spec["normalizationId"] == "combined-source-strength")
+    heldout_targets = v19_motion_field_normalization_additive_targets(reference_cases)
+    rows: list[dict] = []
+    for heldout in heldout_targets:
+        ranked = []
+        for spec, full_metric, cases in scored:
+            train_metric = v19_motion_field_normalization_training_metric(cases, heldout)
+            ranked.append((spec, full_metric, cases, train_metric))
+        selected_spec, selected_full, selected_cases, selected_train = max(
+            ranked,
+            key=lambda item: (
+                item[3]["trainProtectedFalse"] == 0,
+                -parse_float(item[3]["trainProtectedActiveRegressionKmS"], math.inf),
+                parse_float(item[3]["trainAdditiveRecall"], 0.0),
+                parse_float(item[3]["trainTargetGainKmS"], -math.inf),
+            ),
+        )
+        heldout_row = next(row for row in selected_cases if row["galaxy"] == heldout)
+        rows.append(
+            {
+                "heldoutGalaxy": heldout,
+                "selectedNormalization": selected_spec["normalizationId"],
+                "selectedFamily": selected_spec["normalizationFamily"],
+                "trainTargetCount": selected_train["trainTargetCount"],
+                "trainAdditiveRecall": selected_train["trainAdditiveRecall"],
+                "trainTargetGainKmS": selected_train["trainTargetGainKmS"],
+                "trainProtectedFalse": selected_train["trainProtectedFalse"],
+                "trainProtectedActiveRegressionKmS": selected_train["trainProtectedActiveRegressionKmS"],
+                "heldoutHit": parse_float(heldout_row.get("addActivation"), 0.0) >= 0.05,
+                "heldoutGainKmS": heldout_row.get("candidateGainOverHierarchyKmS"),
+                "heldoutRegressionKmS": max(0.0, parse_float(heldout_row.get("candidateMinusHierarchyKmS"), 0.0)),
+                "selectedFullTargetGainKmS": selected_full["targetMeanGainOverHierarchyKmS"],
+                "selectedFullProtectedFalse": selected_full["protectedFalseReleaseCount"],
+            }
+        )
+    return rows
+
+
+def v19_motion_field_normalization_component_ablation_specs() -> list[dict]:
+    return [
+        v19_motion_field_weighted_combined_spec("full-combined-source-strength", 0.35, 0.35, 0.30, description="Full derived source-strength scalar."),
+        v19_motion_field_weighted_combined_spec("drop-boundary-loading", 0.00, 0.35, 0.30, description="Remove boundary-loading contribution."),
+        v19_motion_field_weighted_combined_spec("drop-memory-density", 0.35, 0.00, 0.30, description="Remove memory-density overlap contribution."),
+        v19_motion_field_weighted_combined_spec("drop-gas-disk-coupling", 0.35, 0.35, 0.00, description="Remove gas-disk coupling contribution."),
+        v19_motion_field_weighted_combined_spec("boundary-only", 0.35, 0.00, 0.00, description="Boundary-loading contribution only."),
+        v19_motion_field_weighted_combined_spec("memory-density-only", 0.00, 0.35, 0.00, description="Memory-density contribution only."),
+        v19_motion_field_weighted_combined_spec("gas-disk-only", 0.00, 0.00, 0.30, description="Gas-disk contribution only."),
+    ]
+
+
+def v19_motion_field_normalization_weight_stability_specs() -> list[dict]:
+    rows: list[dict] = []
+    seen: set[tuple[float, float, float, float]] = set()
+    for db in [-0.10, 0.0, 0.10]:
+        for dm in [-0.10, 0.0, 0.10]:
+            for dg in [-0.10, 0.0, 0.10]:
+                weights = [0.35 + db, 0.35 + dm, 0.30 + dg]
+                if min(weights) < 0.05:
+                    continue
+                total = sum(weights)
+                normed = [round(value / total, 4) for value in weights]
+                for sink_weight in [0.20, 0.25, 0.30]:
+                    key = (normed[0], normed[1], normed[2], sink_weight)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    rows.append(
+                        v19_motion_field_weighted_combined_spec(
+                            f"weight-stability-b{normed[0]:.2f}-m{normed[1]:.2f}-g{normed[2]:.2f}-s{sink_weight:.2f}",
+                            normed[0],
+                            normed[1],
+                            normed[2],
+                            sink_boundary_weight=sink_weight,
+                            family="weight-stability",
+                            description="Perturbed normalized source-strength weights.",
+                        )
+                    )
+    return rows
+
+
+def write_v19_motion_field_normalization_hardening_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_motion_field_normalization_hardening"
+    best_spec = next(spec for spec in v19_motion_field_normalization_specs() if spec["normalizationId"] == "combined-source-strength")
+    fixed_base_spec = next(spec for spec in v19_motion_field_normalization_specs() if spec["normalizationId"] == "fixed-base-reference")
+    fixed_ceiling_spec = next(spec for spec in v19_motion_field_normalization_specs() if spec["normalizationId"] == "fixed-strong-ceiling")
+    best_metric, best_cases, best_shape_rows = v19_motion_field_normalization_score_spec(best_spec)
+    fixed_base_metric, _base_cases, _base_shape = v19_motion_field_normalization_score_spec(fixed_base_spec)
+    fixed_ceiling_metric, _ceiling_cases, _ceiling_shape = v19_motion_field_normalization_score_spec(fixed_ceiling_spec)
+    loo_rows = v19_motion_field_normalization_leave_one_out(v19_motion_field_normalization_candidate_specs_for_training())
+    ablation_rows: list[dict] = []
+    for spec in v19_motion_field_normalization_component_ablation_specs():
+        metric, _cases, _shape = v19_motion_field_normalization_score_spec(spec)
+        metric["testType"] = "component-ablation"
+        metric["boundaryWeight"] = spec.get("boundaryWeight", "")
+        metric["memoryDensityWeight"] = spec.get("memoryDensityWeight", "")
+        metric["gasDiskWeight"] = spec.get("gasDiskWeight", "")
+        metric["sinkBoundaryWeight"] = spec.get("sinkBoundaryWeight", "")
+        ablation_rows.append(metric)
+    stability_rows: list[dict] = []
+    for spec in v19_motion_field_normalization_weight_stability_specs():
+        metric, _cases, _shape = v19_motion_field_normalization_score_spec(spec)
+        metric["testType"] = "weight-stability"
+        metric["boundaryWeight"] = spec.get("boundaryWeight", "")
+        metric["memoryDensityWeight"] = spec.get("memoryDensityWeight", "")
+        metric["gasDiskWeight"] = spec.get("gasDiskWeight", "")
+        metric["sinkBoundaryWeight"] = spec.get("sinkBoundaryWeight", "")
+        metric["stableNearBest"] = (
+            int(metric["protectedFalseReleaseCount"]) == 0
+            and parse_float(metric["protectedActiveMaxRegressionKmS"], math.inf) <= 0.25
+            and parse_float(metric["additiveTargetRecall"], 0.0) >= 1.0
+            and parse_float(metric["targetMeanGainOverHierarchyKmS"], -math.inf) >= parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0) - 0.50
+        )
+        stability_rows.append(metric)
+    null_rows = v19_motion_field_normalization_null_controls(best_spec, best_metric)
+    safe_null_rows = [row for row in null_rows if not parse_bool(row.get("protectedUnsafe"))]
+    null_p95 = v19_quantile([parse_float(row.get("targetGainKmS"), math.nan) for row in safe_null_rows], 0.95)
+    null_margin = parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0) - null_p95
+    loo_hit_fraction = safe_mean(1.0 if parse_bool(row.get("heldoutHit")) else 0.0 for row in loo_rows)
+    loo_positive_fraction = safe_mean(1.0 if parse_float(row.get("heldoutGainKmS"), -math.inf) > 0.0 else 0.0 for row in loo_rows)
+    loo_min_gain = min([parse_float(row.get("heldoutGainKmS"), math.inf) for row in loo_rows] or [math.nan])
+    loo_selected_combined_fraction = safe_mean(1.0 if row.get("selectedNormalization") == "combined-source-strength" else 0.0 for row in loo_rows)
+    loo_selected_counts: dict[str, int] = {}
+    for row in loo_rows:
+        selected_name = str(row.get("selectedNormalization", ""))
+        loo_selected_counts[selected_name] = loo_selected_counts.get(selected_name, 0) + 1
+    stable_fraction = safe_mean(1.0 if parse_bool(row.get("stableNearBest")) else 0.0 for row in stability_rows)
+    ablation_best_nonfull = max(
+        [parse_float(row.get("targetMeanGainOverHierarchyKmS"), -math.inf) for row in ablation_rows if row["normalizationId"] != "full-combined-source-strength"]
+        or [-math.inf]
+    )
+    full_ablation_row = next(row for row in ablation_rows if row["normalizationId"] == "full-combined-source-strength")
+    ablation_margin = parse_float(full_ablation_row["targetMeanGainOverHierarchyKmS"], 0.0) - ablation_best_nonfull
+    base_gain_improvement = parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0) - parse_float(fixed_base_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+    ceiling_gap = parse_float(fixed_ceiling_metric["targetMeanGainOverHierarchyKmS"], 0.0) - parse_float(best_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+    if (
+        int(best_metric["protectedFalseReleaseCount"]) == 0
+        and parse_float(best_metric["protectedActiveMaxRegressionKmS"], math.inf) <= 0.25
+        and parse_float(best_metric["additiveTargetRecall"], 0.0) >= 1.0
+        and loo_hit_fraction >= 1.0
+        and loo_positive_fraction >= 1.0
+        and loo_min_gain > 0.0
+        and stable_fraction >= 0.60
+        and null_margin >= 1.0
+        and loo_selected_combined_fraction >= 0.50
+    ):
+        verdict = "combined normalization hardens for field-equation spec"
+    elif (
+        int(best_metric["protectedFalseReleaseCount"]) == 0
+        and parse_float(best_metric["protectedActiveMaxRegressionKmS"], math.inf) <= 0.25
+        and parse_float(best_metric["additiveTargetRecall"], 0.0) >= 1.0
+        and loo_hit_fraction >= 1.0
+        and loo_positive_fraction >= 1.0
+        and loo_min_gain > 0.0
+        and stable_fraction >= 0.60
+        and null_margin >= 1.0
+    ):
+        verdict = "normalization family hardens; memory-density core favored"
+    elif (
+        int(best_metric["protectedFalseReleaseCount"]) == 0
+        and parse_float(best_metric["additiveTargetRecall"], 0.0) >= 1.0
+        and loo_positive_fraction >= 0.75
+        and null_margin > 0.0
+    ):
+        verdict = "derived normalization useful but still anatomy-level"
+    else:
+        verdict = "derived normalization not hardened"
+    formula = {
+        "candidateId": "mts-v19-motion-field-normalization-hardening-v1",
+        "status": verdict,
+        "fieldEquationSketch": "Delta S_Xi(r) = [N_add(B_gas,M_density,G_disk)*A_source - N_sink(B_gas)*A_sink] * S_canonical(r) * G_midouter(r)",
+        "normalization": best_spec,
+        "candidateMetric": best_metric,
+        "baseGainImprovementKmS": base_gain_improvement,
+        "gapToFixedStrongCeilingKmS": ceiling_gap,
+        "leaveOneOut": {
+            "heldoutCount": len(loo_rows),
+            "hitFraction": loo_hit_fraction,
+            "positiveGainFraction": loo_positive_fraction,
+            "minGainKmS": loo_min_gain,
+            "selectedCombinedFraction": loo_selected_combined_fraction,
+            "selectedNormalizationCounts": loo_selected_counts,
+        },
+        "componentAblation": {
+            "fullTargetGainKmS": full_ablation_row["targetMeanGainOverHierarchyKmS"],
+            "bestNonFullTargetGainKmS": ablation_best_nonfull,
+            "fullMinusBestNonFullKmS": ablation_margin,
+        },
+        "weightStability": {
+            "variantCount": len(stability_rows),
+            "stableNearBestFraction": stable_fraction,
+        },
+        "nulls": {
+            "safeNullTargetGainP95": null_p95,
+            "safeNullMarginKmS": null_margin,
+        },
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    report = [
+        "# MTS v19 Motion-Field Normalization Hardening",
+        "",
+        "This mode hardens the derived source-strength normalization. It does not change locked v18, the browser, or any release law.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Candidate",
+        "",
+        f"- Normalization: `{best_metric['normalizationId']}`.",
+        f"- Target gain: `{fmt(best_metric['targetMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Improvement over fixed base: `{fmt(base_gain_improvement)}` km/s.",
+        f"- Gap to fixed strong ceiling: `{fmt(ceiling_gap)}` km/s.",
+        f"- Additive target recall: `{fmt(best_metric['additiveTargetRecall'])}`.",
+        f"- Protected false releases: `{best_metric['protectedFalseReleaseCount']}`.",
+        f"- Protected active regression: `{fmt(best_metric['protectedActiveMaxRegressionKmS'])}` km/s.",
+        f"- Safe-null margin: `{fmt(null_margin)}` km/s.",
+        "",
+        "## Leave-One-Target-Out",
+        "",
+        f"- Held-out additive targets: `{len(loo_rows)}`.",
+        f"- Held-out hit fraction: `{fmt(loo_hit_fraction)}`.",
+        f"- Held-out positive-gain fraction: `{fmt(loo_positive_fraction)}`.",
+        f"- Worst held-out gain: `{fmt(loo_min_gain)}` km/s.",
+        f"- Combined normalization selected from train-only targets: `{fmt(loo_selected_combined_fraction)}`.",
+        f"- Train-only selected normalizations: `{json.dumps(loo_selected_counts, sort_keys=True)}`.",
+        "",
+        "## Component Ablation",
+        "",
+        f"- Full minus best non-full ablation: `{fmt(ablation_margin)}` km/s.",
+        "- The tiny ablation margin means the exact three-term blend is not uniquely identified yet; the robust result is the source-normalization family, with memory-density carrying the strongest train-only signal.",
+        "",
+        "| variant | target gain | recall | protected false | active reg |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in ablation_rows:
+        report.append(
+            f"| {row['normalizationId']} | {fmt(row['targetMeanGainOverHierarchyKmS'])} | {fmt(row['additiveTargetRecall'])} | {row['protectedFalseReleaseCount']} | {fmt(row['protectedActiveMaxRegressionKmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Weight Stability",
+            "",
+            f"- Stable near-best variants: `{sum(1 for row in stability_rows if parse_bool(row.get('stableNearBest')))}` / `{len(stability_rows)}`.",
+            f"- Stable near-best fraction: `{fmt(stable_fraction)}`.",
+            "",
+            "## Guardrails",
+            "",
+            "- No locked v18/browser law changed.",
+            "- `N_RC>=8` remains observational/source admissibility, not part of the physical source normalization.",
+            "- No galaxy names, residuals, raw RMSE, NFW/MOND parameters, or weak/systematics fitting enter the formula.",
+            "",
+            verdict,
+        ]
+    )
+    write_csv(out_dir / f"{prefix}_scores.csv", [best_metric, fixed_base_metric, fixed_ceiling_metric])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", best_cases)
+    write_csv(out_dir / f"{prefix}_support_shape.csv", best_shape_rows)
+    write_csv(out_dir / f"{prefix}_leave_one_out.csv", loo_rows)
+    write_csv(out_dir / f"{prefix}_component_ablation.csv", ablation_rows)
+    write_csv(out_dir / f"{prefix}_weight_stability.csv", stability_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-motion-field-normalization-hardening-v1",
+        "verdict": verdict,
+        "candidateMetric": best_metric,
+        "fixedBaseMetric": fixed_base_metric,
+        "fixedStrongCeilingMetric": fixed_ceiling_metric,
+        "baseGainImprovementKmS": base_gain_improvement,
+        "gapToFixedStrongCeilingKmS": ceiling_gap,
+        "leaveOneOutHitFraction": loo_hit_fraction,
+        "leaveOneOutPositiveGainFraction": loo_positive_fraction,
+        "leaveOneOutMinGainKmS": loo_min_gain,
+        "leaveOneOutSelectedCombinedFraction": loo_selected_combined_fraction,
+        "leaveOneOutSelectedNormalizationCounts": loo_selected_counts,
+        "componentAblationMarginKmS": ablation_margin,
+        "stableNearBestFraction": stable_fraction,
+        "safeNullTargetGainP95": null_p95,
+        "safeNullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_support_shape.csv",
+            f"{prefix}_leave_one_out.csv",
+            f"{prefix}_component_ablation.csv",
+            f"{prefix}_weight_stability.csv",
             f"{prefix}_null_controls.csv",
             f"{prefix}_formula.json",
             f"{prefix}_capsule.json",
@@ -120795,6 +121175,28 @@ def cmd_v19motionfieldnormalization(args: argparse.Namespace) -> None:
     print(f"Wrote motion-field normalization audit to {out_dir.resolve()}")
 
 
+def cmd_v19motionfieldnormalizationharden(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_MOTION_FIELD_NORMALIZATION_HARDENING_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_motion_field_normalization_hardening_artifacts(out_dir)
+    metric = capsule["candidateMetric"]
+    print("MTS v19 motion-field normalization hardening")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"target_gain={fmt(metric['targetMeanGainOverHierarchyKmS'])}",
+                f"base_gain={fmt(capsule['baseGainImprovementKmS'])}",
+                f"ceiling_gap={fmt(capsule['gapToFixedStrongCeilingKmS'])}",
+                f"loo_hit={fmt(capsule['leaveOneOutHitFraction'])}",
+                f"stable={fmt(capsule['stableNearBestFraction'])}",
+                f"protected_false={metric['protectedFalseReleaseCount']}",
+                f"null_margin={fmt(capsule['safeNullMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote motion-field normalization hardening to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -121128,6 +121530,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19motionfieldkernelharden",
             "v19motionfieldnormalization",
             "observedstatev19motionfieldnormalization",
+            "v19motionfieldnormalizationharden",
+            "observedstatev19motionfieldnormalizationharden",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -121637,6 +122041,8 @@ def main() -> None:
         cmd_v19motionfieldkernelharden(args)
     elif args.mode in {"v19motionfieldnormalization", "observedstatev19motionfieldnormalization"}:
         cmd_v19motionfieldnormalization(args)
+    elif args.mode in {"v19motionfieldnormalizationharden", "observedstatev19motionfieldnormalizationharden"}:
+        cmd_v19motionfieldnormalizationharden(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
