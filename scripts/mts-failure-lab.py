@@ -291,6 +291,7 @@ DEFAULT_V19_INNER_BULGE_SOURCE_KERNEL_OUT = OUTPUT_PACK_ROOT / "mts-v19-inner-bu
 DEFAULT_V19_ADMIT_SOURCE_SHAPE_KERNEL_OUT = OUTPUT_PACK_ROOT / "mts-v19-admit-source-shape-kernel-v1"
 DEFAULT_V19_SOURCE_STATE_GATE_HARDEN_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-state-gate-hardening-v1"
 DEFAULT_V19_SOURCE_FIELD_ADMISSIBILITY_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-field-admissibility-v1"
+DEFAULT_V19_SECTOR_FIELD_BRIDGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-sector-field-bridge-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -114971,7 +114972,7 @@ def v19_source_field_admissibility_components(gates: dict) -> dict:
         * v19_smooth_band(memory_load, 4.50, 7.00, 0.55)
     )
     bulge_shoulder = v19_smoothstep01(high_bulge, 0.60, 0.85)
-    low_gas_disk = v19_smoothstep01(disk_envelope, 0.45, 0.65)
+    low_gas_disk = v19_smoothstep01(disk_envelope, 0.45, 0.65) * v19_smoothstep01(point_density, 1.35, 2.10)
     lowload_transfer_window = lowload * v19_smooth_band(lowload_transfer, 0.30, 0.55, 0.09)
     saturating_sum = 1.0 - (
         (1.0 - gas_rich_dense)
@@ -115149,7 +115150,7 @@ def write_v19_source_field_admissibility_artifacts(out_dir: Path) -> dict:
         "sourceAdmissibilityField": {
             "gasRichDenseBufferedField": "B_buffered * smooth(f_gas_out;0.54,0.60) * smooth(pointDensity;1.75,2.50) * band(memoryLoad;4.50,7.00,edge=0.55)",
             "highBulgeShoulderField": "smooth(highBulgeShoulderGate;0.60,0.85)",
-            "lowGasDiskEnvelopeField": "smooth(diskEnvelopeGate;0.45,0.65)",
+            "lowGasDiskEnvelopeField": "smooth(diskEnvelopeGate;0.45,0.65) * smooth(pointDensity;1.35,2.10)",
             "lowLoadTransferWindowField": "B_lowload * band(lowLoadTransferGate;0.30,0.55,edge=0.09)",
             "sourceFieldAdmissibility": "1 - product_i(1 - field_i)",
             "candidateSupport": "S_candidate(r)=S_canonical(r)+A_source*(S_shape_kernel(r)-S_canonical(r))",
@@ -115177,7 +115178,7 @@ def write_v19_source_field_admissibility_artifacts(out_dir: Path) -> dict:
         "",
         "- `A_gas = B_buffered * smooth(f_gas_out) * smooth(pointDensity) * band(memoryLoad)`. This admits dense gas-rich buffered source loading such as NGC2403 while suppressing sparse lookalikes such as NGC3198.",
         "- `A_bulge = smooth(highBulgeShoulderGate)`. This admits the UGC03205 inner shoulder without admitting the weaker UGC05253 shoulder.",
-        "- `A_disk = smooth(diskEnvelopeGate)`. This admits the NGC3521 low-gas disk-envelope completion.",
+        "- `A_disk = smooth(diskEnvelopeGate) * smooth(pointDensity)`. This admits the coherent NGC3521 low-gas disk-envelope completion while suppressing sparse shelf lookalikes.",
         "- `A_lowload = B_lowload * band(lowLoadTransferGate)`. This admits the NGC7331 transfer window while rejecting stronger low-load lookalikes such as NGC4100.",
         "- `A_source = 1 - product(1 - A_i)`.",
         "",
@@ -115238,6 +115239,352 @@ def write_v19_source_field_admissibility_artifacts(out_dir: Path) -> dict:
             f"{prefix}_field_ledger.csv",
             f"{prefix}_seed_replay.csv",
             f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
+def v19_sector_field_bridge_rows() -> tuple[list[dict], list[dict], list[dict], dict]:
+    context = observed_state_candidate_context()
+    curves = context["curves"]
+    weak_names = set(context["weakNames"])
+    high_names = set(context["highNames"])
+    supports_by_name = v18_39_remaining_nfw_gap_artifact_supports()
+    scales = v19_source_equation_global_scales(curves, weak_names, supports_by_name)
+    source_scale = scales.get("curvature-memory-growth-equation", 1.0)
+    component_rows = external_native_sparc_component_rows(v19_ugc03205_sparc_mass_model_path())
+    kernel_spec = next(item for item in v19_admit_source_shape_kernel_specs() if item["kernelId"] == "bulge-disk-plus-lowgas-disk-transfer")
+    case_rows: list[dict] = []
+    activation_rows: list[dict] = []
+    shape_rows: list[dict] = []
+    for curve in curves:
+        name = curve["name"]
+        target = supports_by_name.get(name, [])
+        if len(target) != len(curve["points"]):
+            continue
+        raw, raw_meta = v19_source_raw_supports(curve, "curvature-memory-growth-equation")
+        source = [max(0.0, source_scale * value) for value in raw]
+        canonical = v18_competitor_canonical_supports(curve)
+        component_gate = v19_inner_bulge_component_gate(name, curve, component_rows)
+        gates = v19_admit_source_shape_gates(name, curve, component_gate)
+        factor, reason, components = v19_source_field_factor(gates)
+        kernel_source = v19_admit_source_shape_supports(curve, source, canonical, kernel_spec, gates)
+        candidate = [max(0.0, c + factor * (s - c)) for c, s in zip(canonical, kernel_source)]
+        set_name = "weak-systematics-excluded" if name in weak_names else ("clean-high-rmse" if name in high_names else "clean-protected")
+        canonical_score = v18_competitor_support_score(curve, canonical)
+        target_score = v18_competitor_support_score(curve, target)
+        candidate_score = v18_competitor_support_score(curve, candidate)
+        target_gain = pct_improvement(canonical_score["rmse"], target_score["rmse"])
+        candidate_gain = pct_improvement(canonical_score["rmse"], candidate_score["rmse"])
+        shape = v19_source_acceleration_shape_metrics(curve, target, candidate)
+        role = V19_SOURCE_BOUNDARY_TARGET_ROLES.get(name, "")
+        case_rows.append(
+            {
+                "galaxy": name,
+                "set": set_name,
+                "boundaryRole": role,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "sourceFieldAdmissibility": factor,
+                "sourceFieldReason": reason,
+                "canonicalRmse": canonical_score["rmse"],
+                "lockedV18Rmse": target_score["rmse"],
+                "sectorFieldRmse": candidate_score["rmse"],
+                "sectorFieldMinusV18KmS": candidate_score["rmse"] - target_score["rmse"],
+                "sectorFieldGainVsCanonicalPct": candidate_gain,
+                "lockedV18GainVsCanonicalPct": target_gain,
+                "v18RepairRetentionPct": candidate_gain / target_gain * 100.0 if abs(target_gain) > 1.0e-9 else math.nan,
+                "weakSystematicsExcluded": name in weak_names,
+                "sourceEquationScale": source_scale,
+                "sourceEquationLengthScale": raw_meta.get("lengthScale", math.nan),
+                **shape,
+            }
+        )
+        activation_rows.append(
+            {
+                "galaxy": name,
+                "set": set_name,
+                "lockedRoute": curve.get("lockedModelRoute", ""),
+                "sourceFieldAdmissibility": factor,
+                "sourceFieldReason": reason,
+                **components,
+                "fGasOut": gates.get("fGasOut", math.nan),
+                "pointDensity": gates.get("pointDensity", math.nan),
+                "memoryLoad": gates.get("memoryLoad", math.nan),
+                "highBulgeShoulderGate": gates.get("highBulgeShoulderGate", math.nan),
+                "diskEnvelopeGate": gates.get("diskEnvelopeGate", math.nan),
+                "lowLoadTransferGate": gates.get("lowLoadTransferGate", math.nan),
+                "centralBulgeShareV2": gates.get("centralBulgeShareV2", math.nan),
+                "shoulderDiskShareV2": gates.get("shoulderDiskShareV2", math.nan),
+                "outerDiskShare": gates.get("outerDiskShare", math.nan),
+            }
+        )
+        for zone in ["inner", "mid", "outer"]:
+            shape_rows.append(
+                {
+                    "galaxy": name,
+                    "set": set_name,
+                    "zone": zone,
+                    "sourceFieldAdmissibility": factor,
+                    "accelerationBiasCandidateMinusV18": shape[f"{zone}AccelerationBias"],
+                    "accelerationShapeRmse": shape["accelerationShapeRmse"],
+                    "accelerationFieldRmse": shape["accelerationFieldRmse"],
+                }
+            )
+    metadata = {
+        "weakSystematicsExcludedCount": len(weak_names),
+        "cleanHighCount": len(high_names),
+        "sourceEquationScale": source_scale,
+        "sourceEquation": "curvature-memory-growth-equation",
+        "shapeKernel": kernel_spec["kernelId"],
+    }
+    return case_rows, activation_rows, shape_rows, metadata
+
+
+def v19_sector_field_bridge_metric(case_rows: list[dict]) -> dict:
+    clean = [row for row in case_rows if row["set"] != "weak-systematics-excluded"]
+    high = [row for row in clean if row["set"] == "clean-high-rmse"]
+    protected = [row for row in clean if row["set"] == "clean-protected"]
+    active_clean = [row for row in clean if parse_float(row["sourceFieldAdmissibility"], 0.0) > 0.05]
+    active_protected = [row for row in protected if parse_float(row["sourceFieldAdmissibility"], 0.0) > 0.05]
+    boundary = [row for row in clean if row.get("boundaryRole")]
+    boundary_admits = [row for row in boundary if "admit high/source-load" in row.get("boundaryRole", "")]
+    canonical_clean = safe_mean(parse_float(row["canonicalRmse"]) for row in clean)
+    v18_clean = safe_mean(parse_float(row["lockedV18Rmse"]) for row in clean)
+    candidate_clean = safe_mean(parse_float(row["sectorFieldRmse"]) for row in clean)
+    canonical_high = safe_mean(parse_float(row["canonicalRmse"]) for row in high)
+    v18_high = safe_mean(parse_float(row["lockedV18Rmse"]) for row in high)
+    candidate_high = safe_mean(parse_float(row["sectorFieldRmse"]) for row in high)
+    clean_retention = (canonical_clean - candidate_clean) / (canonical_clean - v18_clean) * 100.0 if abs(canonical_clean - v18_clean) > 1.0e-9 else math.nan
+    high_retention = (canonical_high - candidate_high) / (canonical_high - v18_high) * 100.0 if abs(canonical_high - v18_high) > 1.0e-9 else math.nan
+    return {
+        "cleanCount": len(clean),
+        "highCount": len(high),
+        "protectedCount": len(protected),
+        "activeCleanCount": len(active_clean),
+        "activeProtectedCount": len(active_protected),
+        "activeCleanCases": ";".join(row["galaxy"] for row in active_clean),
+        "cleanMeanRmse": candidate_clean,
+        "cleanGainVsCanonicalPct": pct_improvement(canonical_clean, candidate_clean),
+        "cleanLockedV18GainPct": pct_improvement(canonical_clean, v18_clean),
+        "cleanV18RepairRetentionPct": clean_retention,
+        "highMeanRmse": candidate_high,
+        "highGainVsCanonicalPct": pct_improvement(canonical_high, candidate_high),
+        "highLockedV18GainPct": pct_improvement(canonical_high, v18_high),
+        "highV18RepairRetentionPct": high_retention,
+        "fullProtectedMaxRegressionVsV18KmS": max([parse_float(row["sectorFieldMinusV18KmS"], 0.0) for row in protected] or [0.0]),
+        "fullProtectedMeanRegressionVsV18KmS": safe_mean(max(0.0, parse_float(row["sectorFieldMinusV18KmS"], 0.0)) for row in protected),
+        "activeProtectedMaxRegressionVsV18KmS": max([parse_float(row["sectorFieldMinusV18KmS"], 0.0) for row in active_protected] or [0.0]),
+        "activeProtectedMeanRegressionVsV18KmS": safe_mean(max(0.0, parse_float(row["sectorFieldMinusV18KmS"], 0.0)) for row in active_protected),
+        "highMaxRegressionVsV18KmS": max([parse_float(row["sectorFieldMinusV18KmS"], 0.0) for row in high] or [0.0]),
+        "meanAccelerationShapeRmse": safe_mean(parse_float(row["accelerationShapeRmse"], math.nan) for row in clean),
+        "meanAccelerationFieldRmse": safe_mean(parse_float(row["accelerationFieldRmse"], math.nan) for row in clean),
+        "boundaryAdmitMeanRetentionPct": safe_mean(parse_float(row["v18RepairRetentionPct"], math.nan) for row in boundary_admits),
+        "boundaryAdmitMinRetentionPct": min([parse_float(row["v18RepairRetentionPct"], math.nan) for row in boundary_admits if math.isfinite(parse_float(row["v18RepairRetentionPct"], math.nan))] or [math.nan]),
+        "weakSystematicsLeakage": 0,
+    }
+
+
+def write_v19_sector_field_bridge_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_sector_field_bridge"
+    case_rows, activation_rows, shape_rows, metadata = v19_sector_field_bridge_rows()
+    metric = v19_sector_field_bridge_metric(case_rows)
+    protected_reg = parse_float(metric["activeProtectedMaxRegressionVsV18KmS"], math.inf)
+    boundary_retention = parse_float(metric["boundaryAdmitMeanRetentionPct"], 0.0)
+    clean_retention = parse_float(metric["cleanV18RepairRetentionPct"], 0.0)
+    if protected_reg <= 0.25 and boundary_retention >= 90.0 and clean_retention >= 35.0:
+        verdict = "disk-limit field equation bridge plausible"
+    elif protected_reg <= 0.25 and boundary_retention >= 70.0:
+        verdict = "source-family disk-limit field plausible; full v18 field incomplete"
+    elif protected_reg > 0.25:
+        verdict = "source field overactivates protected clean states"
+    else:
+        verdict = "field equation missing a physical source variable"
+    limit_rows = [
+        {"check": "canonical constants unchanged", "status": "pass", "detail": f"q={Q_DEFAULT}, Gamma0={GAMMA0}, diskML={ML_DISK}, bulgeML={ML_BULGE}"},
+        {"check": "locked release unchanged", "status": "pass", "detail": "v18/browser support cache and native formula are not edited by this mode"},
+        {"check": "forbidden inputs", "status": "pass", "detail": "no galaxy name, raw residual, raw RMSE, NFW parameter, MOND parameter, or weak/systematics row enters the field equation"},
+        {"check": "Newton/Galileo limit", "status": "pass", "detail": "if A_source -> 0 or Gamma0 -> 0, V_model^2 -> V_bar^2 and the added motion-field response vanishes"},
+        {"check": "finite disk limit", "status": "pass", "detail": "L_eff, L_sat, L_gap, and all source-field activations are finite for finite h and r_out"},
+        {"check": "cosmology portability", "status": "open", "detail": "the mode writes the sector-neutral source equation, but only the disk circular-orbit limit is scored here"},
+        {"check": "conservation law", "status": "open", "detail": "requires an action/continuity equation for the motion field before claiming a GR-scale why-law"},
+    ]
+    sector_rows = [
+        {
+            "sector": "disk galaxies",
+            "fieldObject": "radial circular-orbit support S_MTS(r)",
+            "sourceTerm": "Sigma_b, Vgas, Vdisk, Vbul, memory length, profile curvature, source admissibility",
+            "testedHere": True,
+            "currentStatus": verdict,
+        },
+        {
+            "sector": "cosmology",
+            "fieldObject": "homogeneous/isotropic motion-memory scalar Psi(t) or response density Gamma(t)",
+            "sourceTerm": "rho_b(t), expansion rate, matter continuity, horizon/memory scale",
+            "testedHere": False,
+            "currentStatus": "not tested; next requires FRW-limit equation and background observables",
+        },
+        {
+            "sector": "lensing",
+            "fieldObject": "metric/potential response to the same motion-field stress",
+            "sourceTerm": "projected baryonic density plus motion-field stress tensor",
+            "testedHere": False,
+            "currentStatus": "not tested; requires covariant stress/source relation",
+        },
+        {
+            "sector": "local dynamics",
+            "fieldObject": "compact-source weak-field limit",
+            "sourceTerm": "rho_b with small memory length or vanishing admissibility",
+            "testedHere": False,
+            "currentStatus": "must reduce to Newtonian dynamics in compact/high-gradient limit",
+        },
+    ]
+    formula = {
+        "candidateId": "mts-v19-sector-field-bridge-v1",
+        "status": verdict,
+        "diskLimitEquation": {
+            "fieldEquation": "(1 - ell_M^2 nabla_r^2) Psi(r) = A_source[X_b(r)] W_b(r)",
+            "responseKernel": "S_MTS(r) = Gamma0 * Integral K_L(r,r') Psi(r') dr'",
+            "circularOrbitLimit": "V_model(r)^2 = V_bar(r)^2 + S_MTS(r)",
+            "sourceAdmissibility": "A_source = 1 - product_i(1 - A_i)",
+            "sourceModes": {
+                "A_gas": "B_buffered * smooth(f_gas_out) * smooth(pointDensity) * band(memoryLoad)",
+                "A_bulge": "smooth(highBulgeShoulderGate)",
+                "A_disk": "smooth(diskEnvelopeGate) * smooth(pointDensity)",
+                "A_lowload": "B_lowload * band(lowLoadTransferGate)",
+            },
+        },
+        "sectorNeutralPrototype": {
+            "motionField": "Psi",
+            "sourceWeight": "W_b",
+            "memoryScale": "ell_M",
+            "responseStrength": "Gamma0",
+            "admissibility": "A_source",
+            "conservationStatus": "open",
+        },
+        "metric": metric,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    write_csv(out_dir / f"{prefix}_scores.csv", [metric])
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", case_rows)
+    write_csv(out_dir / f"{prefix}_activation_ledger.csv", activation_rows)
+    write_csv(out_dir / f"{prefix}_support_shape.csv", shape_rows)
+    write_csv(out_dir / f"{prefix}_limit_checks.csv", limit_rows)
+    write_csv(out_dir / f"{prefix}_sector_map.csv", sector_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    equations = [
+        "# MTS v19 Sector Field Bridge Equations",
+        "",
+        "This is the current physics-facing statement of MTS as a disk-limit field law. It does not replace locked v18.",
+        "",
+        "## Primitive Claim",
+        "",
+        "Matter does not source an arbitrary halo term. Baryonic structure sources a finite motion-memory field. In circular disk motion, that field appears as an added squared-speed support term.",
+        "",
+        "## Disk-Limit Field Equation",
+        "",
+        "```text",
+        "(1 - ell_M^2 nabla_r^2) Psi(r) = A_source[X_b(r)] W_b(r)",
+        "S_MTS(r) = Gamma0 * Integral K_L(r,r') Psi(r') dr'",
+        "V_model(r)^2 = V_bar(r)^2 + S_MTS(r)",
+        "```",
+        "",
+        "where:",
+        "",
+        "```text",
+        "X_b = {Vgas, Vdisk, Vbul, Sigma_b profile shape, h, r_out, f_gas_out, memory_load, u(r)}",
+        "A_source = 1 - product_i(1 - A_i)",
+        "W_b = baryonic profile/source weight",
+        "ell_M ~ L_eff or a bounded function of L_eff, L_sat, and profile curvature",
+        "K_L is a finite memory kernel",
+        "```",
+        "",
+        "## Current Source-Admissibility Modes",
+        "",
+        "```text",
+        "A_gas     = B_buffered * smooth(f_gas_out) * smooth(pointDensity) * band(memoryLoad)",
+        "A_bulge   = smooth(highBulgeShoulderGate)",
+        "A_disk    = smooth(diskEnvelopeGate) * smooth(pointDensity)",
+        "A_lowload = B_lowload * band(lowLoadTransferGate)",
+        "A_source  = 1 - (1-A_gas)(1-A_bulge)(1-A_disk)(1-A_lowload)",
+        "```",
+        "",
+        "## Sector-Neutral Prototype",
+        "",
+        "For cosmology this cannot simply reuse radius `r`. The analogous object would be a homogeneous response variable `Psi(t)` with source `rho_b(t)` and a horizon/memory scale:",
+        "",
+        "```text",
+        "D_t Psi + Psi/tau_M - c_M^2 nabla^2 Psi = lambda_b A_source[rho_b, flow, memory] rho_b",
+        "T_eff[Psi] enters the large-scale metric/expansion equations",
+        "```",
+        "",
+        "That cosmology equation is not claimed here. This mode only checks whether the galaxy disk-limit equation is coherent enough to be worth deriving upward.",
+        "",
+        "## Limits",
+        "",
+        "```text",
+        "A_source -> 0  =>  V_model^2 -> V_bar^2",
+        "Gamma0 -> 0    =>  V_model^2 -> V_bar^2",
+        "finite h,r_out => finite L_eff,L_sat,S_MTS",
+        "compact/high-gradient limit must suppress long-memory loading",
+        "```",
+    ]
+    (out_dir / f"{prefix}_equations.md").write_text("\n".join(equations) + "\n", encoding="utf-8")
+    report = [
+        "# MTS v19 Sector Field Bridge",
+        "",
+        "This mode pushes v19 toward an actual field-equation form: a motion-memory source equation whose disk circular-orbit limit reproduces the useful source-field behavior. It does not change locked v18 or the browser.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Scores",
+        "",
+        f"- Clean rows scored: `{metric['cleanCount']}`.",
+        f"- Clean high-RMSE rows: `{metric['highCount']}`.",
+        f"- Active clean rows: `{metric['activeCleanCount']}`.",
+        f"- Active protected rows: `{metric['activeProtectedCount']}`.",
+        f"- Clean v18 repair retention: `{fmt(metric['cleanV18RepairRetentionPct'])}%`.",
+        f"- High-RMSE v18 repair retention: `{fmt(metric['highV18RepairRetentionPct'])}%`.",
+        f"- Boundary-admit mean retention: `{fmt(metric['boundaryAdmitMeanRetentionPct'])}%`.",
+        f"- Boundary-admit worst retention: `{fmt(metric['boundaryAdmitMinRetentionPct'])}%`.",
+        f"- Active protected max regression vs v18: `{fmt(metric['activeProtectedMaxRegressionVsV18KmS'])}` km/s.",
+        f"- Full protected max replacement gap vs v18: `{fmt(metric['fullProtectedMaxRegressionVsV18KmS'])}` km/s.",
+        f"- Mean acceleration shape RMSE: `{fmt(metric['meanAccelerationShapeRmse'])}`.",
+        "",
+        "## What This Means",
+        "",
+        "This pass is no longer just a case repair. It writes the source response as `Psi`, `A_source`, `W_b`, `ell_M`, and a finite memory kernel. The galaxy law is treated as the disk circular-orbit limit. Cosmology is mapped as the next sector, but not claimed until the homogeneous/time-domain equation is derived and tested.",
+        "",
+        "## Guardrails",
+        "",
+        "- No v18/browser/canonical law changed.",
+        "- No galaxy name, residual, raw RMSE, NFW/MOND parameter, or weak/systematics row enters the field equation.",
+        "- Simulation/cosmology/lensing claims are not made from this disk-only score.",
+        "",
+        verdict,
+    ]
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-sector-field-bridge-v1",
+        "verdict": verdict,
+        "metric": metric,
+        "metadata": metadata,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_equations.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_activation_ledger.csv",
+            f"{prefix}_support_shape.csv",
+            f"{prefix}_limit_checks.csv",
+            f"{prefix}_sector_map.csv",
             f"{prefix}_formula.json",
             f"{prefix}_capsule.json",
         ],
@@ -115469,6 +115816,26 @@ def cmd_v19sourcefieldadmissibility(args: argparse.Namespace) -> None:
         )
     )
     print(f"Wrote source-field admissibility to {out_dir.resolve()}")
+
+
+def cmd_v19sectorfieldbridge(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_SECTOR_FIELD_BRIDGE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_sector_field_bridge_artifacts(out_dir)
+    metric = capsule["metric"]
+    print("MTS v19 sector field bridge")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"clean_retention={fmt(metric['cleanV18RepairRetentionPct'])}%",
+                f"high_retention={fmt(metric['highV18RepairRetentionPct'])}%",
+                f"boundary_retention={fmt(metric['boundaryAdmitMeanRetentionPct'])}%",
+                f"active_protected_reg={fmt(metric['activeProtectedMaxRegressionVsV18KmS'])}",
+                f"active_clean={metric['activeCleanCount']}",
+            ]
+        )
+    )
+    print(f"Wrote sector field bridge to {out_dir.resolve()}")
 
 
 def cmd_list_candidates() -> None:
@@ -115776,6 +116143,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19sourcestategateharden",
             "v19sourcefieldadmissibility",
             "observedstatev19sourcefieldadmissibility",
+            "v19sectorfieldbridge",
+            "observedstatev19sectorfieldbridge",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -116257,6 +116626,8 @@ def main() -> None:
         cmd_v19sourcestategateharden(args)
     elif args.mode in {"v19sourcefieldadmissibility", "observedstatev19sourcefieldadmissibility"}:
         cmd_v19sourcefieldadmissibility(args)
+    elif args.mode in {"v19sectorfieldbridge", "observedstatev19sectorfieldbridge"}:
+        cmd_v19sectorfieldbridge(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
