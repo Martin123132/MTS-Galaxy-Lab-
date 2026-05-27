@@ -311,6 +311,7 @@ DEFAULT_V19_SOURCE_RESIDUAL_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-resid
 DEFAULT_V19_SOURCE_BOUNDARY_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-boundary-hardening-v1"
 DEFAULT_V19_BOUNDARY_RESPONSE_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-response-field-v1"
 DEFAULT_V19_BOUNDARY_AMPLITUDE_LAW_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-amplitude-law-v1"
+DEFAULT_V19_BOUNDARY_AMPLITUDE_IDENTIFIABILITY_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-amplitude-identifiability-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -122197,6 +122198,311 @@ def write_v19_boundary_amplitude_law_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_boundary_amplitude_leave_one_out_ties(scored: list[tuple[dict, dict, list[dict]]], tolerance: float = 1.0e-9) -> list[dict]:
+    reference_cases = scored[0][2] if scored else []
+    heldout_targets = v19_motion_field_normalization_additive_targets(reference_cases)
+    rows: list[dict] = []
+    for heldout in heldout_targets:
+        ranked: list[tuple[dict, dict, list[dict], dict]] = []
+        for spec, full_metric, cases in scored:
+            train_metric = v19_motion_field_normalization_training_metric(cases, heldout)
+            ranked.append((spec, full_metric, cases, train_metric))
+        safe_ranked = [
+            item
+            for item in ranked
+            if item[3]["trainProtectedFalse"] == 0
+            and parse_float(item[3]["trainProtectedActiveRegressionKmS"], math.inf) <= 0.25
+            and parse_float(item[3]["trainAdditiveRecall"], 0.0) >= 1.0
+        ]
+        if not safe_ranked:
+            safe_ranked = ranked
+        best_train_gain = max(parse_float(item[3]["trainTargetGainKmS"], -math.inf) for item in safe_ranked)
+        ties = [
+            item
+            for item in safe_ranked
+            if abs(parse_float(item[3]["trainTargetGainKmS"], -math.inf) - best_train_gain) <= tolerance
+        ]
+        selected_spec, selected_full, selected_cases, selected_train = max(
+            ties,
+            key=lambda item: (
+                item[0]["normalizationFamily"] == "physical-boundary-amplitude-law",
+                str(item[0].get("boundaryResponseMode", "")) != "constant",
+                -parse_float(item[0].get("sinkBoundaryWeight"), math.inf),
+                -parse_float(item[0].get("boundaryResponseFloor"), math.inf),
+                -parse_float(item[0].get("memoryDensityAddWeight"), math.inf),
+            ),
+        )
+        heldout_row = next(row for row in selected_cases if row["galaxy"] == heldout)
+        tie_modes: dict[str, int] = {}
+        tie_families: dict[str, int] = {}
+        tie_kappas: dict[str, int] = {}
+        for spec, _full_metric, _cases, _train_metric in ties:
+            mode = str(spec.get("boundaryResponseMode", "missing"))
+            family = str(spec.get("normalizationFamily", "missing"))
+            kappa = fmt(spec.get("sinkBoundaryWeight", ""))
+            tie_modes[mode] = tie_modes.get(mode, 0) + 1
+            tie_families[family] = tie_families.get(family, 0) + 1
+            tie_kappas[kappa] = tie_kappas.get(kappa, 0) + 1
+        rows.append(
+            {
+                "heldoutGalaxy": heldout,
+                "bestTrainGainKmS": best_train_gain,
+                "tieCount": len(ties),
+                "tieModes": json.dumps(tie_modes, sort_keys=True),
+                "tieFamilies": json.dumps(tie_families, sort_keys=True),
+                "tieKappas": json.dumps(tie_kappas, sort_keys=True),
+                "uniqueTrainSelection": len(ties) == 1,
+                "selectedNormalization": selected_spec["normalizationId"],
+                "selectedFamily": selected_spec["normalizationFamily"],
+                "selectedMode": selected_spec.get("boundaryResponseMode", ""),
+                "selectedKappa": selected_spec.get("sinkBoundaryWeight", ""),
+                "selectedFloor": selected_spec.get("boundaryResponseFloor", ""),
+                "selectedFullTargetGainKmS": selected_full["targetMeanGainOverHierarchyKmS"],
+                "selectedFullProtectedFalse": selected_full["protectedFalseReleaseCount"],
+                "heldoutHit": parse_float(heldout_row.get("addActivation"), 0.0) >= 0.05,
+                "heldoutGainKmS": heldout_row.get("candidateGainOverHierarchyKmS"),
+                "heldoutRegressionKmS": max(0.0, parse_float(heldout_row.get("candidateMinusHierarchyKmS"), 0.0)),
+            }
+        )
+    return rows
+
+
+def v19_boundary_amplitude_response_state_rows(scored: list[tuple[dict, dict, list[dict]]]) -> list[dict]:
+    rows: list[dict] = []
+    mode_cases: dict[str, list[dict]] = {}
+    for spec, _metric, cases in scored:
+        if spec["normalizationFamily"] != "physical-boundary-amplitude-law":
+            continue
+        if parse_float(spec.get("memoryDensityAddWeight"), 0.0) != 1.50:
+            continue
+        if parse_float(spec.get("sinkBoundaryWeight"), 0.0) != 1.00:
+            continue
+        if parse_float(spec.get("boundaryResponseFloor"), 0.0) != 0.00:
+            continue
+        mode_cases[str(spec.get("boundaryResponseMode", ""))] = cases
+    for mode, cases in sorted(mode_cases.items()):
+        clean_rows = [row for row in cases if row["set"] != "weak-systematics-excluded"]
+        boundary_rows = [row for row in clean_rows if parse_float(row.get("sourceBoundary"), 0.0) >= 0.05]
+        sink_rows = [row for row in boundary_rows if parse_float(row.get("xiSinkActivationRaw"), 0.0) >= 0.05]
+        add_rows = [row for row in boundary_rows if parse_float(row.get("xiAddActivationRaw"), 0.0) >= 0.05]
+        state_values = [parse_float(row.get("sourceBoundaryResponseState"), math.nan) for row in boundary_rows]
+        sink_state_values = [parse_float(row.get("sourceBoundaryResponseState"), math.nan) for row in sink_rows]
+        rows.append(
+            {
+                "responseMode": mode,
+                "boundaryEligibleCount": len(boundary_rows),
+                "rawAddActiveCount": len(add_rows),
+                "rawSinkActiveCount": len(sink_rows),
+                "meanResponseStateBoundary": safe_mean(state_values),
+                "minResponseStateBoundary": min(state_values or [math.nan]),
+                "maxResponseStateBoundary": max(state_values or [math.nan]),
+                "meanResponseStateSink": safe_mean(sink_state_values),
+                "minResponseStateSink": min(sink_state_values or [math.nan]),
+                "maxResponseStateSink": max(sink_state_values or [math.nan]),
+                "sinkStateDynamicRange": (max(sink_state_values or [math.nan]) - min(sink_state_values or [math.nan])),
+                "sinkStateSaturatedHighCount": sum(1 for value in sink_state_values if value >= 0.95),
+                "sinkStateSaturatedLowCount": sum(1 for value in sink_state_values if value <= 0.05),
+                "sinkCaseList": ";".join(row["galaxy"] for row in sink_rows),
+            }
+        )
+    return rows
+
+
+def write_v19_boundary_amplitude_identifiability_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_boundary_amplitude_identifiability"
+    scored: list[tuple[dict, dict, list[dict]]] = []
+    for spec in v19_boundary_amplitude_law_specs():
+        metric, cases, _shape_rows = v19_motion_field_normalization_score_spec(spec)
+        for field in [
+            "memoryDensityAddWeight",
+            "memoryBandSinkWeight",
+            "sinkBoundaryWeight",
+            "boundaryResponseMode",
+            "boundaryResponseFloor",
+        ]:
+            metric[field] = spec.get(field, "")
+        scored.append((spec, metric, cases))
+    law_rows = [item for item in scored if item[0]["normalizationFamily"] == "physical-boundary-amplitude-law"]
+    constant_rows = [item for item in scored if item[0]["normalizationFamily"] == "constant-boundary-response-control"]
+    best_law_spec, best_law_metric, best_law_cases = max(
+        law_rows,
+        key=lambda item: (
+            int(item[1]["protectedFalseReleaseCount"]) == 0,
+            -parse_float(item[1]["protectedActiveMaxRegressionKmS"], math.inf),
+            parse_float(item[1]["additiveTargetRecall"], 0.0),
+            parse_float(item[1]["targetMeanGainOverHierarchyKmS"], -math.inf),
+            -parse_float(item[0].get("sinkBoundaryWeight"), math.inf),
+        ),
+    )
+    best_constant_spec, best_constant_metric, _best_constant_cases = max(
+        constant_rows,
+        key=lambda item: (
+            int(item[1]["protectedFalseReleaseCount"]) == 0,
+            -parse_float(item[1]["protectedActiveMaxRegressionKmS"], math.inf),
+            parse_float(item[1]["additiveTargetRecall"], 0.0),
+            parse_float(item[1]["targetMeanGainOverHierarchyKmS"], -math.inf),
+        ),
+    )
+    core_spec = v19_source_residual_field_spec(
+        "memory-density-core-a1.50",
+        "memory-density-core",
+        alpha=1.50,
+        eta=0.00,
+    )
+    core_metric, _core_cases, _core_shape = v19_motion_field_normalization_score_spec(core_spec)
+    loo_tie_rows = v19_boundary_amplitude_leave_one_out_ties(scored)
+    response_state_rows = v19_boundary_amplitude_response_state_rows(scored)
+    null_rows = v19_motion_field_normalization_null_controls(best_law_spec, best_law_metric)
+    safe_null_rows = [row for row in null_rows if not parse_bool(row.get("protectedUnsafe"))]
+    null_p95 = v19_quantile([parse_float(row.get("targetGainKmS"), math.nan) for row in safe_null_rows], 0.95)
+    null_margin = parse_float(best_law_metric["targetMeanGainOverHierarchyKmS"], 0.0) - null_p95
+    law_gain = parse_float(best_law_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+    constant_gain = parse_float(best_constant_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+    core_gain = parse_float(core_metric["targetMeanGainOverHierarchyKmS"], 0.0)
+    law_margin_over_constant = law_gain - constant_gain
+    law_margin_over_core = law_gain - core_gain
+    unique_train_fraction = safe_mean(1.0 if parse_bool(row.get("uniqueTrainSelection")) else 0.0 for row in loo_tie_rows)
+    median_tie_count = v19_quantile([parse_float(row.get("tieCount"), math.nan) for row in loo_tie_rows], 0.50)
+    max_tie_count = max([int(parse_float(row.get("tieCount"), 0.0)) for row in loo_tie_rows] or [0])
+    selected_modes: dict[str, int] = {}
+    for row in loo_tie_rows:
+        mode = str(row.get("selectedMode", ""))
+        selected_modes[mode] = selected_modes.get(mode, 0) + 1
+    selected_best_mode_fraction = selected_modes.get(str(best_law_spec.get("boundaryResponseMode", "")), 0) / len(loo_tie_rows) if loo_tie_rows else 0.0
+    best_mode_state_row = next((row for row in response_state_rows if row["responseMode"] == best_law_spec.get("boundaryResponseMode")), {})
+    best_mode_sink_range = parse_float(best_mode_state_row.get("sinkStateDynamicRange"), math.nan)
+    if (
+        law_margin_over_constant >= 0.20
+        and unique_train_fraction >= 0.75
+        and selected_best_mode_fraction >= 0.75
+        and null_margin >= 1.0
+        and int(best_law_metric["protectedFalseReleaseCount"]) == 0
+    ):
+        verdict = "boundary amplitude physically identifiable"
+    elif (
+        int(best_law_metric["protectedFalseReleaseCount"]) == 0
+        and null_margin >= 1.0
+        and law_margin_over_core >= 0.75
+        and (law_margin_over_constant < 0.20 or unique_train_fraction < 0.75)
+    ):
+        verdict = "boundary response amplitude improves support but is not identifiable"
+    elif law_margin_over_constant < -0.20:
+        verdict = "constant amplitude favored"
+    elif null_margin <= 0.0:
+        verdict = "amplitude law not above null"
+    else:
+        verdict = "boundary amplitude unresolved"
+    score_rows: list[dict] = []
+    for spec, metric, _cases in scored:
+        row = dict(metric)
+        row["gainOverConstantControlKmS"] = parse_float(metric["targetMeanGainOverHierarchyKmS"], 0.0) - constant_gain
+        row["gainOverCoreKmS"] = parse_float(metric["targetMeanGainOverHierarchyKmS"], 0.0) - core_gain
+        row["isStateAmplitudeLaw"] = spec["normalizationFamily"] == "physical-boundary-amplitude-law"
+        score_rows.append(row)
+    formula = {
+        "candidateId": "mts-v19-boundary-amplitude-identifiability-v1",
+        "status": verdict,
+        "testedEquation": "N_sink = 1 + kappa * B_gas * R_state",
+        "bestLawSpec": best_law_spec,
+        "bestLawMetric": best_law_metric,
+        "bestConstantSpec": best_constant_spec,
+        "bestConstantMetric": best_constant_metric,
+        "memoryDensityCoreMetric": core_metric,
+        "lawMarginOverConstantKmS": law_margin_over_constant,
+        "lawMarginOverCoreKmS": law_margin_over_core,
+        "uniqueTrainSelectionFraction": unique_train_fraction,
+        "medianTieCount": median_tie_count,
+        "maxTieCount": max_tie_count,
+        "selectedModes": selected_modes,
+        "selectedBestModeFraction": selected_best_mode_fraction,
+        "bestModeSinkStateDynamicRange": best_mode_sink_range,
+        "safeNullTargetGainP95": null_p95,
+        "safeNullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    report = [
+        "# MTS v19 Boundary-Amplitude Identifiability",
+        "",
+        "This mode tests whether the boundary-response amplitude is identifiable from current source-state variables, rather than merely useful as an empirical coefficient.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Best Law Versus Controls",
+        "",
+        f"- Best state law: `{best_law_spec['normalizationId']}`.",
+        f"- Best response mode: `{best_law_spec.get('boundaryResponseMode')}`.",
+        f"- Target gain: `{fmt(best_law_metric['targetMeanGainOverHierarchyKmS'])}` km/s.",
+        f"- Gain over memory-density core: `{fmt(law_margin_over_core)}` km/s.",
+        f"- Margin over constant boundary amplitude: `{fmt(law_margin_over_constant)}` km/s.",
+        f"- Protected false releases: `{best_law_metric['protectedFalseReleaseCount']}`.",
+        f"- Protected active regression: `{fmt(best_law_metric['protectedActiveMaxRegressionKmS'])}` km/s.",
+        f"- Safe-null margin: `{fmt(null_margin)}` km/s.",
+        "",
+        "## Identifiability",
+        "",
+        f"- Unique train selection fraction: `{fmt(unique_train_fraction)}`.",
+        f"- Median tie count: `{fmt(median_tie_count)}`.",
+        f"- Max tie count: `{max_tie_count}`.",
+        f"- Selected modes under leave-one-target-out: `{json.dumps(selected_modes, sort_keys=True)}`.",
+        f"- Best-mode selected fraction: `{fmt(selected_best_mode_fraction)}`.",
+        f"- Best-mode sink-state dynamic range: `{fmt(best_mode_sink_range)}`.",
+        "",
+        "## Physical Reading",
+        "",
+        "The response/cap term is useful and protected-safe, but the present boundary-target set does not uniquely determine the state amplitude if the law ties a constant boundary coefficient or has large train-tie classes. That means the field equation can carry a boundary response term, while the exact amplitude source remains unclosed unless a new target set or a stronger physical state variable breaks this degeneracy.",
+        "",
+        "## Guardrails",
+        "",
+        "- No locked v18/browser law changed.",
+        "- No galaxy names, residuals, raw RMSE, NFW/MOND parameters, or weak/systematics fitting enter the formula.",
+        "",
+        verdict,
+    ]
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_case_ledger.csv", best_law_cases)
+    write_csv(out_dir / f"{prefix}_leave_one_out_ties.csv", loo_tie_rows)
+    write_csv(out_dir / f"{prefix}_response_state_ledger.csv", response_state_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-boundary-amplitude-identifiability-v1",
+        "verdict": verdict,
+        "bestLawSpec": best_law_spec,
+        "bestLawMetric": best_law_metric,
+        "bestConstantSpec": best_constant_spec,
+        "bestConstantMetric": best_constant_metric,
+        "memoryDensityCoreMetric": core_metric,
+        "lawMarginOverConstantKmS": law_margin_over_constant,
+        "lawMarginOverCoreKmS": law_margin_over_core,
+        "uniqueTrainSelectionFraction": unique_train_fraction,
+        "medianTieCount": median_tie_count,
+        "maxTieCount": max_tie_count,
+        "selectedModes": selected_modes,
+        "selectedBestModeFraction": selected_best_mode_fraction,
+        "bestModeSinkStateDynamicRange": best_mode_sink_range,
+        "safeNullTargetGainP95": null_p95,
+        "safeNullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_case_ledger.csv",
+            f"{prefix}_leave_one_out_ties.csv",
+            f"{prefix}_response_state_ledger.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -122845,6 +123151,31 @@ def cmd_v19boundaryamplitudelaw(args: argparse.Namespace) -> None:
     print(f"Wrote boundary-amplitude law audit to {out_dir.resolve()}")
 
 
+def cmd_v19boundaryamplitudeidentifiability(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_BOUNDARY_AMPLITUDE_IDENTIFIABILITY_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_boundary_amplitude_identifiability_artifacts(out_dir)
+    metric = capsule["bestLawMetric"]
+    spec = capsule["bestLawSpec"]
+    print("MTS v19 boundary-amplitude identifiability")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={spec['normalizationId']}",
+                f"mode={spec['boundaryResponseMode']}",
+                f"target_gain={fmt(metric['targetMeanGainOverHierarchyKmS'])}",
+                f"vs_constant={fmt(capsule['lawMarginOverConstantKmS'])}",
+                f"vs_core={fmt(capsule['lawMarginOverCoreKmS'])}",
+                f"unique_train={fmt(capsule['uniqueTrainSelectionFraction'])}",
+                f"max_tie={capsule['maxTieCount']}",
+                f"protected_false={metric['protectedFalseReleaseCount']}",
+                f"null_margin={fmt(capsule['safeNullMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote boundary-amplitude identifiability audit to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -123190,6 +123521,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19boundaryresponsefield",
             "v19boundaryamplitudelaw",
             "observedstatev19boundaryamplitudelaw",
+            "v19boundaryamplitudeidentifiability",
+            "observedstatev19boundaryamplitudeidentifiability",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -123711,6 +124044,8 @@ def main() -> None:
         cmd_v19boundaryresponsefield(args)
     elif args.mode in {"v19boundaryamplitudelaw", "observedstatev19boundaryamplitudelaw"}:
         cmd_v19boundaryamplitudelaw(args)
+    elif args.mode in {"v19boundaryamplitudeidentifiability", "observedstatev19boundaryamplitudeidentifiability"}:
+        cmd_v19boundaryamplitudeidentifiability(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
