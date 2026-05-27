@@ -313,6 +313,7 @@ DEFAULT_V19_BOUNDARY_RESPONSE_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-r
 DEFAULT_V19_BOUNDARY_AMPLITUDE_LAW_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-amplitude-law-v1"
 DEFAULT_V19_BOUNDARY_AMPLITUDE_IDENTIFIABILITY_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-amplitude-identifiability-v1"
 DEFAULT_V19_BOUNDARY_SINK_LEVERAGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-sink-leverage-v1"
+DEFAULT_V19_AMPLITUDE_LEVERAGE_AUDIT_OUT = OUTPUT_PACK_ROOT / "mts-v19-amplitude-leverage-audit-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -122882,6 +122883,312 @@ def write_v19_boundary_sink_leverage_artifacts(out_dir: Path) -> dict:
     return capsule
 
 
+def v19_amplitude_leverage_probe_modes() -> list[str]:
+    return [
+        "memory-density",
+        "gas-disk",
+        "gap-gate",
+        "density-band",
+        "low-fgas",
+        "low-memory",
+        "high-umax",
+        "outer-u-drop",
+    ]
+
+
+def v19_amplitude_leverage_probe_specs() -> list[dict]:
+    specs = [
+        v19_boundary_amplitude_law_spec(
+            "amplitude-probe-constant",
+            "constant-boundary-response-control",
+            alpha=1.50,
+            eta=0.00,
+            kappa=1.00,
+            response_mode="constant",
+            response_floor=0.0,
+        )
+    ]
+    for mode in v19_amplitude_leverage_probe_modes():
+        specs.append(
+            v19_boundary_amplitude_law_spec(
+                f"amplitude-probe-{mode}",
+                "physical-boundary-amplitude-probe",
+                alpha=1.50,
+                eta=0.00,
+                kappa=1.00,
+                response_mode=mode,
+                response_floor=0.0,
+            )
+        )
+    return specs
+
+
+def v19_amplitude_leverage_case_class(row: dict, state_values: list[float]) -> tuple[str, float, int, float, float]:
+    boundary = parse_float(row.get("sourceBoundary"), 0.0)
+    raw_sink = parse_float(row.get("xiSinkActivationRaw"), 0.0)
+    raw_add = parse_float(row.get("xiAddActivationRaw"), 0.0)
+    finite_states = [value for value in state_values if math.isfinite(value)]
+    state_min = min(finite_states or [math.nan])
+    state_max = max(finite_states or [math.nan])
+    state_range = state_max - state_min if math.isfinite(state_min) and math.isfinite(state_max) else math.nan
+    unsaturated_count = sum(1 for value in finite_states if 0.10 < value < 0.90)
+    leverage_score = boundary * max(raw_sink, 0.0) * max(state_range, 0.0) * (unsaturated_count / len(finite_states) if finite_states else 0.0)
+    if raw_sink >= 0.05 and state_range >= 0.25 and unsaturated_count >= 2:
+        leverage_class = "direct sink amplitude leverage"
+    elif raw_sink >= 0.05:
+        leverage_class = "saturated sink operator only"
+    elif raw_add >= 0.05 and boundary >= 0.05 and state_range >= 0.25:
+        leverage_class = "additive boundary target; no sink amplitude"
+    elif row.get("set") == "clean-protected" and boundary >= 0.05 and state_range >= 0.25:
+        leverage_class = "protected lookalike amplitude leverage"
+    elif boundary >= 0.05 and state_range >= 0.25:
+        leverage_class = "boundary state leverage; no active operator"
+    else:
+        leverage_class = "no amplitude leverage"
+    return leverage_class, leverage_score, unsaturated_count, state_range, state_max
+
+
+def write_v19_amplitude_leverage_audit_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_amplitude_leverage_audit"
+    probe_specs = v19_amplitude_leverage_probe_specs()
+    cases_by_mode: dict[str, list[dict]] = {}
+    metrics_by_mode: dict[str, dict] = {}
+    for spec in probe_specs:
+        metric, cases, _shape_rows = v19_motion_field_normalization_score_spec(spec)
+        mode = str(spec.get("boundaryResponseMode", "constant"))
+        cases_by_mode[mode] = cases
+        metrics_by_mode[mode] = metric
+    reference_cases = cases_by_mode["low-fgas"]
+    mode_names = v19_amplitude_leverage_probe_modes()
+    mode_case_by_name = {
+        mode: {row["galaxy"]: row for row in cases_by_mode[mode]}
+        for mode in mode_names
+    }
+    leverage_rows: list[dict] = []
+    for row in reference_cases:
+        if row["set"] == "weak-systematics-excluded":
+            continue
+        state_by_mode = {
+            mode: parse_float(mode_case_by_name[mode].get(row["galaxy"], {}).get("sourceBoundaryResponseState"), math.nan)
+            for mode in mode_names
+        }
+        leverage_class, leverage_score, unsaturated_count, state_range, state_max = v19_amplitude_leverage_case_class(row, list(state_by_mode.values()))
+        leverage_rows.append(
+            {
+                "galaxy": row["galaxy"],
+                "set": row["set"],
+                "lockedRoute": row["lockedRoute"],
+                "isGasBoundaryTarget": row["isGasBoundaryTarget"],
+                "leverageClass": leverage_class,
+                "amplitudeLeverageScore": leverage_score,
+                "responseStateRange": state_range,
+                "responseStateMax": state_max,
+                "unsaturatedResponseStateCount": unsaturated_count,
+                "sourceBoundary": row.get("sourceBoundary"),
+                "xiAddActivationRaw": row.get("xiAddActivationRaw"),
+                "xiSinkActivationRaw": row.get("xiSinkActivationRaw"),
+                "addActivation": row.get("addActivation"),
+                "sinkActivation": row.get("sinkActivation"),
+                "hierarchyRmse": row.get("hierarchyRmse"),
+                "candidateRmse": row.get("candidateRmse"),
+                "candidateGainOverHierarchyKmS": row.get("candidateGainOverHierarchyKmS"),
+                "memoryLoad": row.get("memoryLoad"),
+                "fGasOut": row.get("fGasOut"),
+                "u075": row.get("u075"),
+                "uOut": row.get("uOut"),
+                "uMax": row.get("uMax"),
+                "outerGasShare": row.get("outerGasShare"),
+                "outerDiskShare": row.get("outerDiskShare"),
+                "pointDensity": row.get("pointDensity"),
+                "lGapOverH": row.get("lGapOverH"),
+                **{f"state_{mode.replace('-', '_')}": value for mode, value in state_by_mode.items()},
+            }
+        )
+    class_counts: dict[str, int] = {}
+    set_class_counts: dict[str, int] = {}
+    for row in leverage_rows:
+        class_counts[row["leverageClass"]] = class_counts.get(row["leverageClass"], 0) + 1
+        key = f"{row['set']}::{row['leverageClass']}"
+        set_class_counts[key] = set_class_counts.get(key, 0) + 1
+    direct_sink_rows = [row for row in leverage_rows if row["leverageClass"] == "direct sink amplitude leverage"]
+    high_direct_sink_rows = [row for row in direct_sink_rows if row["set"] == "clean-high-rmse"]
+    protected_direct_sink_rows = [row for row in direct_sink_rows if row["set"] == "clean-protected"]
+    saturated_sink_rows = [row for row in leverage_rows if row["leverageClass"] == "saturated sink operator only"]
+    additive_rows = [row for row in leverage_rows if row["leverageClass"] == "additive boundary target; no sink amplitude"]
+    protected_lookalike_rows = [row for row in leverage_rows if row["leverageClass"] == "protected lookalike amplitude leverage"]
+    candidate_rows = sorted(
+        [row for row in leverage_rows if row["leverageClass"] != "no amplitude leverage"],
+        key=lambda row: (
+            row["leverageClass"] != "direct sink amplitude leverage",
+            -parse_float(row.get("amplitudeLeverageScore"), 0.0),
+            row["galaxy"],
+        ),
+    )
+    mode_summary_rows: list[dict] = []
+    for mode in mode_names:
+        values_all = [parse_float(row.get(f"state_{mode.replace('-', '_')}"), math.nan) for row in leverage_rows]
+        values_sink = [parse_float(row.get(f"state_{mode.replace('-', '_')}"), math.nan) for row in leverage_rows if parse_float(row.get("xiSinkActivationRaw"), 0.0) >= 0.05]
+        values_direct = [parse_float(row.get(f"state_{mode.replace('-', '_')}"), math.nan) for row in direct_sink_rows]
+        mode_summary_rows.append(
+            {
+                "responseMode": mode,
+                "cleanCount": len(leverage_rows),
+                "sinkRawCount": len(values_sink),
+                "directSinkLeverageCount": len(values_direct),
+                "meanAll": safe_mean(values_all),
+                "minAll": min(values_all or [math.nan]),
+                "maxAll": max(values_all or [math.nan]),
+                "meanSink": safe_mean(values_sink),
+                "minSink": min(values_sink or [math.nan]),
+                "maxSink": max(values_sink or [math.nan]),
+                "rangeSink": (max(values_sink or [math.nan]) - min(values_sink or [math.nan])),
+                "meanDirectSink": safe_mean(values_direct),
+                "minDirectSink": min(values_direct or [math.nan]),
+                "maxDirectSink": max(values_direct or [math.nan]),
+                "saturatedHighSinkCount": sum(1 for value in values_sink if value >= 0.95),
+                "saturatedLowSinkCount": sum(1 for value in values_sink if value <= 0.05),
+            }
+        )
+    if len(high_direct_sink_rows) >= 8 and len(protected_direct_sink_rows) >= 2:
+        verdict = "SPARC contains enough amplitude leverage for kappa law"
+    elif len(high_direct_sink_rows) >= 4 and len(saturated_sink_rows) < len(high_direct_sink_rows):
+        verdict = "SPARC contains limited amplitude leverage"
+    elif len(saturated_sink_rows) >= 4 and len(high_direct_sink_rows) == 0:
+        verdict = "SPARC sink cases saturate amplitude states; external leverage needed"
+    elif len(high_direct_sink_rows) < 4:
+        verdict = "insufficient SPARC amplitude leverage"
+    else:
+        verdict = "amplitude leverage unresolved"
+    next_actions = []
+    if len(high_direct_sink_rows) >= 4:
+        next_actions.append(
+            {
+                "priority": 1,
+                "action": "test v19 kappa state law on direct sink-leverage cases",
+                "reason": "Clean high-RMSE sink cases have non-saturated response-state spread.",
+            }
+        )
+    else:
+        next_actions.append(
+            {
+                "priority": 1,
+                "action": "do not tune kappa inside SPARC",
+                "reason": "Current clean high-RMSE sink cases do not provide enough amplitude leverage.",
+            }
+        )
+        next_actions.append(
+            {
+                "priority": 2,
+                "action": "seek external or 2D gas-field boundary cases with active sink response and non-saturated gas fraction/memory states",
+                "reason": "A field coefficient needs cases where allowed state variables vary while the boundary response is active.",
+            }
+        )
+    formula = {
+        "candidateId": "mts-v19-amplitude-leverage-audit-v1",
+        "status": verdict,
+        "purpose": "Find cases that can identify the boundary response amplitude kappa.",
+        "directSinkLeverageCount": len(direct_sink_rows),
+        "highDirectSinkLeverageCount": len(high_direct_sink_rows),
+        "protectedDirectSinkLeverageCount": len(protected_direct_sink_rows),
+        "saturatedSinkOnlyCount": len(saturated_sink_rows),
+        "additiveNoSinkCount": len(additive_rows),
+        "protectedLookalikeLeverageCount": len(protected_lookalike_rows),
+        "classCounts": class_counts,
+        "setClassCounts": set_class_counts,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "forbiddenInputs": ["galaxy name as formula input", "raw residual", "raw RMSE", "NFW parameters", "MOND parameters", "weak/systematics fitting"],
+    }
+    report = [
+        "# MTS v19 Amplitude-Leverage Audit",
+        "",
+        "This mode scans the clean SPARC set for galaxies that can actually identify the boundary-response amplitude. It does not fit a new law and does not change v18/browser behavior.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Counts",
+        "",
+        f"- Direct sink amplitude leverage cases: `{len(direct_sink_rows)}`.",
+        f"- Clean high-RMSE direct sink leverage cases: `{len(high_direct_sink_rows)}`.",
+        f"- Protected direct sink leverage cases: `{len(protected_direct_sink_rows)}`.",
+        f"- Saturated sink-operator-only cases: `{len(saturated_sink_rows)}`.",
+        f"- Additive boundary targets without sink-amplitude leverage: `{len(additive_rows)}`.",
+        f"- Protected lookalike amplitude-leverage cases: `{len(protected_lookalike_rows)}`.",
+        "",
+        "## Direct Sink Leverage Candidates",
+        "",
+        "| galaxy | set | score | state range | raw sink | fGasOut | memoryLoad |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in direct_sink_rows[:20]:
+        report.append(
+            f"| {row['galaxy']} | {row['set']} | {fmt(row['amplitudeLeverageScore'])} | {fmt(row['responseStateRange'])} | {fmt(row['xiSinkActivationRaw'])} | {fmt(row['fGasOut'])} | {fmt(row['memoryLoad'])} |"
+        )
+    if not direct_sink_rows:
+        report.append("| none | - | - | - | - | - | - |")
+    report.extend(
+        [
+            "",
+            "## Saturated Sink Cases",
+            "",
+            "| galaxy | set | raw sink | low-fgas state | memory-density state | candidate gain |",
+            "| --- | --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in saturated_sink_rows:
+        report.append(
+            f"| {row['galaxy']} | {row['set']} | {fmt(row['xiSinkActivationRaw'])} | {fmt(row['state_low_fgas'])} | {fmt(row['state_memory_density'])} | {fmt(row['candidateGainOverHierarchyKmS'])} |"
+        )
+    report.extend(
+        [
+            "",
+            "## Physical Reading",
+            "",
+            "The boundary response/cap can be tested by the current sink cases, but deriving its coefficient requires non-saturated state variation while the sink operator is active. If those cases are absent or saturated, the correct scientific move is not another threshold search; it is to acquire external or 2D gas-field examples that provide amplitude leverage.",
+            "",
+            "## Guardrails",
+            "",
+            "- No locked v18/browser law changed.",
+            "- Galaxy names appear only in ledgers; they are not formula inputs.",
+            "- No raw residual/RMSE, NFW/MOND parameter, or weak/systematics fitting is used.",
+            "",
+            verdict,
+        ]
+    )
+    write_csv(out_dir / f"{prefix}_leverage_cases.csv", leverage_rows)
+    write_csv(out_dir / f"{prefix}_candidate_targets.csv", candidate_rows)
+    write_csv(out_dir / f"{prefix}_response_state_summary.csv", mode_summary_rows)
+    write_csv(out_dir / f"{prefix}_next_actions.csv", next_actions)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-amplitude-leverage-audit-v1",
+        "verdict": verdict,
+        "directSinkLeverageCount": len(direct_sink_rows),
+        "highDirectSinkLeverageCount": len(high_direct_sink_rows),
+        "protectedDirectSinkLeverageCount": len(protected_direct_sink_rows),
+        "saturatedSinkOnlyCount": len(saturated_sink_rows),
+        "additiveNoSinkCount": len(additive_rows),
+        "protectedLookalikeLeverageCount": len(protected_lookalike_rows),
+        "classCounts": class_counts,
+        "setClassCounts": set_class_counts,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_leverage_cases.csv",
+            f"{prefix}_candidate_targets.csv",
+            f"{prefix}_response_state_summary.csv",
+            f"{prefix}_next_actions.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -123581,6 +123888,25 @@ def cmd_v19boundarysinkleverage(args: argparse.Namespace) -> None:
     print(f"Wrote boundary sink-leverage audit to {out_dir.resolve()}")
 
 
+def cmd_v19amplitudeleverageaudit(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_AMPLITUDE_LEVERAGE_AUDIT_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_amplitude_leverage_audit_artifacts(out_dir)
+    print("MTS v19 amplitude-leverage audit")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"direct_sink={capsule['directSinkLeverageCount']}",
+                f"high_direct={capsule['highDirectSinkLeverageCount']}",
+                f"protected_direct={capsule['protectedDirectSinkLeverageCount']}",
+                f"saturated_sink={capsule['saturatedSinkOnlyCount']}",
+                f"add_no_sink={capsule['additiveNoSinkCount']}",
+            ]
+        )
+    )
+    print(f"Wrote amplitude-leverage audit to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -123930,6 +124256,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19boundaryamplitudeidentifiability",
             "v19boundarysinkleverage",
             "observedstatev19boundarysinkleverage",
+            "v19amplitudeleverageaudit",
+            "observedstatev19amplitudeleverageaudit",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -124455,6 +124783,8 @@ def main() -> None:
         cmd_v19boundaryamplitudeidentifiability(args)
     elif args.mode in {"v19boundarysinkleverage", "observedstatev19boundarysinkleverage"}:
         cmd_v19boundarysinkleverage(args)
+    elif args.mode in {"v19amplitudeleverageaudit", "observedstatev19amplitudeleverageaudit"}:
+        cmd_v19amplitudeleverageaudit(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
