@@ -312,6 +312,7 @@ DEFAULT_V19_SOURCE_BOUNDARY_HARDENING_OUT = OUTPUT_PACK_ROOT / "mts-v19-source-b
 DEFAULT_V19_BOUNDARY_RESPONSE_FIELD_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-response-field-v1"
 DEFAULT_V19_BOUNDARY_AMPLITUDE_LAW_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-amplitude-law-v1"
 DEFAULT_V19_BOUNDARY_AMPLITUDE_IDENTIFIABILITY_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-amplitude-identifiability-v1"
+DEFAULT_V19_BOUNDARY_SINK_LEVERAGE_OUT = OUTPUT_PACK_ROOT / "mts-v19-boundary-sink-leverage-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_SHAPE_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-shape-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-candidate-v1"
 DEFAULT_OBSERVED_STATE_V18_LEGACY_VBAR_POLARITY_STRESS_OUT = OUTPUT_PACK_ROOT / "mts-v18-legacy-vbar-polarity-stress-v1"
@@ -122503,6 +122504,384 @@ def write_v19_boundary_amplitude_identifiability_artifacts(out_dir: Path) -> dic
     return capsule
 
 
+def v19_boundary_sink_target_names(case_rows: list[dict]) -> list[str]:
+    return sorted(
+        row["galaxy"]
+        for row in case_rows
+        if row["set"] == "clean-high-rmse"
+        and parse_bool(row.get("isGasBoundaryTarget"))
+        and parse_float(row.get("xiSinkActivationRaw"), 0.0) >= 0.05
+    )
+
+
+def v19_boundary_sink_training_metric(case_rows: list[dict], excluded_target: str | None = None) -> dict:
+    pool = [
+        row
+        for row in case_rows
+        if row["set"] == "clean-high-rmse"
+        and parse_bool(row.get("isGasBoundaryTarget"))
+        and parse_float(row.get("xiSinkActivationRaw"), 0.0) >= 0.05
+        and row["galaxy"] != excluded_target
+    ]
+    hits = [row for row in pool if parse_float(row.get("sinkActivation"), 0.0) >= 0.05]
+    additive_pool = [
+        row
+        for row in case_rows
+        if row["set"] == "clean-high-rmse"
+        and parse_bool(row.get("isGasBoundaryTarget"))
+        and parse_float(row.get("xiAddActivationRaw"), 0.0) >= 0.05
+        and row["galaxy"] != excluded_target
+    ]
+    additive_hits = [row for row in additive_pool if parse_float(row.get("addActivation"), 0.0) >= 0.05]
+    protected_active = [
+        row
+        for row in case_rows
+        if row["set"] == "clean-protected"
+        and (parse_float(row.get("addActivation"), 0.0) >= 0.05 or parse_float(row.get("sinkActivation"), 0.0) >= 0.05)
+    ]
+    return {
+        "trainSinkTargetCount": len(pool),
+        "trainSinkHitCount": len(hits),
+        "trainSinkRecall": len(hits) / len(pool) if pool else 0.0,
+        "trainSinkGainKmS": safe_mean(parse_float(row.get("candidateGainOverHierarchyKmS"), math.nan) for row in pool),
+        "trainAdditiveTargetCount": len(additive_pool),
+        "trainAdditiveRecall": len(additive_hits) / len(additive_pool) if additive_pool else 0.0,
+        "trainAdditiveGainKmS": safe_mean(parse_float(row.get("candidateGainOverHierarchyKmS"), math.nan) for row in additive_pool),
+        "trainProtectedFalse": sum(1 for row in protected_active if parse_float(row.get("candidateMinusHierarchyKmS"), 0.0) > 0.25),
+        "trainProtectedActiveRegressionKmS": max(0.0, max([parse_float(row.get("candidateMinusHierarchyKmS"), 0.0) for row in protected_active] or [0.0])),
+    }
+
+
+def v19_boundary_sink_leave_one_out_ties(scored: list[tuple[dict, dict, list[dict]]], tolerance: float = 1.0e-9) -> list[dict]:
+    reference_cases = scored[0][2] if scored else []
+    heldout_targets = v19_boundary_sink_target_names(reference_cases)
+    rows: list[dict] = []
+    for heldout in heldout_targets:
+        ranked: list[tuple[dict, dict, list[dict], dict]] = []
+        for spec, full_metric, cases in scored:
+            train_metric = v19_boundary_sink_training_metric(cases, heldout)
+            ranked.append((spec, full_metric, cases, train_metric))
+        safe_ranked = [
+            item
+            for item in ranked
+            if item[3]["trainProtectedFalse"] == 0
+            and parse_float(item[3]["trainProtectedActiveRegressionKmS"], math.inf) <= 0.25
+            and parse_float(item[3]["trainSinkRecall"], 0.0) >= 1.0
+            and parse_float(item[3]["trainAdditiveRecall"], 0.0) >= 1.0
+        ]
+        if not safe_ranked:
+            safe_ranked = ranked
+        best_train_gain = max(parse_float(item[3]["trainSinkGainKmS"], -math.inf) for item in safe_ranked)
+        ties = [
+            item
+            for item in safe_ranked
+            if abs(parse_float(item[3]["trainSinkGainKmS"], -math.inf) - best_train_gain) <= tolerance
+        ]
+        selected_spec, selected_full, selected_cases, selected_train = max(
+            ties,
+            key=lambda item: (
+                item[0]["normalizationFamily"] == "physical-boundary-amplitude-law",
+                str(item[0].get("boundaryResponseMode", "")) != "constant",
+                parse_float(item[0].get("sinkBoundaryWeight"), -math.inf),
+                parse_float(item[0].get("boundaryResponseFloor"), -math.inf),
+                parse_float(item[0].get("memoryDensityAddWeight"), -math.inf),
+            ),
+        )
+        heldout_row = next(row for row in selected_cases if row["galaxy"] == heldout)
+        tie_modes: dict[str, int] = {}
+        tie_families: dict[str, int] = {}
+        tie_kappas: dict[str, int] = {}
+        for spec, _full_metric, _cases, _train_metric in ties:
+            mode = str(spec.get("boundaryResponseMode", "missing"))
+            family = str(spec.get("normalizationFamily", "missing"))
+            kappa = fmt(spec.get("sinkBoundaryWeight", ""))
+            tie_modes[mode] = tie_modes.get(mode, 0) + 1
+            tie_families[family] = tie_families.get(family, 0) + 1
+            tie_kappas[kappa] = tie_kappas.get(kappa, 0) + 1
+        rows.append(
+            {
+                "heldoutGalaxy": heldout,
+                "bestTrainSinkGainKmS": best_train_gain,
+                "tieCount": len(ties),
+                "tieModes": json.dumps(tie_modes, sort_keys=True),
+                "tieFamilies": json.dumps(tie_families, sort_keys=True),
+                "tieKappas": json.dumps(tie_kappas, sort_keys=True),
+                "uniqueTrainSelection": len(ties) == 1,
+                "selectedNormalization": selected_spec["normalizationId"],
+                "selectedFamily": selected_spec["normalizationFamily"],
+                "selectedMode": selected_spec.get("boundaryResponseMode", ""),
+                "selectedKappa": selected_spec.get("sinkBoundaryWeight", ""),
+                "selectedFloor": selected_spec.get("boundaryResponseFloor", ""),
+                "trainSinkRecall": selected_train["trainSinkRecall"],
+                "trainAdditiveRecall": selected_train["trainAdditiveRecall"],
+                "selectedFullSinkGainKmS": selected_full.get("sinkTargetMeanGainKmS", ""),
+                "selectedFullTargetGainKmS": selected_full["targetMeanGainOverHierarchyKmS"],
+                "selectedFullProtectedFalse": selected_full["protectedFalseReleaseCount"],
+                "heldoutSinkHit": parse_float(heldout_row.get("sinkActivation"), 0.0) >= 0.05,
+                "heldoutGainKmS": heldout_row.get("candidateGainOverHierarchyKmS"),
+                "heldoutRegressionKmS": max(0.0, parse_float(heldout_row.get("candidateMinusHierarchyKmS"), 0.0)),
+            }
+        )
+    return rows
+
+
+def v19_boundary_sink_null_controls(best_spec: dict, sink_target_names: list[str], seeds: list[int] | None = None) -> list[dict]:
+    if seeds is None:
+        seeds = [19801, 19813, 19819, 19841, 19843, 19853, 19861, 19867, 19889, 19891, 19913]
+    base_spec = v19_motion_field_base_kernel_spec(
+        kernelId=best_spec["normalizationId"],
+        kernelFamily=best_spec["normalizationFamily"],
+        betaAdd=best_spec["betaAdd"],
+        betaSink=best_spec["betaSink"],
+    )
+    _metric, case_rows, _shape_rows = v19_motion_field_normalization_score_spec(best_spec)
+    eligible_rows = [
+        row
+        for row in case_rows
+        if row["set"] != "weak-systematics-excluded"
+        and row["lockedRoute"] == "low-load"
+        and parse_float(row.get("sourceBoundary"), 0.0) >= 0.05
+        and parse_float(row.get("nPoints"), 0.0) >= 8
+    ]
+    eligible = [row["galaxy"] for row in eligible_rows]
+    active_sink_rows = [row for row in eligible_rows if parse_float(row.get("sinkActivation"), 0.0) >= 0.05]
+    active_sink_values = [parse_float(row.get("sinkActivation"), 0.0) for row in active_sink_rows]
+    active_sink_count = len(active_sink_rows)
+    rows: list[dict] = []
+    for null_type in ["same-active-random-sink-lowload", "shuffled-sink-strength"]:
+        for seed in seeds:
+            rng = random.Random(seed)
+            if null_type == "same-active-random-sink-lowload":
+                chosen = set(rng.sample(eligible, min(active_sink_count, len(eligible))))
+                sink_value = safe_mean(active_sink_values) if active_sink_values else 0.0
+                overrides = {name: ((0.0, sink_value) if name in chosen else (0.0, 0.0)) for name in eligible}
+            else:
+                shuffled = active_sink_values + [0.0] * max(0, len(eligible) - len(active_sink_values))
+                rng.shuffle(shuffled)
+                overrides = {name: (0.0, value) for name, value in zip(eligible, shuffled)}
+            metric, cases, _shape = v19_motion_field_kernel_score_spec(base_spec, overrides)
+            sink_cases = [row for row in cases if row["galaxy"] in sink_target_names]
+            rows.append(
+                {
+                    "nullType": null_type,
+                    "seed": seed,
+                    "activeSinkCount": active_sink_count,
+                    "eligibleCount": len(eligible),
+                    "sinkTargetGainKmS": safe_mean(parse_float(row.get("candidateGainOverHierarchyKmS"), math.nan) for row in sink_cases),
+                    "targetGainKmS": metric["targetMeanGainOverHierarchyKmS"],
+                    "protectedFalseReleaseCount": metric["protectedFalseReleaseCount"],
+                    "protectedActiveMaxRegressionKmS": metric["protectedActiveMaxRegressionKmS"],
+                    "protectedUnsafe": parse_float(metric["protectedActiveMaxRegressionKmS"], 0.0) > 1.0 or int(metric["protectedFalseReleaseCount"]) > 1,
+                }
+            )
+    return rows
+
+
+def write_v19_boundary_sink_leverage_artifacts(out_dir: Path) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = "mts_v19_boundary_sink_leverage"
+    scored: list[tuple[dict, dict, list[dict]]] = []
+    for spec in v19_boundary_amplitude_law_specs():
+        metric, cases, _shape_rows = v19_motion_field_normalization_score_spec(spec)
+        sink_names = v19_boundary_sink_target_names(cases)
+        sink_cases = [row for row in cases if row["galaxy"] in sink_names]
+        additive_names = v19_motion_field_normalization_additive_targets(cases)
+        additive_cases = [row for row in cases if row["galaxy"] in additive_names]
+        metric["sinkTargetCount"] = len(sink_cases)
+        metric["sinkTargetMeanGainKmS"] = safe_mean(parse_float(row.get("candidateGainOverHierarchyKmS"), math.nan) for row in sink_cases)
+        metric["sinkTargetRecall"] = sum(1 for row in sink_cases if parse_float(row.get("sinkActivation"), 0.0) >= 0.05) / len(sink_cases) if sink_cases else 0.0
+        metric["additiveTargetMeanGainKmS"] = safe_mean(parse_float(row.get("candidateGainOverHierarchyKmS"), math.nan) for row in additive_cases)
+        for field in [
+            "memoryDensityAddWeight",
+            "memoryBandSinkWeight",
+            "sinkBoundaryWeight",
+            "boundaryResponseMode",
+            "boundaryResponseFloor",
+        ]:
+            metric[field] = spec.get(field, "")
+        scored.append((spec, metric, cases))
+    law_rows = [item for item in scored if item[0]["normalizationFamily"] == "physical-boundary-amplitude-law"]
+    constant_rows = [item for item in scored if item[0]["normalizationFamily"] == "constant-boundary-response-control"]
+    best_law_spec, best_law_metric, best_law_cases = max(
+        law_rows,
+        key=lambda item: (
+            int(item[1]["protectedFalseReleaseCount"]) == 0,
+            -parse_float(item[1]["protectedActiveMaxRegressionKmS"], math.inf),
+            parse_float(item[1]["sinkTargetRecall"], 0.0),
+            parse_float(item[1]["sinkTargetMeanGainKmS"], -math.inf),
+            parse_float(item[1]["additiveTargetRecall"], 0.0),
+            -parse_float(item[0].get("sinkBoundaryWeight"), math.inf),
+        ),
+    )
+    best_constant_spec, best_constant_metric, _best_constant_cases = max(
+        constant_rows,
+        key=lambda item: (
+            int(item[1]["protectedFalseReleaseCount"]) == 0,
+            -parse_float(item[1]["protectedActiveMaxRegressionKmS"], math.inf),
+            parse_float(item[1]["sinkTargetRecall"], 0.0),
+            parse_float(item[1]["sinkTargetMeanGainKmS"], -math.inf),
+        ),
+    )
+    core_spec = v19_source_residual_field_spec(
+        "memory-density-core-a1.50",
+        "memory-density-core",
+        alpha=1.50,
+        eta=0.00,
+    )
+    core_metric, core_cases, _core_shape = v19_motion_field_normalization_score_spec(core_spec)
+    sink_names = v19_boundary_sink_target_names(best_law_cases)
+    core_sink_cases = [row for row in core_cases if row["galaxy"] in sink_names]
+    core_sink_gain = safe_mean(parse_float(row.get("candidateGainOverHierarchyKmS"), math.nan) for row in core_sink_cases)
+    loo_rows = v19_boundary_sink_leave_one_out_ties(scored)
+    null_rows = v19_boundary_sink_null_controls(best_law_spec, sink_names)
+    safe_null_rows = [row for row in null_rows if not parse_bool(row.get("protectedUnsafe"))]
+    null_p95 = v19_quantile([parse_float(row.get("sinkTargetGainKmS"), math.nan) for row in safe_null_rows], 0.95)
+    sink_gain = parse_float(best_law_metric["sinkTargetMeanGainKmS"], 0.0)
+    constant_sink_gain = parse_float(best_constant_metric["sinkTargetMeanGainKmS"], 0.0)
+    sink_margin_over_constant = sink_gain - constant_sink_gain
+    sink_margin_over_core = sink_gain - core_sink_gain
+    null_margin = sink_gain - null_p95
+    unique_train_fraction = safe_mean(1.0 if parse_bool(row.get("uniqueTrainSelection")) else 0.0 for row in loo_rows)
+    median_tie_count = v19_quantile([parse_float(row.get("tieCount"), math.nan) for row in loo_rows], 0.50)
+    max_tie_count = max([int(parse_float(row.get("tieCount"), 0.0)) for row in loo_rows] or [0])
+    selected_modes: dict[str, int] = {}
+    for row in loo_rows:
+        mode = str(row.get("selectedMode", ""))
+        selected_modes[mode] = selected_modes.get(mode, 0) + 1
+    selected_best_mode_fraction = selected_modes.get(str(best_law_spec.get("boundaryResponseMode", "")), 0) / len(loo_rows) if loo_rows else 0.0
+    if (
+        sink_margin_over_constant >= 0.50
+        and unique_train_fraction >= 0.50
+        and selected_best_mode_fraction >= 0.75
+        and null_margin >= 1.0
+        and int(best_law_metric["protectedFalseReleaseCount"]) == 0
+        and parse_float(best_law_metric["protectedActiveMaxRegressionKmS"], math.inf) <= 0.25
+    ):
+        verdict = "boundary sink amplitude identifiable"
+    elif (
+        sink_margin_over_core >= 1.0
+        and int(best_law_metric["protectedFalseReleaseCount"]) == 0
+        and null_margin >= 1.0
+    ):
+        verdict = "boundary sink response real but amplitude state underdetermined"
+    elif sink_margin_over_constant < -0.25:
+        verdict = "constant sink amplitude favored"
+    elif null_margin <= 0.0:
+        verdict = "sink amplitude not above null"
+    else:
+        verdict = "boundary sink leverage inconclusive"
+    score_rows: list[dict] = []
+    for spec, metric, _cases in scored:
+        row = dict(metric)
+        row["sinkGainOverConstantControlKmS"] = parse_float(metric["sinkTargetMeanGainKmS"], 0.0) - constant_sink_gain
+        row["sinkGainOverCoreKmS"] = parse_float(metric["sinkTargetMeanGainKmS"], 0.0) - core_sink_gain
+        row["isStateAmplitudeLaw"] = spec["normalizationFamily"] == "physical-boundary-amplitude-law"
+        score_rows.append(row)
+    sink_case_rows = [row for row in best_law_cases if row["galaxy"] in sink_names]
+    formula = {
+        "candidateId": "mts-v19-boundary-sink-leverage-v1",
+        "status": verdict,
+        "testedEquation": "N_sink = 1 + kappa * B_gas * R_state, scored only on sink-active leverage cases",
+        "sinkTargetNames": sink_names,
+        "bestLawSpec": best_law_spec,
+        "bestLawMetric": best_law_metric,
+        "bestConstantSpec": best_constant_spec,
+        "bestConstantMetric": best_constant_metric,
+        "coreSinkGainKmS": core_sink_gain,
+        "sinkMarginOverConstantKmS": sink_margin_over_constant,
+        "sinkMarginOverCoreKmS": sink_margin_over_core,
+        "uniqueTrainSelectionFraction": unique_train_fraction,
+        "medianTieCount": median_tie_count,
+        "maxTieCount": max_tie_count,
+        "selectedModes": selected_modes,
+        "selectedBestModeFraction": selected_best_mode_fraction,
+        "safeSinkNullP95KmS": null_p95,
+        "safeSinkNullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+    }
+    report = [
+        "# MTS v19 Boundary Sink-Leverage Audit",
+        "",
+        "This mode tests the boundary-response amplitude only on the sink/suppression cases where that amplitude can actually change the field.",
+        "",
+        f"Verdict: `{verdict}`.",
+        "",
+        "## Sink Leverage Set",
+        "",
+        f"- Sink target count: `{len(sink_names)}`.",
+        f"- Sink targets: `{', '.join(sink_names)}`.",
+        "",
+        "## Best Sink-Amplitude Law",
+        "",
+        f"- Best law: `{best_law_spec['normalizationId']}`.",
+        f"- Response mode: `{best_law_spec.get('boundaryResponseMode')}`.",
+        f"- Sink target gain: `{fmt(best_law_metric['sinkTargetMeanGainKmS'])}` km/s.",
+        f"- Sink gain over memory-density core: `{fmt(sink_margin_over_core)}` km/s.",
+        f"- Sink margin over constant amplitude: `{fmt(sink_margin_over_constant)}` km/s.",
+        f"- Protected false releases: `{best_law_metric['protectedFalseReleaseCount']}`.",
+        f"- Protected active regression: `{fmt(best_law_metric['protectedActiveMaxRegressionKmS'])}` km/s.",
+        f"- Safe sink-null margin: `{fmt(null_margin)}` km/s.",
+        "",
+        "## Identifiability",
+        "",
+        f"- Unique train selection fraction: `{fmt(unique_train_fraction)}`.",
+        f"- Median tie count: `{fmt(median_tie_count)}`.",
+        f"- Max tie count: `{max_tie_count}`.",
+        f"- Selected modes under sink leave-one-out: `{json.dumps(selected_modes, sort_keys=True)}`.",
+        f"- Best-mode selected fraction: `{fmt(selected_best_mode_fraction)}`.",
+        "",
+        "## Physical Reading",
+        "",
+        "If this mode still cannot identify a state amplitude, the present four sink cases are not enough to derive the response coefficient. The theory bridge can keep a boundary response/cap operator, but the coefficient must remain an unresolved field parameter until more amplitude-leverage cases or a stronger physical variable are available.",
+        "",
+        "## Guardrails",
+        "",
+        "- No locked v18/browser law changed.",
+        "- No galaxy names, residuals, raw RMSE, NFW/MOND parameters, or weak/systematics fitting enter the formula.",
+        "",
+        verdict,
+    ]
+    write_csv(out_dir / f"{prefix}_scores.csv", score_rows)
+    write_csv(out_dir / f"{prefix}_sink_case_ledger.csv", sink_case_rows)
+    write_csv(out_dir / f"{prefix}_leave_one_out_ties.csv", loo_rows)
+    write_csv(out_dir / f"{prefix}_null_controls.csv", null_rows)
+    (out_dir / f"{prefix}_formula.json").write_text(json.dumps(json_clean(formula), indent=2, sort_keys=True), encoding="utf-8")
+    (out_dir / f"{prefix}_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    capsule = {
+        "analysisName": "mts-v19-boundary-sink-leverage-v1",
+        "verdict": verdict,
+        "sinkTargetNames": sink_names,
+        "bestLawSpec": best_law_spec,
+        "bestLawMetric": best_law_metric,
+        "bestConstantSpec": best_constant_spec,
+        "bestConstantMetric": best_constant_metric,
+        "coreSinkGainKmS": core_sink_gain,
+        "sinkMarginOverConstantKmS": sink_margin_over_constant,
+        "sinkMarginOverCoreKmS": sink_margin_over_core,
+        "uniqueTrainSelectionFraction": unique_train_fraction,
+        "medianTieCount": median_tie_count,
+        "maxTieCount": max_tie_count,
+        "selectedModes": selected_modes,
+        "selectedBestModeFraction": selected_best_mode_fraction,
+        "safeSinkNullP95KmS": null_p95,
+        "safeSinkNullMarginKmS": null_margin,
+        "lockedV18Changed": False,
+        "browserChanged": False,
+        "outputFiles": [
+            f"{prefix}_report.md",
+            f"{prefix}_scores.csv",
+            f"{prefix}_sink_case_ledger.csv",
+            f"{prefix}_leave_one_out_ties.csv",
+            f"{prefix}_null_controls.csv",
+            f"{prefix}_formula.json",
+            f"{prefix}_capsule.json",
+        ],
+    }
+    (out_dir / f"{prefix}_capsule.json").write_text(json.dumps(json_clean(capsule), indent=2, sort_keys=True), encoding="utf-8")
+    return capsule
+
+
 def write_v19_source_state_gate_hardening_artifacts(out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = "mts_v19_source_state_gate_hardening"
@@ -123176,6 +123555,32 @@ def cmd_v19boundaryamplitudeidentifiability(args: argparse.Namespace) -> None:
     print(f"Wrote boundary-amplitude identifiability audit to {out_dir.resolve()}")
 
 
+def cmd_v19boundarysinkleverage(args: argparse.Namespace) -> None:
+    out_dir = DEFAULT_V19_BOUNDARY_SINK_LEVERAGE_OUT if args.out == str(DEFAULT_OUT) else Path(args.out)
+    capsule = write_v19_boundary_sink_leverage_artifacts(out_dir)
+    metric = capsule["bestLawMetric"]
+    spec = capsule["bestLawSpec"]
+    print("MTS v19 boundary sink-leverage audit")
+    print(f"verdict={capsule['verdict']}")
+    print(
+        "\t".join(
+            [
+                f"best={spec['normalizationId']}",
+                f"mode={spec['boundaryResponseMode']}",
+                f"sink_targets={len(capsule['sinkTargetNames'])}",
+                f"sink_gain={fmt(metric['sinkTargetMeanGainKmS'])}",
+                f"vs_constant={fmt(capsule['sinkMarginOverConstantKmS'])}",
+                f"vs_core={fmt(capsule['sinkMarginOverCoreKmS'])}",
+                f"unique_train={fmt(capsule['uniqueTrainSelectionFraction'])}",
+                f"max_tie={capsule['maxTieCount']}",
+                f"protected_false={metric['protectedFalseReleaseCount']}",
+                f"null_margin={fmt(capsule['safeSinkNullMarginKmS'])}",
+            ]
+        )
+    )
+    print(f"Wrote boundary sink-leverage audit to {out_dir.resolve()}")
+
+
 def cmd_list_candidates() -> None:
     print("candidate_id\tname\tkind")
     for candidate in candidate_registry():
@@ -123523,6 +123928,8 @@ def build_parser() -> argparse.ArgumentParser:
             "observedstatev19boundaryamplitudelaw",
             "v19boundaryamplitudeidentifiability",
             "observedstatev19boundaryamplitudeidentifiability",
+            "v19boundarysinkleverage",
+            "observedstatev19boundarysinkleverage",
             "v18ugc08699shelfmechanism",
             "observedstatev18ugc08699shelfmechanism",
             "v18compactbulgecoupling",
@@ -124046,6 +124453,8 @@ def main() -> None:
         cmd_v19boundaryamplitudelaw(args)
     elif args.mode in {"v19boundaryamplitudeidentifiability", "observedstatev19boundaryamplitudeidentifiability"}:
         cmd_v19boundaryamplitudeidentifiability(args)
+    elif args.mode in {"v19boundarysinkleverage", "observedstatev19boundarysinkleverage"}:
+        cmd_v19boundarysinkleverage(args)
     elif args.mode in {"v18ugc08699shelfmechanism", "observedstatev18ugc08699shelfmechanism"}:
         cmd_v18ugc08699shelfmechanism(args)
     elif args.mode in {"v18compactbulgecoupling", "observedstatev18compactbulgecoupling"}:
